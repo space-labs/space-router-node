@@ -7,6 +7,7 @@ server, then sends requests through the home-node and asserts on the result.
 import asyncio
 import functools
 import ssl
+from unittest.mock import patch
 
 import pytest
 
@@ -17,6 +18,13 @@ from app.tls import create_server_ssl_context, ensure_certificates
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _bypass_ssrf():
+    """Bypass SSRF protection for integration tests using loopback targets."""
+    with patch("app.proxy_handler._is_private_target", return_value=False):
+        yield
+
 
 def _client_ssl_context():
     """Return an SSL context that trusts self-signed certs (for test clients)."""

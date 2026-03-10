@@ -51,15 +51,6 @@ async def _start_home_node(settings):
 class TestSSRFProtection:
     """Verify that private/reserved IPs and dangerous ports are blocked."""
 
-    @pytest.fixture(autouse=True)
-    def _enable_ssrf_protection(self):
-        """Re-enable SSRF protection for these tests."""
-        import app.config
-        original = app.config._ALLOW_LOOPBACK_TARGETS
-        app.config._ALLOW_LOOPBACK_TARGETS = False
-        yield
-        app.config._ALLOW_LOOPBACK_TARGETS = original
-
     @pytest.mark.parametrize("host,port,expected", [
         # Loopback
         ("127.0.0.1", 80, True),
@@ -108,15 +99,6 @@ class TestSSRFProtection:
 
 class TestSSRFIntegration:
     """End-to-end: CONNECT/GET to private targets should return 403."""
-
-    @pytest.fixture(autouse=True)
-    def _enable_ssrf_protection(self):
-        """Re-enable SSRF protection for these tests."""
-        import app.config
-        original = app.config._ALLOW_LOOPBACK_TARGETS
-        app.config._ALLOW_LOOPBACK_TARGETS = False
-        yield
-        app.config._ALLOW_LOOPBACK_TARGETS = original
 
     @pytest.mark.asyncio
     async def test_connect_to_localhost_blocked(self, settings):

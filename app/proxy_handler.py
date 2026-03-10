@@ -51,15 +51,13 @@ _BLOCKED_PORTS = {22, 23, 25, 135, 136, 137, 138, 139, 445, 3306, 5432, 6379, 11
 
 def _is_private_target(host: str, port: int) -> bool:
     """Return True if the target host resolves to a private/reserved IP or a blocked port."""
-    # Testing bypass — never enable in production
-    from app.config import _ALLOW_LOOPBACK_TARGETS
-    if _ALLOW_LOOPBACK_TARGETS:
-        return False
-
     if port in _BLOCKED_PORTS:
         return True
     try:
         addr = ipaddress.ip_address(host)
+        # Handle IPv4-mapped IPv6 addresses (::ffff:192.168.1.1)
+        if addr.version == 6 and addr.ipv4_mapped:
+            addr = addr.ipv4_mapped
         return any(addr in net for net in _BLOCKED_NETWORKS)
     except ValueError:
         # hostname, not IP — DNS resolution happens at connect time
