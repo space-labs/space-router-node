@@ -52,7 +52,16 @@ server.serve_forever()
 " &
     MOCK_API_PID=$!
     log "Started mock coordination API on port ${MOCK_PORT} (PID $MOCK_API_PID)"
-    sleep 1
+
+    # Wait for the mock API to be ready (up to 10 seconds)
+    for i in $(seq 1 20); do
+        if curl -s -o /dev/null -w '' "http://127.0.0.1:${MOCK_PORT}/" 2>/dev/null; then
+            log "Mock API is ready"
+            return
+        fi
+        sleep 0.5
+    done
+    log "WARNING: Mock API may not be ready after 10 seconds"
 }
 
 stop_mock_api() {
@@ -67,6 +76,29 @@ cleanup() {
     stop_mock_api
 }
 trap cleanup EXIT
+
+# Wait for the node port to be fully released (up to 10 seconds)
+wait_for_port_free() {
+    log "Waiting for port $SR_NODE_PORT to be released..."
+    for i in $(seq 1 20); do
+        if command -v lsof &>/dev/null; then
+            if ! lsof -iTCP:"${SR_NODE_PORT}" -sTCP:LISTEN &>/dev/null; then
+                log "Port $SR_NODE_PORT is free"
+                return
+            fi
+        elif command -v ss &>/dev/null; then
+            if ! ss -tlnp 2>/dev/null | grep -q ":${SR_NODE_PORT}"; then
+                log "Port $SR_NODE_PORT is free"
+                return
+            fi
+        else
+            sleep 2
+            return
+        fi
+        sleep 0.5
+    done
+    log "WARNING: Port $SR_NODE_PORT may still be in use"
+}
 
 # ---------- Test 1: --version flag ----------
 test_version_flag() {
@@ -120,6 +152,9 @@ test_port_binding() {
     else
         fail "Binary did not bind to port $SR_NODE_PORT"
     fi
+
+    # Wait for port to be fully released before next test
+    wait_for_port_free
 }
 
 # ---------- Test 3: Clean shutdown via SIGTERM ----------

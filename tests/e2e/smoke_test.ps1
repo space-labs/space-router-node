@@ -56,7 +56,20 @@ server.serve_forever()
     $script:MockApiProcess = Start-Process -FilePath python -ArgumentList $tempFile -PassThru -NoNewWindow
     $env:SR_COORDINATION_API_URL = "http://127.0.0.1:$MockApiPort"
     Log "Started mock coordination API on port $MockApiPort (PID $($script:MockApiProcess.Id))"
-    Start-Sleep -Seconds 2
+
+    # Wait for the mock API to be ready (up to 10 seconds)
+    for ($i = 0; $i -lt 20; $i++) {
+        try {
+            $null = Invoke-WebRequest -Uri "http://127.0.0.1:$MockApiPort/" -Method GET -TimeoutSec 1 -ErrorAction SilentlyContinue
+            Log "Mock API is ready"
+            return
+        }
+        catch {
+            # Connection refused or other error — server not ready yet
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    Log "WARNING: Mock API may not be ready after 10 seconds"
 }
 
 function Stop-MockApi {
@@ -64,6 +77,28 @@ function Stop-MockApi {
         Stop-Process -Id $script:MockApiProcess.Id -Force -ErrorAction SilentlyContinue
         $script:MockApiProcess.WaitForExit(5000) | Out-Null
     }
+}
+
+# Wait for the node port to be fully released (up to 10 seconds)
+function Wait-PortFree {
+    $port = [int]$env:SR_NODE_PORT
+    Log "Waiting for port $port to be released..."
+    for ($i = 0; $i -lt 20; $i++) {
+        $inUse = $false
+        try {
+            $connection = Test-NetConnection -ComputerName 127.0.0.1 -Port $port -WarningAction SilentlyContinue -InformationLevel Quiet
+            $inUse = $connection
+        }
+        catch {
+            $inUse = $false
+        }
+        if (-not $inUse) {
+            Log "Port $port is free"
+            return
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    Log "WARNING: Port $port may still be in use"
 }
 
 # ---------- Test 1: --version flag ----------
@@ -121,6 +156,9 @@ function Test-PortBinding {
     else {
         Fail "Binary did not bind to port $($env:SR_NODE_PORT)"
     }
+
+    # Wait for port to be fully released before next test
+    Wait-PortFree
 }
 
 # ---------- Test 3: Clean shutdown ----------
