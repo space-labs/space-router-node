@@ -100,11 +100,29 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile "packaging/windows/WinSW-x64.exe"
           Write-Host "Downloaded WinSW ${winsw_version}"
 
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Retry choco install up to 3 times (Chocolatey CDN can be flaky)
+          $maxRetries = 3
+          for ($i = 1; $i -le $maxRetries; $i++) {
+              Write-Host "Installing NSIS (attempt $i/$maxRetries)..."
+              choco install nsis -y --no-progress 2>&1
+              if ($LASTEXITCODE -eq 0) { break }
+              if ($i -lt $maxRetries) {
+                  Write-Host "Retry in 15 seconds..."
+                  Start-Sleep -Seconds 15
+              } else {
+                  Write-Error "Failed to install NSIS after $maxRetries attempts"
+                  exit 1
+              }
+          }
+
       - name: Build Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install nsis -y --no-progress
           $env:PATH = "C:\Program Files (x86)\NSIS;$env:PATH"
 
           $version = "${{ steps.version.outputs.version }}"
