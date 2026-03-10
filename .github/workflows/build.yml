@@ -112,6 +112,73 @@ jobs:
             --version "${PKG_VERSION}" \
             --output "dist/${{ matrix.artifact }}.pkg"
 
+      # Build Windows NSIS installer with WinSW service wrapper
+      - name: Download WinSW
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $winsw_version = "3.0.0-alpha.11"
+          $url = "https://github.com/winsw/winsw/releases/download/v${winsw_version}/WinSW-x64.exe"
+          Invoke-WebRequest -Uri $url -OutFile "packaging/windows/WinSW-x64.exe"
+          Write-Host "Downloaded WinSW ${winsw_version}"
+
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $nsisPath = "C:\Program Files (x86)\NSIS\makensis.exe"
+
+          # Check if NSIS is already pre-installed on the runner
+          if (Test-Path $nsisPath) {
+              Write-Host "NSIS already installed at $nsisPath"
+              exit 0
+          }
+
+          # Retry choco install up to 3 times (Chocolatey CDN can be flaky)
+          $maxRetries = 3
+          for ($i = 1; $i -le $maxRetries; $i++) {
+              Write-Host "Installing NSIS (attempt $i/$maxRetries)..."
+              choco install nsis -y --no-progress 2>&1
+              # Verify makensis.exe actually exists (choco can return 0 with 0 packages on 503)
+              if (Test-Path $nsisPath) {
+                  Write-Host "NSIS installed successfully"
+                  break
+              }
+              if ($i -lt $maxRetries) {
+                  Write-Host "makensis.exe not found after install, retrying in 15 seconds..."
+                  Start-Sleep -Seconds 15
+              } else {
+                  Write-Error "Failed to install NSIS after $maxRetries attempts"
+                  exit 1
+              }
+          }
+
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\Program Files (x86)\NSIS;$env:PATH"
+
+          $version = "${{ steps.version.outputs.version }}"
+          # Strip leading 'v' for installer version
+          $pkg_version = $version -replace '^v', ''
+          # Extract numeric-only version for VIProductVersion (X.X.X.X format)
+          if ($pkg_version -match '^(\d+\.\d+\.\d+)') {
+              $numeric_version = "$($Matches[1]).0"
+          } else {
+              $numeric_version = "0.0.0.0"
+          }
+
+          makensis /DVERSION=$pkg_version `
+                   /DNUMERIC_VERSION=$numeric_version `
+                   /DBINARY="..\..\dist\${{ matrix.artifact }}.exe" `
+                   /DWINSW="WinSW-x64.exe" `
+                   packaging\windows\installer.nsi
+
+          Move-Item "packaging\windows\space-router-node-${pkg_version}-setup.exe" `
+                    "dist\${{ matrix.artifact }}-setup.exe"
+          Write-Host "Built installer: dist\${{ matrix.artifact }}-setup.exe"
+
       # Build Linux packages (.deb and .rpm) via nfpm
       - name: Build Linux packages
         if: runner.os == 'Linux'
@@ -137,6 +204,7 @@ jobs:
           path: |
             dist/${{ matrix.artifact }}
             dist/${{ matrix.artifact }}.exe
+            dist/${{ matrix.artifact }}-setup.exe
             dist/${{ matrix.artifact }}.deb
             dist/${{ matrix.artifact }}.rpm
             dist/${{ matrix.artifact }}.pkg
