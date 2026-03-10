@@ -23,6 +23,7 @@ from app.config import settings
 from app.proxy_handler import handle_client
 from app.registration import deregister_node, detect_public_ip, register_node
 from app.tls import create_server_ssl_context, ensure_certificates
+from app.version import __version__
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
@@ -152,6 +153,9 @@ async def _run(settings_override=None) -> None:  # noqa: ANN001
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-V"):
+        print(f"space-router-node {__version__}")
+        sys.exit(0)
     asyncio.run(_run())
 
 

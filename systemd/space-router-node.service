@@ -1,0 +1,37 @@
+[Unit]
+Description=Space Router Home Node
+Documentation=https://github.com/gluwa/space-router-node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=spacerouter
+Group=spacerouter
+WorkingDirectory=/opt/spacerouter
+ExecStart=/opt/spacerouter/space-router-node
+EnvironmentFile=-/etc/spacerouter/spacerouter.env
+
+# Restart on failure with increasing backoff
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# File descriptor limits (match launchd plist)
+LimitNOFILE=4096
+
+# Logging to journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=space-router-node
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/spacerouter
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

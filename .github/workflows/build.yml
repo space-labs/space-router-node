@@ -3,9 +3,13 @@ name: Build Home Node
 on:
   push:
     branches: [main]
+    tags: ["v*.*.*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.12"
 
 jobs:
   test:
@@ -14,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
@@ -40,15 +44,29 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
           cache-dependency-path: requirements.txt
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+          else
+            VERSION="v0.0.0-dev.${{ github.run_number }}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building version: ${VERSION}"
 
       - name: Install dependencies
         run: pip install -r requirements.txt pyinstaller
 
       - name: Build binary
         run: pyinstaller homenode.spec
+        env:
+          SR_BUILD_VERSION: ${{ steps.version.outputs.version }}
 
       - name: Rename artifact
         shell: bash
@@ -72,20 +90,42 @@ jobs:
           SR_PUBLIC_IP: 127.0.0.1
           SR_UPNP_ENABLED: "false"
 
+      # Build Linux packages (.deb and .rpm) via nfpm
+      - name: Build Linux packages
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # Install nfpm
+          curl -sfL https://install.goreleaser.com/github.com/goreleaser/nfpm.sh | sh -s -- -b /usr/local/bin
+
+          VERSION="${{ steps.version.outputs.version }}"
+          # Strip leading 'v' for package version
+          PKG_VERSION="${VERSION#v}"
+
+          # Build .deb
+          VERSION="${PKG_VERSION}" nfpm package --packager deb --target "dist/${{ matrix.artifact }}.deb"
+
+          # Build .rpm
+          VERSION="${PKG_VERSION}" nfpm package --packager rpm --target "dist/${{ matrix.artifact }}.rpm"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: |
             dist/${{ matrix.artifact }}
             dist/${{ matrix.artifact }}.exe
+            dist/${{ matrix.artifact }}.deb
+            dist/${{ matrix.artifact }}.rpm
 
   release:
     needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -93,8 +133,8 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.run_number }}
-          name: "Home Node Build #${{ github.run_number }}"
+          name: "Space Router Home Node ${{ github.ref_name }}"
           files: artifacts/**/*
           draft: false
-          prerelease: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true

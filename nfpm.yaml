@@ -1,0 +1,64 @@
+name: space-router-node
+arch: amd64
+platform: linux
+version: "${VERSION}"
+maintainer: "Gluwa <engineering@gluwa.com>"
+description: |
+  Space Router Home Node daemon.
+  Runs as a proxy exit point for the Space Router network,
+  forwarding AI agent requests from a residential IP address.
+vendor: "Gluwa Inc."
+homepage: "https://github.com/gluwa/space-router-node"
+license: "Proprietary"
+
+contents:
+  # Binary
+  - src: dist/space-router-node-linux-x64
+    dst: /opt/spacerouter/space-router-node
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Default environment config template
+  - src: packaging/spacerouter.env
+    dst: /opt/spacerouter/spacerouter.env.default
+    file_info:
+      mode: 0644
+
+  # systemd service unit
+  - src: systemd/space-router-node.service
+    dst: /lib/systemd/system/space-router-node.service
+    file_info:
+      mode: 0644
+
+  # Create certs directory
+  - dst: /opt/spacerouter/certs
+    type: dir
+    file_info:
+      mode: 0700
+      owner: spacerouter
+      group: spacerouter
+
+  # Create config directory
+  - dst: /etc/spacerouter
+    type: dir
+    file_info:
+      mode: 0755
+
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh
+
+overrides:
+  deb:
+    depends:
+      - libc6
+    recommends:
+      - miniupnpc
+  rpm:
+    depends:
+      - glibc
+    recommends:
+      - miniupnpc
