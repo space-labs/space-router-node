@@ -91,16 +91,13 @@ jobs:
           SR_UPNP_ENABLED: "false"
 
       # Build Linux packages (.deb and .rpm) via nfpm
-      - name: Install nfpm
-        if: runner.os == 'Linux'
-        uses: goreleaser/nfpm-action@v1
-        with:
-          install-only: true
-
       - name: Build Linux packages
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          # Install nfpm via go install
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+
           VERSION="${{ steps.version.outputs.version }}"
           # Strip leading 'v' for package version
           PKG_VERSION="${VERSION#v}"
