@@ -63,10 +63,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pyinstaller
 
+      - name: Freeze version into binary
+        shell: bash
+        run: |
+          echo "BUILD_VERSION = \"${{ steps.version.outputs.version }}\"" > app/_build_version.py
+
       - name: Build binary
         run: pyinstaller homenode.spec
-        env:
-          SR_BUILD_VERSION: ${{ steps.version.outputs.version }}
 
       - name: Rename artifact
         shell: bash
@@ -77,18 +80,25 @@ jobs:
             mv dist/space-router-node "dist/${{ matrix.artifact }}"
           fi
 
-      - name: Smoke test
+      - name: Smoke test (Unix)
+        if: runner.os != 'Windows'
         shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            timeout 5 "dist/${{ matrix.artifact }}.exe" || true
-          else
-            timeout 5 "dist/${{ matrix.artifact }}" || true
-          fi
+        run: bash tests/e2e/smoke_test.sh "dist/${{ matrix.artifact }}"
         env:
-          SR_COORDINATION_API_URL: http://localhost:9999
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
           SR_PUBLIC_IP: 127.0.0.1
           SR_UPNP_ENABLED: "false"
+          SR_NODE_PORT: "19090"
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\tests\e2e\smoke_test.ps1 -Binary "dist\${{ matrix.artifact }}.exe"
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+          SR_PUBLIC_IP: 127.0.0.1
+          SR_UPNP_ENABLED: "false"
+          SR_NODE_PORT: "19090"
 
       # Build Linux packages (.deb and .rpm) via nfpm
       - name: Build Linux packages

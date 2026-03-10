@@ -1,9 +1,14 @@
 """Version information for Space Router Home Node.
 
-The version is set at build time via the SR_VERSION environment variable.
-Defaults to 'dev' for local development.
+At build time, the CI writes _build_version.py with the frozen version.
+For local development, falls back to the SR_BUILD_VERSION env var or 'dev'.
 """
 
 import os
 
-__version__ = os.environ.get("SR_BUILD_VERSION", "dev")
+try:
+    from app._build_version import BUILD_VERSION
+
+    __version__: str = BUILD_VERSION
+except ImportError:
+    __version__ = os.environ.get("SR_BUILD_VERSION", "dev")

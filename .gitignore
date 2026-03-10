@@ -9,6 +9,9 @@ build/
 # PyInstaller
 *.spec.bak
 
+# Build-time generated version file
+app/_build_version.py
+
 # Virtual environments
 .venv/
 venv/
