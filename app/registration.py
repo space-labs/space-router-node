@@ -52,6 +52,7 @@ async def register_node(
     public_ip: str,
     *,
     upnp_endpoint: tuple[str, int] | None = None,
+    wallet_address: str | None = None,
 ) -> tuple[str, str | None]:
     """Register this node with the Coordination API.
 
@@ -77,6 +78,8 @@ async def register_node(
         "connectivity_type": connectivity_type,
         "node_type": settings.NODE_TYPE,
     }
+    if wallet_address:
+        payload["wallet_address"] = wallet_address
     if settings.NODE_REGION:
         payload["region"] = settings.NODE_REGION
     if settings.NODE_LABEL:

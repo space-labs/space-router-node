@@ -11,7 +11,8 @@ AI Agent → Proxy Gateway (cloud) → Home Node (your machine) → Target websi
 ```
 
 The Home Node:
-- Registers with the Coordination API on startup
+- Auto-generates an EVM wallet key on first run for ownership verification
+- Registers with the Coordination API on startup (proving ownership via cryptographic signature)
 - Accepts TLS-encrypted proxy connections from the Proxy Gateway
 - Forwards traffic to target servers from your residential IP
 - Auto-configures your router via UPnP for port forwarding
@@ -43,6 +44,8 @@ python -m app.main
 | `SR_PUBLIC_IP` | auto-detected | Public IP (auto-detected if empty) |
 | `SR_UPNP_ENABLED` | `true` | Enable UPnP port forwarding |
 | `SR_UPNP_LEASE_DURATION` | `3600` | UPnP lease duration in seconds |
+| `SR_WALLET_KEY_PATH` | `certs/wallet.key` | EVM wallet key path (auto-generated) |
+| `SR_WALLET_PRIVATE_KEY` | `""` | Hex-encoded private key override (e.g. from MetaMask) |
 | `SR_TLS_CERT_PATH` | `certs/node.crt` | TLS certificate path (auto-generated) |
 | `SR_TLS_KEY_PATH` | `certs/node.key` | TLS key path (auto-generated) |
 | `SR_BUFFER_SIZE` | `65536` | TCP relay buffer size |

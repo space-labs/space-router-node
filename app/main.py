@@ -3,12 +3,14 @@
 Lifecycle:
   1. If UPnP enabled, try UPnP/NAT-PMP port mapping
   2. Detect public IP (or use configured value)
-  3. Register with Coordination API
-  4. Start asyncio TCP server + optional UPnP lease renewal
-  5. Wait for SIGTERM / SIGINT
-  6. Cancel UPnP renewal + remove port mapping
-  7. Deregister node (best-effort)
-  8. Shutdown
+  3. Load/generate wallet key + derive address
+  4. Start TLS server (must be running before registration for challenge probe)
+  5. Register with Coordination API (triggers challenge probe)
+  6. Upgrade to mTLS if enabled + start UPnP renewal
+  7. Wait for SIGTERM / SIGINT
+  8. Cancel UPnP renewal + remove port mapping
+  9. Deregister node (best-effort)
+  10. Shutdown
 """
 
 import asyncio
@@ -25,6 +27,7 @@ from app.proxy_handler import handle_client
 from app.registration import deregister_node, detect_public_ip, register_node, save_gateway_ca_cert
 from app.tls import create_mtls_server_ssl_context, create_server_ssl_context, ensure_certificates
 from app.version import __version__
+from app.wallet import ensure_wallet_key, private_key_to_address
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
@@ -73,7 +76,7 @@ async def _run(settings_override=None) -> None:  # noqa: ANN001
                     "falling back to direct public IP mode"
                 )
 
-        # 2. Detect public IP (always needed for metadata)
+        # 2. Detect public IP (always needed for metadata + challenge signing)
         if s.PUBLIC_IP:
             public_ip = s.PUBLIC_IP
             logger.info("Using configured public IP: %s", public_ip)
@@ -83,43 +86,68 @@ async def _run(settings_override=None) -> None:  # noqa: ANN001
             except RuntimeError:
                 logger.error("Cannot detect public IP — aborting")
                 sys.exit(1)
+        # Store back so proxy handler can access it for challenge signing
+        s.PUBLIC_IP = public_ip
 
-        # 3. Register with Coordination API
+        # 3. Load/generate wallet key + derive address
+        if s.WALLET_PRIVATE_KEY:
+            logger.info("Using wallet key from SR_WALLET_PRIVATE_KEY env var")
+        else:
+            s.WALLET_PRIVATE_KEY = ensure_wallet_key(s.WALLET_KEY_PATH)
+        wallet_address = private_key_to_address(s.WALLET_PRIVATE_KEY)
+        logger.info("Wallet address: %s", wallet_address)
+
+        # 4. Start TLS server (must be running before registration so the
+        #    Coordination API challenge probe can reach us)
+        ensure_certificates(s.TLS_CERT_PATH, s.TLS_KEY_PATH)
+        ssl_ctx = create_server_ssl_context(s.TLS_CERT_PATH, s.TLS_KEY_PATH)
+
+        handler = functools.partial(handle_client, settings=s)
+        server = await asyncio.start_server(
+            handler, host=s.BIND_ADDRESS, port=s.NODE_PORT, ssl=ssl_ctx,
+        )
+        logger.info("Home Node listening on port %d (pre-registration)", s.NODE_PORT)
+
+        # 5. Register with Coordination API (triggers challenge probe)
         try:
             node_id, gateway_ca_cert = await register_node(
-                http_client, s, public_ip, upnp_endpoint=upnp_endpoint,
+                http_client, s, public_ip,
+                upnp_endpoint=upnp_endpoint,
+                wallet_address=wallet_address,
             )
         except Exception:
             logger.exception("Failed to register with Coordination API — aborting")
+            server.close()
+            await server.wait_closed()
             sys.exit(1)
 
-        # 3b. Save gateway CA cert if provided
+        # 5b. Save gateway CA cert if provided
         if gateway_ca_cert:
             save_gateway_ca_cert(gateway_ca_cert, s.GATEWAY_CA_CERT_PATH)
 
-        # 4. Start TLS server
-        ensure_certificates(s.TLS_CERT_PATH, s.TLS_KEY_PATH)
-
+        # 6. Upgrade to mTLS if enabled (restart server with client-cert verification)
         if s.MTLS_ENABLED:
             if not os.path.isfile(s.GATEWAY_CA_CERT_PATH):
                 logger.error(
                     "mTLS enabled but gateway CA cert not found at %s — aborting",
                     s.GATEWAY_CA_CERT_PATH,
                 )
+                server.close()
+                await server.wait_closed()
                 sys.exit(1)
+            logger.info("Upgrading to mTLS…")
+            server.close()
+            await server.wait_closed()
             ssl_ctx = create_mtls_server_ssl_context(
                 s.TLS_CERT_PATH, s.TLS_KEY_PATH, s.GATEWAY_CA_CERT_PATH,
             )
-        else:
-            ssl_ctx = create_server_ssl_context(s.TLS_CERT_PATH, s.TLS_KEY_PATH)
+            server = await asyncio.start_server(
+                handler, host=s.BIND_ADDRESS, port=s.NODE_PORT, ssl=ssl_ctx,
+            )
 
-        handler = functools.partial(handle_client, settings=s)
-        server = await asyncio.start_server(
-            handler, host=s.BIND_ADDRESS, port=s.NODE_PORT, ssl=ssl_ctx,
-        )
         logger.info(
-            "Home Node listening on port %d with TLS (node_id=%s, upnp=%s)",
-            s.NODE_PORT, node_id,
+            "Home Node ready (node_id=%s, wallet=%s, upnp=%s)",
+            node_id, wallet_address,
             f"{upnp_endpoint[0]}:{upnp_endpoint[1]}" if upnp_endpoint else "disabled",
         )
 
@@ -147,11 +175,11 @@ async def _run(settings_override=None) -> None:  # noqa: ANN001
         finally:
             logger.info("Shutting down…")
 
-            # 5. Stop accepting new connections
+            # 7. Stop accepting new connections
             server.close()
             await server.wait_closed()
 
-            # 6. Cancel UPnP renewal + remove mapping
+            # 8. Cancel UPnP renewal + remove mapping
             if renewal_task is not None:
                 renewal_task.cancel()
                 try:
@@ -163,7 +191,7 @@ async def _run(settings_override=None) -> None:  # noqa: ANN001
                 from app.upnp import remove_upnp_mapping
                 await remove_upnp_mapping(upnp_endpoint[1])
 
-            # 7. Deregister (best-effort)
+            # 9. Deregister (best-effort)
             await deregister_node(http_client, s, node_id)
 
     logger.info("Home Node shut down cleanly")

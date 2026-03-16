@@ -10,11 +10,16 @@ from app.config import Settings
 from app.tls import ensure_certificates
 
 
+# Well-known test private key (from Ethereum dev docs — DO NOT use in production)
+TEST_WALLET_KEY = "4c0883a69102937d6231471b5dbb6204fe512961708279f40aad9b5e2ec3699d"
+
+
 @pytest.fixture
 def settings(tmp_path):
     cert_path = str(tmp_path / "node.crt")
     key_path = str(tmp_path / "node.key")
     gateway_ca_path = str(tmp_path / "gateway-ca.crt")
+    wallet_key_path = str(tmp_path / "wallet.key")
     return Settings(
         NODE_PORT=0,  # OS picks a free port
         COORDINATION_API_URL="http://localhost:8000",
@@ -30,6 +35,8 @@ def settings(tmp_path):
         TLS_KEY_PATH=key_path,
         MTLS_ENABLED=False,
         GATEWAY_CA_CERT_PATH=gateway_ca_path,
+        WALLET_KEY_PATH=wallet_key_path,
+        WALLET_PRIVATE_KEY=TEST_WALLET_KEY,
     )
 
 

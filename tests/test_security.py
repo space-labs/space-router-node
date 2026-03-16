@@ -339,16 +339,20 @@ class TestErrorSanitization:
 # ---------------------------------------------------------------------------
 
 class TestEndpointChallengeProbe:
-    """Verify that the Coordination API challenge probe receives a valid HTTP
-    response.  During ``POST /nodes``, the API sends
-    ``CONNECT challenge.spacerouter.internal:443`` and accepts any HTTP response
-    (200, 407, 502, etc.) as proof that a proxy is running.
+    """Verify that the Coordination API challenge probe is intercepted and
+    answered with a cryptographic ownership signature.
+
+    During ``POST /nodes``, the API sends
+    ``CONNECT challenge.spacerouter.internal:443``.  The node returns 200 OK
+    with an ``X-SpaceRouter-Signature`` header containing an EIP-191 signature
+    of the node's public IP.
     """
 
     @pytest.mark.asyncio
-    async def test_challenge_connect_returns_502(self, settings):
-        """CONNECT to a non-routable challenge domain must return 502, not a
-        silent connection drop."""
+    async def test_challenge_returns_200_with_signature(self, settings):
+        """Challenge probe must return 200 with a valid signature header."""
+        from app.wallet import private_key_to_address, verify_challenge
+
         home, home_port = await _start_home_node(settings)
         try:
             reader, writer = await asyncio.open_connection(
@@ -364,9 +368,19 @@ class TestEndpointChallengeProbe:
             resp = await asyncio.wait_for(reader.read(4096), timeout=15.0)
             resp_text = resp.decode("latin-1")
 
-            # Must be a valid HTTP response (not empty / not a silent drop)
-            assert resp_text.startswith("HTTP/1.1"), "Expected valid HTTP response line"
-            assert "502" in resp_text, "DNS failure should produce 502 Bad Gateway"
+            assert resp_text.startswith("HTTP/1.1 200"), "Expected 200 OK"
+            assert "X-SpaceRouter-Signature:" in resp_text
+
+            # Extract and verify the signature
+            for line in resp_text.split("\r\n"):
+                if line.startswith("X-SpaceRouter-Signature:"):
+                    sig_hex = line.split(":", 1)[1].strip()
+                    break
+            else:
+                pytest.fail("X-SpaceRouter-Signature header not found")
+
+            address = private_key_to_address(settings.WALLET_PRIVATE_KEY)
+            assert verify_challenge(sig_hex, settings.PUBLIC_IP, address)
 
             writer.close()
             await writer.wait_closed()
@@ -376,8 +390,7 @@ class TestEndpointChallengeProbe:
 
     @pytest.mark.asyncio
     async def test_challenge_domain_not_blocked_by_ssrf(self, settings):
-        """The challenge domain must not be caught by SSRF static checks
-        (it is not .local, not localhost, and port 443 is allowed)."""
+        """The challenge domain must not be caught by SSRF static checks."""
         home, home_port = await _start_home_node(settings)
         try:
             reader, writer = await asyncio.open_connection(
@@ -393,11 +406,37 @@ class TestEndpointChallengeProbe:
             resp = await asyncio.wait_for(reader.read(4096), timeout=15.0)
             resp_text = resp.decode("latin-1")
 
-            # Must NOT be 403 (SSRF block) — should be 502 (DNS failure)
             assert "403" not in resp_text, "Challenge domain must not be SSRF-blocked"
+            assert "200" in resp_text, "Challenge should return 200 OK"
 
             writer.close()
             await writer.wait_closed()
+        finally:
+            home.close()
+            await home.wait_closed()
+
+    @pytest.mark.asyncio
+    async def test_challenge_does_not_hit_dns(self, settings):
+        """Challenge domain must be intercepted before DNS resolution."""
+        home, home_port = await _start_home_node(settings)
+        try:
+            with patch("app.proxy_handler._resolve_and_connect", side_effect=AssertionError("DNS should not be called")):
+                reader, writer = await asyncio.open_connection(
+                    "127.0.0.1", home_port, ssl=_client_ssl_context(),
+                )
+                writer.write(
+                    b"CONNECT challenge.spacerouter.internal:443 HTTP/1.1\r\n"
+                    b"Host: challenge.spacerouter.internal:443\r\n"
+                    b"\r\n"
+                )
+                await writer.drain()
+
+                resp = await asyncio.wait_for(reader.read(4096), timeout=15.0)
+                resp_text = resp.decode("latin-1")
+                assert "200" in resp_text
+
+                writer.close()
+                await writer.wait_closed()
         finally:
             home.close()
             await home.wait_closed()

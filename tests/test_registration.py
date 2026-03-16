@@ -219,6 +219,54 @@ class TestRegisterNode:
 
     @pytest.mark.asyncio
     @respx.mock
+    async def test_register_sends_wallet_address(self, reg_settings):
+        """When wallet_address is provided, it should appear in the POST payload."""
+        respx.post("http://coordination:8000/nodes").mock(
+            return_value=Response(201, json={
+                "id": "node-wallet-1",
+                "endpoint_url": "https://1.2.3.4:9090",
+                "node_type": "residential",
+                "status": "online",
+                "health_score": 1.0,
+                "created_at": "2026-01-01T00:00:00Z",
+            })
+        )
+
+        import httpx
+        async with httpx.AsyncClient() as client:
+            node_id, _ = await register_node(
+                client, reg_settings, "1.2.3.4",
+                wallet_address="0x2c7536E3605D9C16a7a3D7b1898e529396a65c23",
+            )
+
+        body = json.loads(respx.calls[0].request.content)
+        assert body["wallet_address"] == "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23"
+        assert node_id == "node-wallet-1"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_register_without_wallet_address(self, reg_settings):
+        """When wallet_address is not provided, it should be absent from the payload."""
+        respx.post("http://coordination:8000/nodes").mock(
+            return_value=Response(201, json={
+                "id": "node-no-wallet",
+                "endpoint_url": "https://1.2.3.4:9090",
+                "node_type": "residential",
+                "status": "online",
+                "health_score": 1.0,
+                "created_at": "2026-01-01T00:00:00Z",
+            })
+        )
+
+        import httpx
+        async with httpx.AsyncClient() as client:
+            await register_node(client, reg_settings, "1.2.3.4")
+
+        body = json.loads(respx.calls[0].request.content)
+        assert "wallet_address" not in body
+
+    @pytest.mark.asyncio
+    @respx.mock
     async def test_register_payload_excludes_server_only_fields(self, reg_settings):
         """ip_type, ip_region, as_type must NOT be sent — they are server-computed."""
         respx.post("http://coordination:8000/nodes").mock(

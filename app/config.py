@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     TLS_CERT_PATH: str = "certs/node.crt"
     TLS_KEY_PATH: str = "certs/node.key"
 
+    # Wallet — EVM key for ownership verification during challenge probe
+    WALLET_KEY_PATH: str = "certs/wallet.key"
+    WALLET_PRIVATE_KEY: str = ""  # Hex override; auto-generated if empty
+
     # mTLS — Gateway authentication
     MTLS_ENABLED: bool = False
     GATEWAY_CA_CERT_PATH: str = "certs/gateway-ca.crt"

@@ -133,6 +133,8 @@ async def _resolve_and_connect(
 # Shared protocol utilities (mirrored from proxy-gateway/app/proxy.py)
 # ---------------------------------------------------------------------------
 
+CHALLENGE_DOMAIN = "challenge.spacerouter.internal"
+
 SPACEROUTER_HEADER_PREFIX = "x-spacerouter-"
 
 
@@ -350,6 +352,40 @@ def _strip_spacerouter_headers(headers: dict[str, str]) -> dict[str, str]:
 # CONNECT handler — tunnel to target
 # ---------------------------------------------------------------------------
 
+async def _handle_challenge_probe(
+    client_writer: asyncio.StreamWriter,
+    settings: Settings,
+    request_id: str | None = None,
+) -> None:
+    """Respond to the Coordination API challenge probe with a cryptographic
+    ownership signature.
+
+    Signs the node's public IP with the configured EVM private key and returns
+    the signature in the ``X-SpaceRouter-Signature`` header.
+    """
+    from app.wallet import sign_challenge
+
+    signature = sign_challenge(settings.WALLET_PRIVATE_KEY, settings.PUBLIC_IP)
+
+    extra = ""
+    if request_id:
+        extra = f"X-SpaceRouter-Request-Id: {request_id}\r\n"
+
+    response = (
+        f"HTTP/1.1 200 OK\r\n"
+        f"X-SpaceRouter-Signature: {signature}\r\n"
+        f"{extra}"
+        f"Content-Length: 0\r\n"
+        f"Connection: close\r\n"
+        f"\r\n"
+    ).encode()
+    client_writer.write(response)
+    await client_writer.drain()
+
+    rid_tag = f" [request_id={request_id}]" if request_id else ""
+    logger.info("Challenge probe answered with ownership signature%s", rid_tag)
+
+
 async def handle_connect(
     client_reader: asyncio.StreamReader,
     client_writer: asyncio.StreamWriter,
@@ -361,12 +397,13 @@ async def handle_connect(
     """Open a TCP connection to *target_host:target_port*, reply 200, then
     relay bytes bidirectionally between the client (Proxy Gateway) and the
     target server.
-
-    Note: The Coordination API sends ``CONNECT challenge.spacerouter.internal:443``
-    during registration to verify the proxy is reachable.  DNS failure returns
-    502 Bad Gateway, which satisfies the challenge (any valid HTTP response is accepted).
     """
     rid_tag = f" [request_id={request_id}]" if request_id else ""
+
+    # Challenge probe interception — sign the node's IP as proof of ownership
+    if target_host == CHALLENGE_DOMAIN:
+        await _handle_challenge_probe(client_writer, settings, request_id)
+        return
 
     # SSRF protection — block private/reserved targets (static check)
     if _is_private_target(target_host, target_port):
