@@ -36,6 +36,9 @@ import httpx
 
 MAX_REGISTRATION_WAIT = 60  # seconds
 POLL_INTERVAL = 5  # seconds
+PROXY_RETRIES = 4  # number of proxy relay attempts
+PROXY_RETRY_DELAY = 10  # seconds between proxy relay retries
+GATEWAY_PROPAGATION_DELAY = 15  # seconds to wait after registration for gateway to discover node
 
 # ---------------------------------------------------------------------------
 # Test bookkeeping
@@ -131,42 +134,50 @@ def check_http_proxy_relay(cfg, node_id):
     """Send an HTTP request through the gateway's HTTP proxy."""
     api_key_encoded = quote(cfg["api_key"], safe="")
 
-    # Try HTTPS proxy (gateway terminates TLS on port 8080)
+    # Gateway terminates TLS on port 8080
     proxy_url = f"https://{api_key_encoded}:@{cfg['gw_host']}:{cfg['gw_http_port']}"
     target_url = "https://httpbin.org/ip"
     log(f"Testing HTTP proxy relay via https://{cfg['gw_host']}:{cfg['gw_http_port']}...")
     log(f"Target URL: {target_url}")
 
-    try:
-        with httpx.Client(proxy=proxy_url, verify=False, timeout=30.0) as client:
-            resp = client.get(target_url)
+    last_error = None
+    for attempt in range(1, PROXY_RETRIES + 1):
+        try:
+            with httpx.Client(proxy=proxy_url, verify=False, timeout=30.0) as client:
+                resp = client.get(target_url)
 
-        log(f"Response status: {resp.status_code}")
-        log(f"Response headers: {dict(resp.headers)}")
-        if resp.status_code != 200:
+            log(f"Attempt {attempt}: status={resp.status_code}")
+            if resp.status_code == 200:
+                exit_ip = resp.json().get("origin", "")
+                routed_node = resp.headers.get("x-spacerouter-node", "")
+                request_id = resp.headers.get("x-spacerouter-request-id", "")
+
+                log(f"Exit IP: {exit_ip}")
+                log(f"Routed via node: {routed_node}")
+                if request_id:
+                    log(f"Request ID: {request_id}")
+
+                if node_id and routed_node == node_id:
+                    pass_("HTTP proxy relay succeeded (routed through staging node)")
+                elif cfg["node_ip"] in exit_ip:
+                    pass_("HTTP proxy relay succeeded (exit IP matches staging node)")
+                else:
+                    pass_("HTTP proxy relay succeeded (gateway routed request)")
+                return
+
+            log(f"Response headers: {dict(resp.headers)}")
             log(f"Response body: {resp.text[:500]}")
-            fail_(f"HTTP proxy returned status {resp.status_code}")
-            return
+            last_error = f"status {resp.status_code}"
 
-        exit_ip = resp.json().get("origin", "")
-        routed_node = resp.headers.get("x-spacerouter-node", "")
-        request_id = resp.headers.get("x-spacerouter-request-id", "")
+        except Exception as e:
+            log(f"Attempt {attempt} failed: {e}")
+            last_error = str(e)
 
-        log(f"Exit IP: {exit_ip}")
-        log(f"Routed via node: {routed_node}")
-        if request_id:
-            log(f"Request ID: {request_id}")
+        if attempt < PROXY_RETRIES:
+            log(f"Retrying in {PROXY_RETRY_DELAY}s...")
+            time.sleep(PROXY_RETRY_DELAY)
 
-        if node_id and routed_node == node_id:
-            pass_("HTTP proxy relay succeeded (routed through staging node)")
-        elif cfg["node_ip"] in exit_ip:
-            pass_("HTTP proxy relay succeeded (exit IP matches staging node)")
-        else:
-            pass_("HTTP proxy relay succeeded (gateway routed request)")
-
-    except Exception as e:
-        fail_(f"HTTP proxy relay failed: {e}")
-        traceback.print_exc()
+    fail_(f"HTTP proxy relay failed after {PROXY_RETRIES} attempts: {last_error}")
 
 
 # ---------------------------------------------------------------------------
@@ -236,38 +247,46 @@ def check_socks5_proxy_relay(cfg, node_id):
     """Send an HTTP request through the gateway's SOCKS5 proxy."""
     log(f"Testing SOCKS5 proxy relay via {cfg['gw_host']}:{cfg['gw_socks5_port']}...")
 
-    try:
-        raw_resp = _socks5_over_tls_request(cfg, "httpbin.org", 80)
-        log(f"Raw response (first 300 chars): {raw_resp[:300]}")
+    last_error = None
+    for attempt in range(1, PROXY_RETRIES + 1):
+        try:
+            raw_resp = _socks5_over_tls_request(cfg, "httpbin.org", 80)
+            log(f"Attempt {attempt}: raw response (first 300 chars): {raw_resp[:300]}")
 
-        # Parse status line
-        status_line = raw_resp.split("\r\n", 1)[0]
-        status_code = int(status_line.split(" ", 2)[1])
+            # Parse status line
+            status_line = raw_resp.split("\r\n", 1)[0]
+            status_code = int(status_line.split(" ", 2)[1])
 
-        if status_code != 200:
-            fail_(f"SOCKS5 proxy returned status {status_code}")
-            return
+            if status_code == 200:
+                # Extract JSON body
+                body = raw_resp.split("\r\n\r\n", 1)[-1]
+                if "{" in body:
+                    import json
+                    json_str = body[body.index("{"):body.rindex("}") + 1]
+                    exit_ip = json.loads(json_str).get("origin", "")
+                else:
+                    exit_ip = ""
 
-        # Extract JSON body
-        body = raw_resp.split("\r\n\r\n", 1)[-1]
-        # Handle chunked encoding — take the JSON part
-        if "{" in body:
-            import json
-            json_str = body[body.index("{"):body.rindex("}") + 1]
-            exit_ip = json.loads(json_str).get("origin", "")
-        else:
-            exit_ip = ""
+                log(f"Exit IP: {exit_ip}")
 
-        log(f"Exit IP: {exit_ip}")
+                if cfg["node_ip"] in exit_ip:
+                    pass_("SOCKS5 proxy relay succeeded (exit IP matches staging node)")
+                else:
+                    pass_("SOCKS5 proxy relay succeeded (gateway routed request)")
+                return
 
-        if cfg["node_ip"] in exit_ip:
-            pass_("SOCKS5 proxy relay succeeded (exit IP matches staging node)")
-        else:
-            pass_("SOCKS5 proxy relay succeeded (gateway routed request)")
+            last_error = f"status {status_code}"
+            log(f"Attempt {attempt}: SOCKS5 proxy returned status {status_code}")
 
-    except Exception as e:
-        fail_(f"SOCKS5 proxy relay failed: {e}")
-        traceback.print_exc()
+        except Exception as e:
+            log(f"Attempt {attempt} failed: {e}")
+            last_error = str(e)
+
+        if attempt < PROXY_RETRIES:
+            log(f"Retrying in {PROXY_RETRY_DELAY}s...")
+            time.sleep(PROXY_RETRY_DELAY)
+
+    fail_(f"SOCKS5 proxy relay failed after {PROXY_RETRIES} attempts: {last_error}")
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +313,11 @@ if __name__ == "__main__":
 
     node_id = check_node_registered(cfg)
     check_direct_tls_handshake(cfg)
+
+    # Wait for the gateway to discover the newly registered node
+    log(f"Waiting {GATEWAY_PROPAGATION_DELAY}s for gateway to discover new node...")
+    time.sleep(GATEWAY_PROPAGATION_DELAY)
+
     check_http_proxy_relay(cfg, node_id)
     check_socks5_proxy_relay(cfg, node_id)
 
