@@ -1,8 +1,8 @@
-# Space Router Home Node
+# SpaceRouter Home Node
 
-A daemon that runs on residential machines and acts as a proxy exit point for the [Space Router](https://github.com/gluwa/space-router) network.
+A daemon that runs on residential machines and acts as a proxy exit point for the [SpaceRouter](https://spacerouter.org) network.
 
-Traffic from AI agents flows through the Space Router Proxy Gateway to this Home Node, which forwards requests from a residential IP address.
+Traffic from AI agents flows through the SpaceRouter Proxy Gateway to this Home Node, which forwards requests from a residential IP address.
 
 ## How it works
 
