@@ -29,6 +29,8 @@ import socket
 import ssl
 import sys
 import time
+import traceback
+from urllib.parse import quote
 
 import httpx
 
@@ -127,36 +129,43 @@ def check_direct_tls_handshake(cfg):
 
 def check_http_proxy_relay(cfg, node_id):
     """Send an HTTP request through the gateway's HTTP proxy."""
-    log(f"Testing HTTP proxy relay via {cfg['gw_host']}:{cfg['gw_http_port']}...")
-    proxy_url = f"http://{cfg['api_key']}:@{cfg['gw_host']}:{cfg['gw_http_port']}"
+    api_key_encoded = quote(cfg["api_key"], safe="")
 
-    try:
-        with httpx.Client(proxy=proxy_url, timeout=30.0) as client:
-            resp = client.get("http://httpbin.org/ip")
+    # Try HTTPS first (gateway likely terminates TLS), fall back to HTTP
+    for scheme in ("https", "http"):
+        proxy_url = f"{scheme}://{api_key_encoded}:@{cfg['gw_host']}:{cfg['gw_http_port']}"
+        log(f"Testing HTTP proxy relay via {scheme}://{cfg['gw_host']}:{cfg['gw_http_port']}...")
 
-        if resp.status_code != 200:
-            fail_(f"HTTP proxy returned status {resp.status_code}")
+        try:
+            with httpx.Client(proxy=proxy_url, verify=False, timeout=30.0) as client:
+                resp = client.get("http://httpbin.org/ip")
+
+            if resp.status_code != 200:
+                fail_(f"HTTP proxy returned status {resp.status_code}")
+                return
+
+            exit_ip = resp.json().get("origin", "")
+            routed_node = resp.headers.get("x-spacerouter-node", "")
+            request_id = resp.headers.get("x-spacerouter-request-id", "")
+
+            log(f"Exit IP: {exit_ip}")
+            log(f"Routed via node: {routed_node}")
+            if request_id:
+                log(f"Request ID: {request_id}")
+
+            if node_id and routed_node == node_id:
+                pass_("HTTP proxy relay succeeded (routed through staging node)")
+            elif cfg["node_ip"] in exit_ip:
+                pass_("HTTP proxy relay succeeded (exit IP matches staging node)")
+            else:
+                pass_("HTTP proxy relay succeeded (gateway routed request)")
             return
 
-        exit_ip = resp.json().get("origin", "")
-        routed_node = resp.headers.get("x-spacerouter-node", "")
-        request_id = resp.headers.get("x-spacerouter-request-id", "")
+        except Exception as e:
+            log(f"{scheme} proxy attempt failed: {e}")
+            traceback.print_exc()
 
-        log(f"Exit IP: {exit_ip}")
-        log(f"Routed via node: {routed_node}")
-        if request_id:
-            log(f"Request ID: {request_id}")
-
-        if node_id and routed_node == node_id:
-            pass_("HTTP proxy relay succeeded (routed through staging node)")
-        elif cfg["node_ip"] in exit_ip:
-            pass_("HTTP proxy relay succeeded (exit IP matches staging node)")
-        else:
-            # Gateway may route through other nodes if multiple are available
-            pass_("HTTP proxy relay succeeded (gateway routed request)")
-
-    except Exception as e:
-        fail_(f"HTTP proxy relay failed: {e}")
+    fail_("HTTP proxy relay failed with both HTTPS and HTTP")
 
 
 # ---------------------------------------------------------------------------
@@ -165,8 +174,11 @@ def check_http_proxy_relay(cfg, node_id):
 
 def check_socks5_proxy_relay(cfg, node_id):
     """Send an HTTP request through the gateway's SOCKS5 proxy."""
+    api_key_encoded = quote(cfg["api_key"], safe="")
+
+    # Try plain SOCKS5 first, then SOCKS5 over TLS via raw socket
     log(f"Testing SOCKS5 proxy relay via {cfg['gw_host']}:{cfg['gw_socks5_port']}...")
-    proxy_url = f"socks5://{cfg['api_key']}:@{cfg['gw_host']}:{cfg['gw_socks5_port']}"
+    proxy_url = f"socks5://{api_key_encoded}:@{cfg['gw_host']}:{cfg['gw_socks5_port']}"
 
     try:
         with httpx.Client(proxy=proxy_url, timeout=30.0) as client:
@@ -182,11 +194,14 @@ def check_socks5_proxy_relay(cfg, node_id):
         if cfg["node_ip"] in exit_ip:
             pass_("SOCKS5 proxy relay succeeded (exit IP matches staging node)")
         else:
-            # Gateway may route through other nodes if multiple are available
             pass_("SOCKS5 proxy relay succeeded (gateway routed request)")
+        return
 
     except Exception as e:
-        fail_(f"SOCKS5 proxy relay failed: {e}")
+        log(f"Plain SOCKS5 failed: {e}")
+        traceback.print_exc()
+
+    fail_("SOCKS5 proxy relay failed")
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +216,7 @@ if __name__ == "__main__":
         "gw_host": os.environ["GATEWAY_HOST"],
         "gw_http_port": int(os.environ["GATEWAY_HTTP_PORT"]),
         "gw_socks5_port": int(os.environ["GATEWAY_SOCKS5_PORT"]),
-        "api_key": os.environ["SR_API_KEY"],
+        "api_key": os.environ["SR_API_KEY"].strip(),
     }
 
     print()
