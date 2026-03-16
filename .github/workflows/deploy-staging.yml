@@ -1,0 +1,121 @@
+name: Deploy Staging
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  DROPLET_IP: "159.223.44.4"
+  DROPLET_USER: "root"
+  CONTAINER_NAME: "space-router-node-staging"
+  NODE_PORT: "9090"
+  COORDINATION_API_URL: "https://coordination.spacerouter.org"
+  GATEWAY_HOST: "gateway.spacerouter.org"
+  GATEWAY_HTTP_PORT: "8080"
+  GATEWAY_SOCKS5_PORT: "1080"
+  NODE_LABEL: "staging-ci"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DROPLET_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ env.DROPLET_IP }} >> ~/.ssh/known_hosts
+
+      - name: Copy source to droplet
+        run: |
+          rsync -avz --delete \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            --exclude '.git' \
+            --exclude '__pycache__' \
+            --exclude '.env' \
+            --exclude 'certs/' \
+            --exclude '.pytest_cache' \
+            ./ ${{ env.DROPLET_USER }}@${{ env.DROPLET_IP }}:/opt/space-router-node/
+
+      - name: Build and deploy container
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ env.DROPLET_USER }}@${{ env.DROPLET_IP }} << 'EOF'
+            set -euo pipefail
+            cd /opt/space-router-node
+
+            echo "Building Docker image..."
+            docker build -t space-router-node:staging .
+
+            echo "Stopping old container..."
+            docker stop space-router-node-staging 2>/dev/null || true
+            docker rm space-router-node-staging 2>/dev/null || true
+
+            echo "Starting new container..."
+            docker run -d \
+              --name space-router-node-staging \
+              --restart unless-stopped \
+              -p 9090:9090 \
+              -e SR_COORDINATION_API_URL="https://coordination.spacerouter.org" \
+              -e SR_PUBLIC_IP="159.223.44.4" \
+              -e SR_UPNP_ENABLED="false" \
+              -e SR_NODE_LABEL="staging-ci" \
+              -e SR_NODE_PORT="9090" \
+              -e SR_LOG_LEVEL="DEBUG" \
+              space-router-node:staging
+
+            echo "Waiting for container to start..."
+            sleep 5
+
+            if ! docker ps --filter "name=space-router-node-staging" --filter "status=running" -q | grep -q .; then
+              echo "ERROR: Container failed to start"
+              docker logs space-router-node-staging
+              exit 1
+            fi
+
+            echo "Container started successfully"
+            docker logs space-router-node-staging
+          EOF
+
+  e2e-test:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: pip install "httpx[socks]>=0.27,<1"
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DROPLET_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ env.DROPLET_IP }} >> ~/.ssh/known_hosts
+
+      - name: Run E2E staging tests
+        run: python tests/e2e/staging_e2e_test.py
+        timeout-minutes: 5
+        env:
+          STAGING_NODE_IP: ${{ env.DROPLET_IP }}
+          STAGING_NODE_PORT: ${{ env.NODE_PORT }}
+          COORDINATION_API_URL: ${{ env.COORDINATION_API_URL }}
+          GATEWAY_HOST: ${{ env.GATEWAY_HOST }}
+          GATEWAY_HTTP_PORT: ${{ env.GATEWAY_HTTP_PORT }}
+          GATEWAY_SOCKS5_PORT: ${{ env.GATEWAY_SOCKS5_PORT }}
+          SR_API_KEY: ${{ secrets.SR_STAGING_API_KEY }}
+          NODE_LABEL: ${{ env.NODE_LABEL }}
+
+      - name: Collect container logs on failure
+        if: failure()
+        run: |
+          ssh -i ~/.ssh/deploy_key ${{ env.DROPLET_USER }}@${{ env.DROPLET_IP }} \
+            "docker logs --tail 200 space-router-node-staging 2>&1" || true
