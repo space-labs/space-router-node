@@ -112,17 +112,33 @@ async def _run(settings_override=None) -> None:  # noqa: ANN001
         logger.info("Home Node listening on port %d (pre-registration)", s.NODE_PORT)
 
         # 5. Register with Coordination API (triggers challenge probe)
-        try:
-            node_id, gateway_ca_cert = await register_node(
-                http_client, s, public_ip,
-                upnp_endpoint=upnp_endpoint,
-                wallet_address=wallet_address,
-            )
-        except Exception:
-            logger.exception("Failed to register with Coordination API — aborting")
-            server.close()
-            await server.wait_closed()
-            sys.exit(1)
+        #    Retry with exponential back-off so transient failures
+        #    (e.g. Coordination API rollout) don't kill the node.
+        max_retries = int(os.environ.get("SR_REGISTER_MAX_RETRIES", "5"))
+        backoff = 5  # seconds, doubles each retry
+        for attempt in range(1, max_retries + 1):
+            try:
+                node_id, gateway_ca_cert = await register_node(
+                    http_client, s, public_ip,
+                    upnp_endpoint=upnp_endpoint,
+                    wallet_address=wallet_address,
+                )
+                break  # success
+            except Exception:
+                if attempt == max_retries:
+                    logger.exception(
+                        "Failed to register after %d attempts — aborting",
+                        max_retries,
+                    )
+                    server.close()
+                    await server.wait_closed()
+                    sys.exit(1)
+                logger.warning(
+                    "Registration attempt %d/%d failed, retrying in %ds…",
+                    attempt, max_retries, backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
 
         # 5b. Save gateway CA cert if provided
         if gateway_ca_cert:
