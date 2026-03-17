@@ -357,23 +357,16 @@ async def _handle_challenge_probe(
     settings: Settings,
     request_id: str | None = None,
 ) -> None:
-    """Respond to the Coordination API challenge probe with a cryptographic
-    ownership signature.
-
-    Signs the node's public IP with the configured EVM private key and returns
-    the signature in the ``X-SpaceRouter-Signature`` header.
+    """Respond to the Coordination API challenge probe with the node's
+    wallet address in the ``X-SpaceRouter-Address`` header.
     """
-    from app.wallet import sign_challenge
-
-    signature = sign_challenge(settings.WALLET_PRIVATE_KEY, settings.PUBLIC_IP)
-
     extra = ""
     if request_id:
         extra = f"X-SpaceRouter-Request-Id: {request_id}\r\n"
 
     response = (
-        f"HTTP/1.1 200 OK\r\n"
-        f"X-SpaceRouter-Signature: {signature}\r\n"
+        f"HTTP/1.1 200 Connection Established\r\n"
+        f"X-SpaceRouter-Address: {settings.WALLET_ADDRESS}\r\n"
         f"{extra}"
         f"Content-Length: 0\r\n"
         f"Connection: close\r\n"
@@ -383,7 +376,7 @@ async def _handle_challenge_probe(
     await client_writer.drain()
 
     rid_tag = f" [request_id={request_id}]" if request_id else ""
-    logger.info("Challenge probe answered with ownership signature%s", rid_tag)
+    logger.info("Challenge probe answered with wallet address%s", rid_tag)
 
 
 async def handle_connect(

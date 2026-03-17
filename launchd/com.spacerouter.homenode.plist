@@ -24,11 +24,13 @@
         <!-- <key>SR_PUBLIC_IP</key> -->
         <!-- <string>1.2.3.4</string> -->
 
+        <!-- Required: EVM wallet address -->
+        <key>SR_WALLET_ADDRESS</key>
+        <string>0xYOUR_WALLET_ADDRESS_HERE</string>
+
         <!-- Optional: node metadata -->
         <key>SR_NODE_LABEL</key>
         <string>macbook-home</string>
-        <key>SR_NODE_REGION</key>
-        <string>us-west</string>
     </dict>
 
     <key>RunAtLoad</key>

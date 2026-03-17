@@ -340,19 +340,17 @@ class TestErrorSanitization:
 
 class TestEndpointChallengeProbe:
     """Verify that the Coordination API challenge probe is intercepted and
-    answered with a cryptographic ownership signature.
+    answered with the node's wallet address.
 
     During ``POST /nodes``, the API sends
-    ``CONNECT challenge.spacerouter.internal:443``.  The node returns 200 OK
-    with an ``X-SpaceRouter-Signature`` header containing an EIP-191 signature
-    of the node's public IP.
+    ``CONNECT challenge.spacerouter.internal:443``.  The node returns
+    ``200 Connection Established`` with an ``X-SpaceRouter-Address`` header
+    containing the node's wallet address.
     """
 
     @pytest.mark.asyncio
-    async def test_challenge_returns_200_with_signature(self, settings):
-        """Challenge probe must return 200 with a valid signature header."""
-        from app.wallet import private_key_to_address, verify_challenge
-
+    async def test_challenge_returns_200_with_address(self, settings):
+        """Challenge probe must return 200 Connection Established with wallet address."""
         home, home_port = await _start_home_node(settings)
         try:
             reader, writer = await asyncio.open_connection(
@@ -368,19 +366,19 @@ class TestEndpointChallengeProbe:
             resp = await asyncio.wait_for(reader.read(4096), timeout=15.0)
             resp_text = resp.decode("latin-1")
 
-            assert resp_text.startswith("HTTP/1.1 200"), "Expected 200 OK"
-            assert "X-SpaceRouter-Signature:" in resp_text
+            assert resp_text.startswith("HTTP/1.1 200 Connection Established"), \
+                "Expected 200 Connection Established"
+            assert "X-SpaceRouter-Address:" in resp_text
 
-            # Extract and verify the signature
+            # Extract and verify the wallet address
             for line in resp_text.split("\r\n"):
-                if line.startswith("X-SpaceRouter-Signature:"):
-                    sig_hex = line.split(":", 1)[1].strip()
+                if line.startswith("X-SpaceRouter-Address:"):
+                    address = line.split(":", 1)[1].strip()
                     break
             else:
-                pytest.fail("X-SpaceRouter-Signature header not found")
+                pytest.fail("X-SpaceRouter-Address header not found")
 
-            address = private_key_to_address(settings.WALLET_PRIVATE_KEY)
-            assert verify_challenge(sig_hex, settings.PUBLIC_IP, address)
+            assert address == settings.WALLET_ADDRESS
 
             writer.close()
             await writer.wait_closed()
@@ -407,7 +405,7 @@ class TestEndpointChallengeProbe:
             resp_text = resp.decode("latin-1")
 
             assert "403" not in resp_text, "Challenge domain must not be SSRF-blocked"
-            assert "200" in resp_text, "Challenge should return 200 OK"
+            assert "200" in resp_text, "Challenge should return 200"
 
             writer.close()
             await writer.wait_closed()

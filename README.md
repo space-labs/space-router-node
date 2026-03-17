@@ -39,13 +39,10 @@ python -m app.main
 | `SR_COORDINATION_API_URL` | `http://localhost:8000` | Coordination API URL |
 | `SR_NODE_PORT` | `9090` | Port for incoming proxy connections |
 | `SR_NODE_LABEL` | `""` | Human-readable label for this node |
-| `SR_NODE_REGION` | `""` | Geographic region (e.g. `us-west`, `KR`) |
-| `SR_NODE_TYPE` | `residential` | Node type |
+| `SR_WALLET_ADDRESS` | **required** | EVM wallet address (e.g. `0x742d...bD18`) |
 | `SR_PUBLIC_IP` | auto-detected | Public IP (auto-detected if empty) |
 | `SR_UPNP_ENABLED` | `true` | Enable UPnP port forwarding |
 | `SR_UPNP_LEASE_DURATION` | `3600` | UPnP lease duration in seconds |
-| `SR_WALLET_KEY_PATH` | `certs/wallet.key` | EVM wallet key path (auto-generated) |
-| `SR_WALLET_PRIVATE_KEY` | `""` | Hex-encoded private key override (e.g. from MetaMask) |
 | `SR_TLS_CERT_PATH` | `certs/node.crt` | TLS certificate path (auto-generated) |
 | `SR_TLS_KEY_PATH` | `certs/node.key` | TLS key path (auto-generated) |
 | `SR_BUFFER_SIZE` | `65536` | TCP relay buffer size |

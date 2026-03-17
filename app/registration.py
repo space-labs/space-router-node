@@ -52,14 +52,13 @@ async def register_node(
     public_ip: str,
     *,
     upnp_endpoint: tuple[str, int] | None = None,
-    wallet_address: str | None = None,
+    wallet_address: str,
 ) -> tuple[str, str | None]:
     """Register this node with the Coordination API.
 
     If *upnp_endpoint* is provided (``(external_ip, external_port)``),
-    the ``endpoint_url`` uses the UPnP-mapped address and the residential
-    *public_ip* is sent as metadata.  Otherwise falls back to the public
-    IP with the configured port (requires manual port forwarding).
+    the ``endpoint_url`` uses the UPnP-mapped address.  Otherwise falls
+    back to the public IP with the configured port.
 
     Returns ``(node_id, gateway_ca_cert_pem_or_None)``.
     Raises on failure — the caller should abort startup.
@@ -74,14 +73,9 @@ async def register_node(
 
     payload = {
         "endpoint_url": endpoint_url,
-        "public_ip": public_ip,
+        "wallet_address": wallet_address,
         "connectivity_type": connectivity_type,
-        "node_type": settings.NODE_TYPE,
     }
-    if wallet_address:
-        payload["wallet_address"] = wallet_address
-    if settings.NODE_REGION:
-        payload["region"] = settings.NODE_REGION
     if settings.NODE_LABEL:
         payload["label"] = settings.NODE_LABEL
 

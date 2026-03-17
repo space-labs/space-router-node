@@ -33,7 +33,7 @@ from app.config import Settings
 from app.proxy_handler import handle_client
 from app.registration import deregister_node, detect_public_ip, register_node
 from app.tls import create_server_ssl_context, ensure_certificates
-from app.wallet import ensure_wallet_key, private_key_to_address
+from app.wallet import validate_wallet_address
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,15 +48,15 @@ async def run_e2e() -> bool:
     logger.info("Coordination API: %s", settings.COORDINATION_API_URL)
     logger.info("Node port: %d", settings.NODE_PORT)
 
-    # 1. Generate TLS certificates and wallet key
+    # 1. Generate TLS certificates and validate wallet address
     ensure_certificates(settings.TLS_CERT_PATH, settings.TLS_KEY_PATH)
     ssl_ctx = create_server_ssl_context(settings.TLS_CERT_PATH, settings.TLS_KEY_PATH)
 
-    if settings.WALLET_PRIVATE_KEY:
-        logger.info("Using wallet key from SR_WALLET_PRIVATE_KEY env var")
-    else:
-        settings.WALLET_PRIVATE_KEY = ensure_wallet_key(settings.WALLET_KEY_PATH)
-    wallet_address = private_key_to_address(settings.WALLET_PRIVATE_KEY)
+    if not settings.WALLET_ADDRESS:
+        logger.error("SR_WALLET_ADDRESS is required")
+        return False
+    settings.WALLET_ADDRESS = validate_wallet_address(settings.WALLET_ADDRESS)
+    wallet_address = settings.WALLET_ADDRESS
     logger.info("Wallet address: %s", wallet_address)
 
     # 2. Start the proxy server

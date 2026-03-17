@@ -19,10 +19,9 @@ class Settings(BaseSettings):
     BIND_ADDRESS: str = "0.0.0.0"
 
     NODE_LABEL: str = ""
-    NODE_REGION: str = ""
-    NODE_TYPE: str = "residential"
 
     PUBLIC_IP: str = ""  # Auto-detected if empty
+    WALLET_ADDRESS: str = ""  # Required — user-provided EVM address
 
     # UPnP / NAT-PMP automatic port forwarding
     UPNP_ENABLED: bool = True
@@ -37,10 +36,6 @@ class Settings(BaseSettings):
     # TLS — auto-generates a self-signed cert if files don't exist
     TLS_CERT_PATH: str = "certs/node.crt"
     TLS_KEY_PATH: str = "certs/node.key"
-
-    # Wallet — EVM key for ownership verification during challenge probe
-    WALLET_KEY_PATH: str = "certs/wallet.key"
-    WALLET_PRIVATE_KEY: str = ""  # Hex override; auto-generated if empty
 
     # mTLS — Gateway authentication
     MTLS_ENABLED: bool = False

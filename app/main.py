@@ -27,7 +27,7 @@ from app.proxy_handler import handle_client
 from app.registration import deregister_node, detect_public_ip, register_node, save_gateway_ca_cert
 from app.tls import create_mtls_server_ssl_context, create_server_ssl_context, ensure_certificates
 from app.version import __version__
-from app.wallet import ensure_wallet_key, private_key_to_address
+from app.wallet import validate_wallet_address
 
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
@@ -76,7 +76,7 @@ async def _run(settings_override=None) -> None:  # noqa: ANN001
                     "falling back to direct public IP mode"
                 )
 
-        # 2. Detect public IP (always needed for metadata + challenge signing)
+        # 2. Detect public IP (needed for registration endpoint_url)
         if s.PUBLIC_IP:
             public_ip = s.PUBLIC_IP
             logger.info("Using configured public IP: %s", public_ip)
@@ -86,15 +86,18 @@ async def _run(settings_override=None) -> None:  # noqa: ANN001
             except RuntimeError:
                 logger.error("Cannot detect public IP — aborting")
                 sys.exit(1)
-        # Store back so proxy handler can access it for challenge signing
         s.PUBLIC_IP = public_ip
 
-        # 3. Load/generate wallet key + derive address
-        if s.WALLET_PRIVATE_KEY:
-            logger.info("Using wallet key from SR_WALLET_PRIVATE_KEY env var")
-        else:
-            s.WALLET_PRIVATE_KEY = ensure_wallet_key(s.WALLET_KEY_PATH)
-        wallet_address = private_key_to_address(s.WALLET_PRIVATE_KEY)
+        # 3. Validate wallet address (required — set via SR_WALLET_ADDRESS)
+        if not s.WALLET_ADDRESS:
+            logger.error("SR_WALLET_ADDRESS is required — aborting")
+            sys.exit(1)
+        try:
+            s.WALLET_ADDRESS = validate_wallet_address(s.WALLET_ADDRESS)
+        except ValueError as exc:
+            logger.error("Invalid wallet address: %s — aborting", exc)
+            sys.exit(1)
+        wallet_address = s.WALLET_ADDRESS
         logger.info("Wallet address: %s", wallet_address)
 
         # 4. Start TLS server (must be running before registration so the
