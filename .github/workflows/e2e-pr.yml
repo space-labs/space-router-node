@@ -1,0 +1,55 @@
+name: E2E Tests on PR
+
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.12"
+  STAGING_NODE_IP: "159.223.44.4"
+  STAGING_NODE_PORT: "9090"
+  COORDINATION_API_URL: "https://coordination.spacerouter.org"
+  GATEWAY_HOST: "gateway.spacerouter.org"
+  GATEWAY_HTTP_PORT: "8080"
+  GATEWAY_SOCKS5_PORT: "1080"
+  NODE_LABEL: "staging-ci"
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: pytest tests/ -v
+
+  e2e-tests:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: pip install "httpx[socks]>=0.27,<1"
+
+      - name: Run E2E staging tests
+        run: python tests/e2e/staging_e2e_test.py
+        timeout-minutes: 5
+        env:
+          STAGING_NODE_IP: ${{ env.STAGING_NODE_IP }}
+          STAGING_NODE_PORT: ${{ env.STAGING_NODE_PORT }}
+          COORDINATION_API_URL: ${{ env.COORDINATION_API_URL }}
+          GATEWAY_HOST: ${{ env.GATEWAY_HOST }}
+          GATEWAY_HTTP_PORT: ${{ env.GATEWAY_HTTP_PORT }}
+          GATEWAY_SOCKS5_PORT: ${{ env.GATEWAY_SOCKS5_PORT }}
+          SR_API_KEY: ${{ secrets.SR_STAGING_API_KEY }}
+          NODE_LABEL: ${{ env.NODE_LABEL }}
