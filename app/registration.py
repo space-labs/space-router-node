@@ -86,8 +86,23 @@ async def register_node(
     )
 
     resp = await http_client.post(url, json=payload, timeout=15.0)
-    resp.raise_for_status()
-    data = resp.json()
+    if resp.status_code == 409:
+        # Already registered with this wallet — fetch existing entry
+        logger.info("Node already registered (409), fetching existing entry…")
+        list_resp = await http_client.get(
+            f"{settings.COORDINATION_API_URL}/nodes",
+            params={"wallet_address": wallet_address},
+            timeout=10.0,
+        )
+        list_resp.raise_for_status()
+        nodes = list_resp.json()
+        matching = [n for n in nodes if n.get("wallet_address") == wallet_address]
+        if not matching:
+            raise RuntimeError("409 but no matching node found for wallet")
+        data = matching[0]
+    else:
+        resp.raise_for_status()
+        data = resp.json()
     node_id = data["id"]
     gateway_ca_cert = data.get("gateway_ca_cert")
     ip_type = data.get("ip_type", "unknown")
