@@ -154,15 +154,25 @@ async def _run(settings_override=None, stop_event=None) -> None:  # noqa: ANN001
                     s.GATEWAY_CA_CERT_PATH,
                 )
             else:
-                logger.info("Upgrading to mTLS…")
-                server.close()
-                await server.wait_closed()
-                ssl_ctx = create_mtls_server_ssl_context(
-                    s.TLS_CERT_PATH, s.TLS_KEY_PATH, s.GATEWAY_CA_CERT_PATH,
-                )
-                server = await asyncio.start_server(
-                    handler, host=s.BIND_ADDRESS, port=s.NODE_PORT, ssl=ssl_ctx,
-                )
+                try:
+                    logger.info("Upgrading to mTLS…")
+                    ssl_ctx = create_mtls_server_ssl_context(
+                        s.TLS_CERT_PATH, s.TLS_KEY_PATH, s.GATEWAY_CA_CERT_PATH,
+                    )
+                    # Close and immediately rebind to minimise the port-unavailable
+                    # window.  We cannot use reuse_port because the initial server
+                    # was created without it (Linux requires all sockets sharing a
+                    # port to set SO_REUSEPORT), and Windows lacks SO_REUSEPORT.
+                    server.close()
+                    await server.wait_closed()
+                    server = await asyncio.start_server(
+                        handler, host=s.BIND_ADDRESS, port=s.NODE_PORT, ssl=ssl_ctx,
+                    )
+                except Exception:
+                    logger.warning(
+                        "mTLS upgrade failed — continuing with standard TLS",
+                        exc_info=True,
+                    )
 
         logger.info(
             "Home Node ready (node_id=%s, wallet=%s, upnp=%s)",
