@@ -79,3 +79,15 @@ class ConfigStore:
         for key, value in self.load().items():
             if value is not None and key not in os.environ:
                 os.environ[key] = value
+
+        # Point TLS cert paths to the writable config directory.  The default
+        # relative paths ("certs/...") resolve inside the PyInstaller temp dir
+        # which is read-only.
+        certs_dir = self._dir / "certs"
+        for key, filename in (
+            ("SR_TLS_CERT_PATH", "node.crt"),
+            ("SR_TLS_KEY_PATH", "node.key"),
+            ("SR_GATEWAY_CA_CERT_PATH", "gateway-ca.crt"),
+        ):
+            if key not in os.environ:
+                os.environ[key] = str(certs_dir / filename)
