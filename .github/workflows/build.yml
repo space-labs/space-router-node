@@ -432,9 +432,15 @@ jobs:
                    "dist/${{ matrix.artifact }}.dmg"; then
                 break
               fi
-              echo "hdiutil failed (attempt $attempt/3), retrying in 5s..."
-              sleep 5
+              if [ "$attempt" -lt 3 ]; then
+                echo "hdiutil failed (attempt $attempt/3), retrying in 5s..."
+                sleep 5
+              fi
             done
+            if [ ! -f "dist/${{ matrix.artifact }}.dmg" ]; then
+              echo "All hdiutil attempts failed"
+              exit 1
+            fi
           fi
 
       - name: Notarize macOS DMG
