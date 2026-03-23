@@ -77,7 +77,7 @@ class ConfigStore:
     def apply_to_env(self) -> None:
         """Load all config values into os.environ so pydantic-settings picks them up."""
         for key, value in self.load().items():
-            if value is not None and key not in os.environ:
+            if value and key not in os.environ:
                 os.environ[key] = value
 
         # Point TLS cert paths to the writable config directory.  The default
