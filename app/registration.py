@@ -2,8 +2,12 @@
 
 Lifecycle:
   1. detect_public_ip()   — determine the machine's public IP
-  2. register_node()      — POST /nodes to announce ourselves
-  3. deregister_node()    — PATCH /nodes/{id}/status → offline on shutdown
+  2. register_node()      — POST /nodes to announce ourselves (starts offline)
+  3. request_probe()      — POST /nodes/{id}/request-probe to go online
+  4. deregister_node()    — PATCH /nodes/{id}/status → offline on shutdown
+
+Nodes cannot set themselves online directly.  The Coordination API
+controls online status via health probes (OTP proxy-through challenge).
 """
 
 import logging
@@ -87,7 +91,7 @@ async def register_node(
 
     resp = await http_client.post(url, json=payload, timeout=15.0)
     if resp.status_code == 409:
-        # Already registered with this wallet — fetch and update existing entry
+        # Already registered with this wallet — recover the existing node_id
         logger.info("Node already registered (409), recovering existing registration…")
         list_resp = await http_client.get(
             f"{settings.COORDINATION_API_URL}/nodes",
@@ -100,29 +104,14 @@ async def register_node(
         if not matching:
             raise RuntimeError("409 but no matching node found for wallet")
         data = matching[0]
-        node_id = data["id"]
-
-        # Update endpoint_url in case IP/port changed since last registration
-        update_resp = await http_client.patch(
-            f"{settings.COORDINATION_API_URL}/nodes/{node_id}/status",
-            json={
-                "status": "online",
-                "endpoint_url": endpoint_url,
-                "connectivity_type": connectivity_type,
-            },
-            timeout=10.0,
-        )
-        if update_resp.status_code < 300:
-            logger.info("Updated existing node %s with endpoint %s", node_id, endpoint_url)
-        else:
-            logger.warning(
-                "Failed to update node %s endpoint: %s %s",
-                node_id, update_resp.status_code, update_resp.text,
-            )
     else:
         resp.raise_for_status()
         data = resp.json()
     node_id = data["id"]
+
+    # Request a health probe so the Coordination API can verify us and
+    # set our status to online.  The node cannot set itself online directly.
+    await request_probe(http_client, settings, node_id)
     gateway_ca_cert = data.get("gateway_ca_cert")
     ip_type = data.get("ip_type", "unknown")
     ip_region = data.get("ip_region", "unknown")
@@ -141,6 +130,31 @@ def save_gateway_ca_cert(pem_data: str, path: str) -> None:
         f.write(pem_data)
     os.chmod(path, 0o644)
     logger.info("Gateway CA certificate saved to %s", path)
+
+
+async def request_probe(
+    http_client: httpx.AsyncClient,
+    settings: Settings,
+    node_id: str,
+) -> None:
+    """Request a health probe from the Coordination API.
+
+    The API will send an OTP challenge through this node to verify it can
+    forward traffic.  If the probe passes, the node is marked online.
+    This is fire-and-forget — the probe runs asynchronously on the server.
+    """
+    url = f"{settings.COORDINATION_API_URL}/nodes/{node_id}/request-probe"
+    try:
+        resp = await http_client.post(url, timeout=10.0)
+        if resp.status_code == 200:
+            logger.info("Health probe requested for node %s — waiting for verification", node_id)
+        elif resp.status_code == 400:
+            # Node might already be online
+            logger.info("Probe request returned 400 (node may already be online): %s", resp.text)
+        else:
+            logger.warning("Probe request failed: %s %s", resp.status_code, resp.text)
+    except Exception as exc:
+        logger.warning("Failed to request probe for node %s: %s", node_id, exc)
 
 
 async def deregister_node(

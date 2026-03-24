@@ -7,7 +7,7 @@ import respx
 from httpx import Response
 
 from app.config import Settings
-from app.registration import deregister_node, detect_public_ip, register_node, save_gateway_ca_cert
+from app.registration import deregister_node, detect_public_ip, register_node, request_probe, save_gateway_ca_cert
 
 
 TEST_WALLET = "0x742d35cc6634c0532925a3b844bc9e7595f2bd18"
@@ -97,10 +97,24 @@ class TestDetectPublicIP:
 # register_node
 # ---------------------------------------------------------------------------
 
+def _mock_request_probe():
+    """Add a catch-all mock for POST /nodes/{id}/request-probe."""
+    respx.post(url__regex=r".*/nodes/.*/request-probe").mock(
+        return_value=Response(200, json={"ok": True})
+    )
+
+
 class TestRegisterNode:
+    """Tests for register_node().
+
+    All tests call _mock_request_probe() because register_node()
+    now calls request_probe() after registration.
+    """
+
     @pytest.mark.asyncio
     @respx.mock
     async def test_register_success(self, reg_settings):
+        _mock_request_probe()
         respx.post("http://coordination:8000/nodes").mock(
             return_value=Response(201, json={
                 "id": "node-abc-123",
@@ -139,6 +153,7 @@ class TestRegisterNode:
     @pytest.mark.asyncio
     @respx.mock
     async def test_register_with_upnp_endpoint(self, reg_settings):
+        _mock_request_probe()
         respx.post("http://coordination:8000/nodes").mock(
             return_value=Response(201, json={
                 "id": "node-upnp-456",
@@ -171,6 +186,7 @@ class TestRegisterNode:
     @respx.mock
     async def test_register_receives_ip_classification(self, reg_settings):
         """Registration response with ip_type/ip_region should be parsed without error."""
+        _mock_request_probe()
         respx.post("http://coordination:8000/nodes").mock(
             return_value=Response(201, json={
                 "id": "node-classified",
@@ -198,6 +214,7 @@ class TestRegisterNode:
     @respx.mock
     async def test_register_handles_missing_ip_classification(self, reg_settings):
         """Registration response without ip_type/ip_region should default to 'unknown'."""
+        _mock_request_probe()
         respx.post("http://coordination:8000/nodes").mock(
             return_value=Response(201, json={
                 "id": "node-no-class",
@@ -223,6 +240,7 @@ class TestRegisterNode:
     @respx.mock
     async def test_register_sends_wallet_address(self, reg_settings):
         """wallet_address must always appear in the POST payload."""
+        _mock_request_probe()
         respx.post("http://coordination:8000/nodes").mock(
             return_value=Response(201, json={
                 "id": "node-wallet-1",
@@ -249,6 +267,7 @@ class TestRegisterNode:
     @respx.mock
     async def test_register_payload_excludes_server_only_fields(self, reg_settings):
         """public_ip, node_type, region, ip_type, ip_region, as_type must NOT be sent."""
+        _mock_request_probe()
         respx.post("http://coordination:8000/nodes").mock(
             return_value=Response(201, json={
                 "id": "node-clean-payload",
@@ -290,6 +309,7 @@ class TestRegisterNode:
     @respx.mock
     async def test_register_returns_gateway_ca_cert(self, reg_settings):
         """Registration response with gateway_ca_cert should return it."""
+        _mock_request_probe()
         ca_pem = "-----BEGIN CERTIFICATE-----\nTESTDATA\n-----END CERTIFICATE-----"
         respx.post("http://coordination:8000/nodes").mock(
             return_value=Response(201, json={
@@ -312,6 +332,49 @@ class TestRegisterNode:
 
         assert node_id == "node-mtls-1"
         assert gateway_ca_cert == ca_pem
+
+
+# ---------------------------------------------------------------------------
+# request_probe
+# ---------------------------------------------------------------------------
+
+class TestRequestProbe:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_request_probe_success(self, reg_settings):
+        respx.post("http://coordination:8000/nodes/node-abc-123/request-probe").mock(
+            return_value=Response(200, json={"ok": True, "message": "Probe queued"})
+        )
+
+        import httpx
+        async with httpx.AsyncClient() as client:
+            await request_probe(client, reg_settings, "node-abc-123")
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_request_probe_400_already_online(self, reg_settings):
+        """If node is already online, 400 should be handled gracefully."""
+        respx.post("http://coordination:8000/nodes/node-abc-123/request-probe").mock(
+            return_value=Response(400, json={"detail": "Node is already online"})
+        )
+
+        import httpx
+        async with httpx.AsyncClient() as client:
+            # Should not raise
+            await request_probe(client, reg_settings, "node-abc-123")
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_request_probe_failure_logged_not_raised(self, reg_settings):
+        """Probe request failure should be logged, not raised."""
+        respx.post("http://coordination:8000/nodes/node-abc-123/request-probe").mock(
+            return_value=Response(503, json={"detail": "Service unavailable"})
+        )
+
+        import httpx
+        async with httpx.AsyncClient() as client:
+            # Should not raise
+            await request_probe(client, reg_settings, "node-abc-123")
 
 
 # ---------------------------------------------------------------------------

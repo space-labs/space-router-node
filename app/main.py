@@ -24,7 +24,7 @@ import httpx
 
 from app.config import settings
 from app.proxy_handler import handle_client
-from app.registration import deregister_node, detect_public_ip, register_node, save_gateway_ca_cert
+from app.registration import deregister_node, detect_public_ip, register_node, request_probe, save_gateway_ca_cert
 from app.tls import create_mtls_server_ssl_context, create_server_ssl_context, ensure_certificates
 from app.version import __version__
 from app.wallet import validate_wallet_address
