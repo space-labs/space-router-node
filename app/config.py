@@ -33,6 +33,9 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
 
+    # Node identity keypair (auto-generated secp256k1 for signing API requests)
+    IDENTITY_KEY_PATH: str = "certs/node-identity.key"
+
     # TLS — auto-generates a self-signed cert if files don't exist
     TLS_CERT_PATH: str = "certs/node.crt"
     TLS_KEY_PATH: str = "certs/node.key"
