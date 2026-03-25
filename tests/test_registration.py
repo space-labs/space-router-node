@@ -4,6 +4,7 @@ import json
 
 import pytest
 import respx
+from eth_account import Account
 from httpx import Response
 
 from app.config import Settings
@@ -11,6 +12,9 @@ from app.registration import deregister_node, detect_public_ip, register_node, r
 
 
 TEST_WALLET = "0x742d35cc6634c0532925a3b844bc9e7595f2bd18"
+# Test identity keypair (deterministic for reproducible tests)
+_TEST_IDENTITY = Account.from_key("0x" + "ab" * 32)
+TEST_IDENTITY_KEY = _TEST_IDENTITY.key.hex()
 
 
 @pytest.fixture
@@ -104,6 +108,19 @@ def _mock_request_probe():
     )
 
 
+def _register_response(node_id="node-abc-123", **overrides):
+    """Build a standard POST /nodes/register response."""
+    data = {
+        "status": "registered",
+        "node_id": node_id,
+        "wallet_address": TEST_WALLET,
+        "node_address": _TEST_IDENTITY.address.lower(),
+        "endpoint_url": "https://1.2.3.4:9090",
+    }
+    data.update(overrides)
+    return data
+
+
 class TestRegisterNode:
     """Tests for register_node().
 
@@ -115,54 +132,39 @@ class TestRegisterNode:
     @respx.mock
     async def test_register_success(self, reg_settings):
         _mock_request_probe()
-        respx.post("http://coordination:8000/nodes").mock(
-            return_value=Response(201, json={
-                "id": "node-abc-123",
-                "endpoint_url": "https://1.2.3.4:9090",
-                "node_type": "residential",
-                "status": "online",
-                "health_score": 1.0,
-                "ip_type": "residential",
-                "ip_region": "KR",
-                "wallet_address": TEST_WALLET,
-                "created_at": "2026-01-01T00:00:00Z",
-            })
+        respx.post("http://coordination:8000/nodes/register").mock(
+            return_value=Response(200, json=_register_response())
         )
 
         import httpx
         async with httpx.AsyncClient() as client:
             node_id, gateway_ca_cert = await register_node(
                 client, reg_settings, "1.2.3.4",
+                identity_key=TEST_IDENTITY_KEY,
                 wallet_address=TEST_WALLET,
             )
 
         assert node_id == "node-abc-123"
         assert gateway_ca_cert is None
 
-        # Verify the request payload
+        # Verify the request payload includes identity signature
         req = respx.calls[0].request
         body = json.loads(req.content)
         assert body["endpoint_url"] == "https://1.2.3.4:9090"
         assert body["wallet_address"] == TEST_WALLET
-        assert body["connectivity_type"] == "direct"
+        assert "identity_signature" in body
+        assert "timestamp" in body
         assert body.get("label") == "test-node"
-        # These must NOT be in the payload (server-computed)
-        for field in ("public_ip", "node_type", "region"):
-            assert field not in body, f"{field} should not be in registration payload"
 
     @pytest.mark.asyncio
     @respx.mock
     async def test_register_with_upnp_endpoint(self, reg_settings):
         _mock_request_probe()
-        respx.post("http://coordination:8000/nodes").mock(
-            return_value=Response(201, json={
-                "id": "node-upnp-456",
-                "endpoint_url": "https://203.0.113.5:9090",
-                "node_type": "residential",
-                "status": "online",
-                "health_score": 1.0,
-                "created_at": "2026-01-01T00:00:00Z",
-            })
+        respx.post("http://coordination:8000/nodes/register").mock(
+            return_value=Response(200, json=_register_response(
+                node_id="node-upnp-456",
+                endpoint_url="https://203.0.113.5:9090",
+            ))
         )
 
         import httpx
@@ -170,6 +172,7 @@ class TestRegisterNode:
             node_id, gateway_ca_cert = await register_node(
                 client, reg_settings, "1.2.3.4",
                 upnp_endpoint=("203.0.113.5", 9090),
+                identity_key=TEST_IDENTITY_KEY,
                 wallet_address=TEST_WALLET,
             )
 
@@ -179,31 +182,23 @@ class TestRegisterNode:
         req = respx.calls[0].request
         body = json.loads(req.content)
         assert body["endpoint_url"] == "https://203.0.113.5:9090"
-        assert body["connectivity_type"] == "upnp"
-        assert "public_ip" not in body
 
     @pytest.mark.asyncio
     @respx.mock
+    @pytest.mark.asyncio
+    @respx.mock
     async def test_register_receives_ip_classification(self, reg_settings):
-        """Registration response with ip_type/ip_region should be parsed without error."""
+        """Registration response should be parsed without error."""
         _mock_request_probe()
-        respx.post("http://coordination:8000/nodes").mock(
-            return_value=Response(201, json={
-                "id": "node-classified",
-                "endpoint_url": "https://1.2.3.4:9090",
-                "node_type": "residential",
-                "status": "online",
-                "health_score": 1.0,
-                "ip_type": "residential",
-                "ip_region": "Portland, US",
-                "created_at": "2026-01-01T00:00:00Z",
-            })
+        respx.post("http://coordination:8000/nodes/register").mock(
+            return_value=Response(200, json=_register_response(node_id="node-classified"))
         )
 
         import httpx
         async with httpx.AsyncClient() as client:
             node_id, gateway_ca_cert = await register_node(
                 client, reg_settings, "1.2.3.4",
+                identity_key=TEST_IDENTITY_KEY,
                 wallet_address=TEST_WALLET,
             )
 
@@ -212,50 +207,18 @@ class TestRegisterNode:
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_register_handles_missing_ip_classification(self, reg_settings):
-        """Registration response without ip_type/ip_region should default to 'unknown'."""
-        _mock_request_probe()
-        respx.post("http://coordination:8000/nodes").mock(
-            return_value=Response(201, json={
-                "id": "node-no-class",
-                "endpoint_url": "https://1.2.3.4:9090",
-                "node_type": "residential",
-                "status": "online",
-                "health_score": 1.0,
-                "created_at": "2026-01-01T00:00:00Z",
-            })
-        )
-
-        import httpx
-        async with httpx.AsyncClient() as client:
-            node_id, gateway_ca_cert = await register_node(
-                client, reg_settings, "1.2.3.4",
-                wallet_address=TEST_WALLET,
-            )
-
-        assert node_id == "node-no-class"
-        assert gateway_ca_cert is None
-
-    @pytest.mark.asyncio
-    @respx.mock
     async def test_register_sends_wallet_address(self, reg_settings):
         """wallet_address must always appear in the POST payload."""
         _mock_request_probe()
-        respx.post("http://coordination:8000/nodes").mock(
-            return_value=Response(201, json={
-                "id": "node-wallet-1",
-                "endpoint_url": "https://1.2.3.4:9090",
-                "node_type": "residential",
-                "status": "online",
-                "health_score": 1.0,
-                "created_at": "2026-01-01T00:00:00Z",
-            })
+        respx.post("http://coordination:8000/nodes/register").mock(
+            return_value=Response(200, json=_register_response(node_id="node-wallet-1"))
         )
 
         import httpx
         async with httpx.AsyncClient() as client:
             node_id, _ = await register_node(
                 client, reg_settings, "1.2.3.4",
+                identity_key=TEST_IDENTITY_KEY,
                 wallet_address="0x2c7536E3605D9C16a7a3D7b1898e529396a65c23",
             )
 
@@ -265,35 +228,32 @@ class TestRegisterNode:
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_register_payload_excludes_server_only_fields(self, reg_settings):
-        """public_ip, node_type, region, ip_type, ip_region, as_type must NOT be sent."""
+    async def test_register_payload_has_identity_signature(self, reg_settings):
+        """Payload must include identity_signature and timestamp."""
         _mock_request_probe()
-        respx.post("http://coordination:8000/nodes").mock(
-            return_value=Response(201, json={
-                "id": "node-clean-payload",
-                "endpoint_url": "https://1.2.3.4:9090",
-                "node_type": "residential",
-                "status": "online",
-                "health_score": 1.0,
-                "created_at": "2026-01-01T00:00:00Z",
-            })
+        respx.post("http://coordination:8000/nodes/register").mock(
+            return_value=Response(200, json=_register_response())
         )
 
         import httpx
         async with httpx.AsyncClient() as client:
             await register_node(
                 client, reg_settings, "1.2.3.4",
+                identity_key=TEST_IDENTITY_KEY,
                 wallet_address=TEST_WALLET,
             )
 
         body = json.loads(respx.calls[0].request.content)
+        assert "identity_signature" in body
+        assert "timestamp" in body
+        # Server-only fields must NOT be in payload
         for field in ("public_ip", "node_type", "region", "ip_type", "ip_region", "as_type"):
             assert field not in body, f"{field} should not be in registration payload"
 
     @pytest.mark.asyncio
     @respx.mock
     async def test_register_failure_raises(self, reg_settings):
-        respx.post("http://coordination:8000/nodes").mock(
+        respx.post("http://coordination:8000/nodes/register").mock(
             return_value=Response(500, text="Internal Server Error")
         )
 
@@ -302,6 +262,7 @@ class TestRegisterNode:
             with pytest.raises(httpx.HTTPStatusError):
                 await register_node(
                     client, reg_settings, "1.2.3.4",
+                    identity_key=TEST_IDENTITY_KEY,
                     wallet_address=TEST_WALLET,
                 )
 
@@ -311,22 +272,17 @@ class TestRegisterNode:
         """Registration response with gateway_ca_cert should return it."""
         _mock_request_probe()
         ca_pem = "-----BEGIN CERTIFICATE-----\nTESTDATA\n-----END CERTIFICATE-----"
-        respx.post("http://coordination:8000/nodes").mock(
-            return_value=Response(201, json={
-                "id": "node-mtls-1",
-                "endpoint_url": "https://1.2.3.4:9090",
-                "node_type": "residential",
-                "status": "online",
-                "health_score": 1.0,
-                "gateway_ca_cert": ca_pem,
-                "created_at": "2026-01-01T00:00:00Z",
-            })
+        respx.post("http://coordination:8000/nodes/register").mock(
+            return_value=Response(200, json=_register_response(
+                node_id="node-mtls-1", gateway_ca_cert=ca_pem,
+            ))
         )
 
         import httpx
         async with httpx.AsyncClient() as client:
             node_id, gateway_ca_cert = await register_node(
                 client, reg_settings, "1.2.3.4",
+                identity_key=TEST_IDENTITY_KEY,
                 wallet_address=TEST_WALLET,
             )
 
@@ -348,7 +304,7 @@ class TestRequestProbe:
 
         import httpx
         async with httpx.AsyncClient() as client:
-            await request_probe(client, reg_settings, "node-abc-123")
+            await request_probe(client, reg_settings, "node-abc-123", identity_key=TEST_IDENTITY_KEY)
 
     @pytest.mark.asyncio
     @respx.mock
@@ -361,7 +317,7 @@ class TestRequestProbe:
         import httpx
         async with httpx.AsyncClient() as client:
             # Should not raise
-            await request_probe(client, reg_settings, "node-abc-123")
+            await request_probe(client, reg_settings, "node-abc-123", identity_key=TEST_IDENTITY_KEY)
 
     @pytest.mark.asyncio
     @respx.mock
@@ -374,7 +330,7 @@ class TestRequestProbe:
         import httpx
         async with httpx.AsyncClient() as client:
             # Should not raise
-            await request_probe(client, reg_settings, "node-abc-123")
+            await request_probe(client, reg_settings, "node-abc-123", identity_key=TEST_IDENTITY_KEY)
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +373,7 @@ class TestDeregisterNode:
         import httpx
         async with httpx.AsyncClient() as client:
             # Should not raise
-            await deregister_node(client, reg_settings, "node-abc-123")
+            await deregister_node(client, reg_settings, "node-abc-123", identity_key=TEST_IDENTITY_KEY)
 
         req = respx.calls[0].request
         import json
@@ -434,4 +390,4 @@ class TestDeregisterNode:
         import httpx
         async with httpx.AsyncClient() as client:
             # Should NOT raise — deregister is best-effort
-            await deregister_node(client, reg_settings, "node-abc-123")
+            await deregister_node(client, reg_settings, "node-abc-123", identity_key=TEST_IDENTITY_KEY)

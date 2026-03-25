@@ -23,8 +23,9 @@ import sys
 import httpx
 
 from app.config import settings
+from app.identity import load_or_create_identity
 from app.proxy_handler import handle_client
-from app.registration import deregister_node, detect_public_ip, register_node, request_probe, save_gateway_ca_cert
+from app.registration import deregister_node, detect_public_ip, register_node, save_gateway_ca_cert
 from app.tls import create_mtls_server_ssl_context, create_server_ssl_context, ensure_certificates
 from app.version import __version__
 from app.wallet import validate_wallet_address
@@ -106,6 +107,10 @@ async def _run(settings_override=None, stop_event=None) -> None:  # noqa: ANN001
         wallet_address = s.WALLET_ADDRESS
         logger.info("Wallet address: %s", wallet_address)
 
+        # 3b. Load or create node identity keypair
+        identity_key, node_address = load_or_create_identity(s.IDENTITY_KEY_PATH)
+        logger.info("Node identity: %s", node_address)
+
         # 4. Start TLS server (must be running before registration so the
         #    Coordination API challenge probe can reach us)
         ensure_certificates(s.TLS_CERT_PATH, s.TLS_KEY_PATH)
@@ -126,6 +131,7 @@ async def _run(settings_override=None, stop_event=None) -> None:  # noqa: ANN001
             try:
                 node_id, gateway_ca_cert = await register_node(
                     http_client, s, public_ip,
+                    identity_key=identity_key,
                     upnp_endpoint=upnp_endpoint,
                     wallet_address=wallet_address,
                 )
@@ -225,8 +231,8 @@ async def _run(settings_override=None, stop_event=None) -> None:  # noqa: ANN001
                 from app.upnp import remove_upnp_mapping
                 await remove_upnp_mapping(upnp_endpoint[1])
 
-            # 9. Deregister (best-effort)
-            await deregister_node(http_client, s, node_id)
+            # 9. Deregister (best-effort, signed)
+            await deregister_node(http_client, s, node_id, identity_key=identity_key)
 
     logger.info("Home Node shut down cleanly")
 
