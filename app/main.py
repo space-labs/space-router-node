@@ -100,12 +100,17 @@ async def _run(settings_override=None, stop_event=None, on_phase=None) -> None: 
             logger.info("Using configured public IP: %s", public_ip)
             if real_ip and real_ip != public_ip:
                 logger.info("Detected exit IP: %s (differs from configured — tunnel mode)", real_ip)
+            elif real_ip is None:
+                logger.warning(
+                    "Could not detect real exit IP — tunnel mode classification "
+                    "may use hostname instead of IP: %s", public_ip,
+                )
         else:
             if not real_ip:
                 logger.error("Cannot detect public IP — aborting")
                 sys.exit(1)
             public_ip = real_ip
-            logger.info("Detected public IP: %s", public_ip)
+            # detect_public_ip() already logged the IP and source service
         s.PUBLIC_IP = public_ip
         s._REAL_EXIT_IP = real_ip  # actual IP seen by external services
 

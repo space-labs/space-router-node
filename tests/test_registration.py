@@ -266,8 +266,9 @@ class TestRegisterNode:
         body = json.loads(respx.calls[0].request.content)
         assert "identity_signature" in body
         assert "timestamp" in body
-        # Server-only fields must NOT be in payload
-        for field in ("public_ip", "node_type", "region", "ip_type", "ip_region", "as_type"):
+        # Server-only classification fields must NOT be in payload
+        # (public_ip IS allowed — node sends its real exit IP for tunnel mode)
+        for field in ("node_type", "region", "ip_type", "ip_region", "as_type"):
             assert field not in body, f"{field} should not be in registration payload"
 
     @pytest.mark.asyncio
