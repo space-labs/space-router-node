@@ -136,11 +136,14 @@ class NodeManager:
             self._thread = None
 
     def _force_cancel_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
-        """Cancel all running tasks in the node's event loop to force shutdown."""
+        """Cancel all running tasks and stop the event loop to force shutdown."""
         if not loop or loop.is_closed():
             return
         try:
             for task in asyncio.all_tasks(loop):
                 loop.call_soon_threadsafe(task.cancel)
+            # Stop the loop so run_until_complete exits, allowing the thread's
+            # finally block to close the loop and release the server socket.
+            loop.call_soon_threadsafe(loop.stop)
         except RuntimeError:
             pass
