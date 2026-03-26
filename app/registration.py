@@ -78,7 +78,8 @@ async def register_node(
         upnp_ip, upnp_port = upnp_endpoint
         endpoint_url = f"https://{upnp_ip}:{upnp_port}"
     else:
-        endpoint_url = f"https://{public_ip}:{settings.NODE_PORT}"
+        advertised_port = settings.PUBLIC_PORT if settings.PUBLIC_PORT else settings.NODE_PORT
+        endpoint_url = f"https://{public_ip}:{advertised_port}"
 
     use_v2 = bool(staking_address)
 

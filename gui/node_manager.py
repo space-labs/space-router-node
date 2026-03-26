@@ -84,8 +84,13 @@ class NodeManager:
         self._running = True
 
         try:
-            # Import here to avoid circular imports and to pick up env vars
-            # set by config_store.apply_to_env() before this thread starts.
+            # Reload config and main so they pick up fresh env vars
+            # (critical after fresh_restart which clears and re-applies config).
+            import importlib
+            import app.config
+            importlib.reload(app.config)
+            import app.main
+            importlib.reload(app.main)
             from app.main import _run
 
             self._loop.run_until_complete(
@@ -125,5 +130,17 @@ class NodeManager:
         if self._thread:
             self._thread.join(timeout=timeout)
             if self._thread.is_alive():
-                logger.warning("Node thread did not stop within %.1fs", timeout)
+                logger.warning("Node thread did not stop within %.1fs — cancelling tasks", timeout)
+                self._force_cancel_loop(loop)
+                self._thread.join(timeout=3.0)
             self._thread = None
+
+    def _force_cancel_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
+        """Cancel all running tasks in the node's event loop to force shutdown."""
+        if not loop or loop.is_closed():
+            return
+        try:
+            for task in asyncio.all_tasks(loop):
+                loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:
+            pass

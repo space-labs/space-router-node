@@ -87,6 +87,7 @@ function initNetworkSetup(onComplete) {
   const radios = document.querySelectorAll('input[name="network-mode"]');
   const tunnelConfig = $("#tunnel-config");
   const tunnelHost = $("#tunnel-host");
+  const tunnelPort = $("#tunnel-port");
   const continueBtn = $("#btn-network-continue");
 
   // Show/hide tunnel config
@@ -101,6 +102,7 @@ function initNetworkSetup(onComplete) {
     const mode = selected ? selected.value : "upnp";
 
     let publicHost = "";
+    let port = "";
     if (mode === "tunnel") {
       publicHost = tunnelHost.value.trim();
       if (!publicHost) {
@@ -108,13 +110,14 @@ function initNetworkSetup(onComplete) {
         return;
       }
       tunnelHost.classList.remove("invalid");
+      port = tunnelPort.value.trim();
     }
 
     continueBtn.disabled = true;
     continueBtn.textContent = "Saving...";
 
     try {
-      const result = await window.pywebview.api.save_network_mode(mode, publicHost);
+      const result = await window.pywebview.api.save_network_mode(mode, publicHost, port);
       if (result.ok) {
         onComplete();
       }
@@ -138,6 +141,9 @@ async function showNetworkSetup(onComplete) {
     $("#tunnel-config").style.display = net.mode === "tunnel" ? "block" : "none";
     if (net.public_host) {
       $("#tunnel-host").value = net.public_host;
+    }
+    if (net.port) {
+      $("#tunnel-port").value = net.port;
     }
   } catch (e) {}
 
@@ -307,6 +313,11 @@ async function updateStatus() {
 
 function initFreshRestart() {
   $("#btn-fresh-restart").addEventListener("click", function () {
+    // Reset button states
+    $("#btn-restart-keep").disabled = false;
+    $("#btn-restart-keep").textContent = "Keep Addresses";
+    $("#btn-restart-clear").disabled = false;
+    $("#btn-restart-clear").textContent = "Clear Everything";
     hideAll();
     show("screen-fresh-restart");
   });

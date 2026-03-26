@@ -144,10 +144,17 @@
         </label>
       </div>
 
-      <div id="tunnel-config" class="input-group" style="display: none;">
-        <label for="tunnel-host">Public Hostname or IP</label>
-        <input type="text" id="tunnel-host" placeholder="e.g. bore.pub" spellcheck="false" autocomplete="off">
-        <span class="hint">The hostname or IP that the coordination API can reach your node at.</span>
+      <div id="tunnel-config" style="display: none;">
+        <div class="input-group">
+          <label for="tunnel-host">Public Hostname or IP</label>
+          <input type="text" id="tunnel-host" placeholder="e.g. bore.pub" spellcheck="false" autocomplete="off">
+          <span class="hint">The hostname or IP that the coordination API can reach your node at.</span>
+        </div>
+        <div class="input-group">
+          <label for="tunnel-port">Remote Port <span class="optional">(optional &mdash; defaults to 9090)</span></label>
+          <input type="text" id="tunnel-port" placeholder="9090" spellcheck="false" autocomplete="off">
+          <span class="hint">The port assigned by your tunnel provider (e.g. bore assigns a random port).</span>
+        </div>
       </div>
 
       <button id="btn-network-continue" class="btn-primary">Continue</button>

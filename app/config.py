@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     NODE_LABEL: str = ""
 
     PUBLIC_IP: str = ""  # Auto-detected if empty
+    PUBLIC_PORT: int = 0  # Override advertised port (0 = use NODE_PORT)
     WALLET_ADDRESS: str = ""  # Required — user-provided EVM address
 
     # v0.2.0 multi-wallet: separate staking and collection addresses.

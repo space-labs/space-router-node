@@ -123,10 +123,10 @@ class Api:
         """Return current network mode (upnp or tunnel)."""
         return self._config.get_network_mode()
 
-    def save_network_mode(self, mode: str, public_host: str = "") -> dict:
+    def save_network_mode(self, mode: str, public_host: str = "", port: str = "") -> dict:
         """Save network mode. Requires node restart."""
         try:
-            self._config.save_network_mode(mode, public_host)
+            self._config.save_network_mode(mode, public_host, port)
             return {"ok": True}
         except Exception as exc:
             logger.exception("Failed to save network mode")
@@ -135,14 +135,21 @@ class Api:
     def fresh_restart(self, keep_addresses: bool = False) -> dict:
         """Stop node, reset config, return to onboarding.
 
+        Uses a short timeout — if the node is stuck (e.g. in a registration
+        loop), we force-proceed rather than blocking the UI.
+
         Args:
             keep_addresses: if True, preserves staking/collection addresses.
         """
+        import os
         try:
-            self._node.stop()
+            self._node.stop(timeout=5.0)
+        except Exception:
+            logger.warning("Node stop timed out during fresh restart — proceeding anyway")
+
+        try:
             self._config.reset(keep_addresses=keep_addresses)
             # Clear env vars so next start picks up fresh config
-            import os
             for key in list(os.environ.keys()):
                 if key.startswith("SR_"):
                     del os.environ[key]
