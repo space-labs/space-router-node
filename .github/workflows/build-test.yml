@@ -1,0 +1,243 @@
+name: Build Test Version
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+concurrency:
+  group: build-test
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: pytest tests/ -v
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            artifact: space-router-node-test-macos-arm64
+          - os: macos-15-large
+            artifact: space-router-node-test-macos-x64
+          - os: windows-latest
+            artifact: space-router-node-test-windows-x64
+          - os: ubuntu-latest
+            artifact: space-router-node-test-linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          VERSION="v0.0.0-test.${{ github.run_number }}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building test version: ${VERSION}"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Freeze version and variant into binary
+        shell: bash
+        run: |
+          echo "BUILD_VERSION = \"${{ steps.version.outputs.version }}\"" > app/_build_version.py
+          echo "BUILD_VARIANT = \"test\"" > app/_build_variant.py
+
+      - name: Build binary
+        run: pyinstaller homenode.spec
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            mv dist/space-router-node.exe "dist/${{ matrix.artifact }}.exe"
+          else
+            mv dist/space-router-node "dist/${{ matrix.artifact }}"
+          fi
+
+      - name: Smoke test (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash tests/e2e/smoke_test.sh "dist/${{ matrix.artifact }}"
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+          SR_PUBLIC_IP: 127.0.0.1
+          SR_UPNP_ENABLED: "false"
+          SR_NODE_PORT: "19090"
+          SR_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\tests\e2e\smoke_test.ps1 -Binary "dist\${{ matrix.artifact }}.exe"
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+          SR_PUBLIC_IP: 127.0.0.1
+          SR_UPNP_ENABLED: "false"
+          SR_NODE_PORT: "19090"
+          SR_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/${{ matrix.artifact }}
+            dist/${{ matrix.artifact }}.exe
+
+  build-gui:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            artifact: spacerouter-gui-test-macos-arm64
+          - os: macos-15-large
+            artifact: spacerouter-gui-test-macos-x64
+          - os: windows-latest
+            artifact: spacerouter-gui-test-windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          VERSION="v0.0.0-test.${{ github.run_number }}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building GUI test version: ${VERSION}"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller pywebview
+
+      - name: Freeze version and variant into binary
+        shell: bash
+        run: |
+          echo "BUILD_VERSION = \"${{ steps.version.outputs.version }}\"" > app/_build_version.py
+          echo "BUILD_VARIANT = \"test\"" > app/_build_variant.py
+
+      - name: Build GUI app
+        run: pyinstaller spacerouter_gui.spec
+
+      # ── GUI smoke tests ──
+      - name: GUI smoke test (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash tests/e2e/gui_smoke_test.sh "dist/SpaceRouter.app/Contents/MacOS/SpaceRouter"
+        timeout-minutes: 3
+
+      - name: GUI smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\tests\e2e\gui_smoke_test.ps1 -Binary "dist\SpaceRouter.exe"
+        timeout-minutes: 3
+
+      # Package macOS DMG (unsigned — test builds skip code signing)
+      - name: Package macOS DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [ -d "dist/SpaceRouter.app" ]; then
+            for attempt in 1 2 3; do
+              if hdiutil create -volname "SpaceRouter" \
+                   -srcfolder "dist/SpaceRouter.app" \
+                   -ov -format UDZO \
+                   "dist/${{ matrix.artifact }}.dmg"; then
+                break
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                echo "hdiutil failed (attempt $attempt/3), retrying in 5s..."
+                sleep 5
+              fi
+            done
+            if [ ! -f "dist/${{ matrix.artifact }}.dmg" ]; then
+              echo "All hdiutil attempts failed"
+              exit 1
+            fi
+          fi
+
+      # Rename Windows artifact
+      - name: Rename artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path "dist\SpaceRouter.exe") {
+            Move-Item "dist\SpaceRouter.exe" "dist\${{ matrix.artifact }}.exe"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/${{ matrix.artifact }}
+            dist/${{ matrix.artifact }}.exe
+            dist/${{ matrix.artifact }}.dmg
+
+  release:
+    needs: [build, build-gui]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Delete previous dev-latest release/tag if it exists
+      - name: Delete previous dev-latest release
+        shell: bash
+        run: |
+          gh release delete dev-latest --yes --cleanup-tag 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Draft Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-latest
+          target_commitish: dev
+          name: "Space Router Home Node (Test Build)"
+          body: |
+            **Test build** from `dev` branch — for internal testing only.
+
+            This is an unsigned build with advanced settings enabled:
+            - Environment selection (Production / Test / Custom API endpoint)
+            - mTLS toggle
+
+            Build: ${{ github.run_number }} | Commit: ${{ github.sha }}
+          files: artifacts/**/*
+          draft: true
+          prerelease: true
+          make_latest: false

@@ -6,7 +6,13 @@
 
 const EVM_RE = /^(0x)?[0-9a-fA-F]{40}$/;
 
+const ENV_URLS = {
+  "https://spacerouter-coordination-api.fly.dev": "Production",
+  "https://spacerouter-coordination-api-test.fly.dev": "Test",
+};
+
 let statusPollId = null;
+let isTestBuild = false;
 
 // ── Helpers ──
 
@@ -207,10 +213,157 @@ async function updateStatus() {
   }
 }
 
+// ── Settings Panel (test builds only) ──
+
+function initSettings() {
+  const envSelect = $("#settings-env");
+  const customUrl = $("#settings-custom-url");
+  const mtlsToggle = $("#settings-mtls");
+  const mtlsLabel = $("#mtls-label");
+  const mtlsWarning = $("#mtls-warning");
+  const saveBtn = $("#btn-save-settings");
+  const statusEl = $("#settings-status");
+
+  // Show/hide custom URL input based on dropdown
+  envSelect.addEventListener("change", function () {
+    if (envSelect.value === "custom") {
+      customUrl.style.display = "block";
+      customUrl.focus();
+    } else {
+      customUrl.style.display = "none";
+    }
+  });
+
+  // mTLS toggle warning
+  mtlsToggle.addEventListener("change", function () {
+    const enabled = mtlsToggle.checked;
+    mtlsLabel.textContent = enabled ? "Enabled" : "Disabled";
+    mtlsWarning.style.display = enabled ? "none" : "block";
+  });
+
+  // Open settings
+  $("#btn-settings").addEventListener("click", async function () {
+    // Load current settings
+    try {
+      const settings = await window.pywebview.api.get_settings();
+      const url = settings.coordination_api_url;
+
+      // Set dropdown value
+      if (ENV_URLS[url]) {
+        envSelect.value = url;
+        customUrl.style.display = "none";
+      } else {
+        envSelect.value = "custom";
+        customUrl.value = url;
+        customUrl.style.display = "block";
+      }
+
+      // Set mTLS toggle
+      mtlsToggle.checked = settings.mtls_enabled;
+      mtlsLabel.textContent = settings.mtls_enabled ? "Enabled" : "Disabled";
+      mtlsWarning.style.display = settings.mtls_enabled ? "none" : "block";
+    } catch (e) {
+      // Use defaults
+    }
+
+    statusEl.textContent = "";
+    hide("screen-status");
+    show("screen-settings");
+  });
+
+  // Back button
+  $("#btn-back").addEventListener("click", function () {
+    hide("screen-settings");
+    showStatus();
+  });
+
+  // Save settings
+  saveBtn.addEventListener("click", async function () {
+    let url = envSelect.value;
+    if (url === "custom") {
+      url = customUrl.value.trim();
+      if (!url) {
+        statusEl.textContent = "Please enter a custom URL";
+        statusEl.style.color = "#e74c3c";
+        return;
+      }
+    }
+
+    const mtlsEnabled = mtlsToggle.checked;
+
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Saving...";
+    statusEl.textContent = "";
+
+    try {
+      const result = await window.pywebview.api.save_settings(url, mtlsEnabled);
+      if (!result.ok) {
+        statusEl.textContent = result.error || "Failed to save";
+        statusEl.style.color = "#e74c3c";
+        saveBtn.disabled = false;
+        saveBtn.textContent = "Save & Restart Node";
+        return;
+      }
+
+      // Restart node with new settings
+      statusEl.textContent = "Restarting node...";
+      statusEl.style.color = "#8080a0";
+
+      await window.pywebview.api.stop_node();
+      await window.pywebview.api.start_node();
+
+      // Update test banner env label
+      updateTestBannerLabel(url);
+
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Save & Restart Node";
+
+      // Go back to status
+      hide("screen-settings");
+      showStatus();
+    } catch (e) {
+      statusEl.textContent = "Failed to save settings";
+      statusEl.style.color = "#e74c3c";
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Save & Restart Node";
+    }
+  });
+}
+
+function updateTestBannerLabel(url) {
+  const label = $("#test-env-label");
+  if (!label) return;
+  const envName = ENV_URLS[url];
+  label.textContent = envName ? "— " + envName : "— Custom";
+}
+
 // ── Initialisation ──
 
 async function init() {
   try {
+    // Check build variant
+    const variant = await window.pywebview.api.get_build_variant();
+    isTestBuild = variant === "test";
+
+    if (isTestBuild) {
+      // Show test banner
+      const banner = document.getElementById("test-banner");
+      banner.style.display = "block";
+      document.body.classList.add("has-test-banner");
+
+      // Show settings button
+      $("#btn-settings").style.display = "block";
+
+      // Load current env for banner label
+      try {
+        const settings = await window.pywebview.api.get_settings();
+        updateTestBannerLabel(settings.coordination_api_url);
+      } catch (e) {}
+
+      // Init settings panel
+      initSettings();
+    }
+
     const needsOnboarding = await window.pywebview.api.needs_onboarding();
 
     if (needsOnboarding) {

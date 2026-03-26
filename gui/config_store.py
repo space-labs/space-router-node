@@ -41,6 +41,7 @@ _DEFAULTS = {
     "SR_COLLECTION_ADDRESS": "",
     "SR_NODE_PORT": "9090",
     "SR_UPNP_ENABLED": "true",
+    "SR_MTLS_ENABLED": "true",
     "SR_LOG_LEVEL": "INFO",
 }
 
@@ -134,6 +135,11 @@ class ConfigStore:
         staking = self.get("SR_STAKING_ADDRESS")
         wallet = self.get("SR_WALLET_ADDRESS")
         return not staking and not wallet
+
+    def save_settings(self, coordination_api_url: str, mtls_enabled: bool) -> None:
+        """Persist advanced settings (coordination API URL and mTLS toggle)."""
+        set_key(str(self._path), "SR_COORDINATION_API_URL", coordination_api_url)
+        set_key(str(self._path), "SR_MTLS_ENABLED", str(mtls_enabled).lower())
 
     def apply_to_env(self) -> None:
         """Load all config values into os.environ so pydantic-settings picks them up."""

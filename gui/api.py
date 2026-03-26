@@ -2,6 +2,7 @@
 
 import logging
 
+from app.variant import BUILD_VARIANT
 from gui.config_store import ConfigStore
 from gui.node_manager import NodeManager
 
@@ -94,3 +95,26 @@ class Api:
             "environment": env,
             "api_url": api_url,
         }
+
+    def get_build_variant(self) -> str:
+        """Return 'test' or 'production'."""
+        return BUILD_VARIANT
+
+    def get_settings(self) -> dict:
+        """Return current settings for the settings panel."""
+        return {
+            "coordination_api_url": self._config.get(
+                "SR_COORDINATION_API_URL",
+                "https://spacerouter-coordination-api.fly.dev",
+            ),
+            "mtls_enabled": self._config.get("SR_MTLS_ENABLED", "true").lower() == "true",
+        }
+
+    def save_settings(self, coordination_api_url: str, mtls_enabled: bool) -> dict:
+        """Save advanced settings. Requires node restart to take effect."""
+        try:
+            self._config.save_settings(coordination_api_url, mtls_enabled)
+            return {"ok": True, "restart_required": True}
+        except Exception as exc:
+            logger.exception("Failed to save settings")
+            return {"ok": False, "error": str(exc)}
