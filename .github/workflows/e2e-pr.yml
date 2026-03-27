@@ -1,8 +1,12 @@
-name: E2E Tests on PR
+name: "Staging E2E Health Check (PR)"
 
 on:
   pull_request:
     branches: [main]
+
+concurrency:
+  group: staging-deploy
+  cancel-in-progress: false
 
 env:
   PYTHON_VERSION: "3.12"
@@ -12,7 +16,6 @@ env:
   GATEWAY_HOST: "gateway.spacerouter.org"
   GATEWAY_HTTP_PORT: "8080"
   GATEWAY_SOCKS5_PORT: "1080"
-  NODE_LABEL: "staging-ci"
 
 jobs:
   unit-tests:
@@ -28,7 +31,13 @@ jobs:
       - run: pytest tests/ -v
 
   e2e-tests:
+    # NOTE: This job tests the *currently deployed* staging node, not the PR
+    # code. It gates PRs on staging health so that merges don't land while
+    # the environment is broken. PR-specific code is validated by unit-tests.
     needs: unit-tests
+    # Skip for fork PRs — secrets are unavailable and gateway tests would
+    # produce confusing auth warnings.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,4 +61,3 @@ jobs:
           GATEWAY_HTTP_PORT: ${{ env.GATEWAY_HTTP_PORT }}
           GATEWAY_SOCKS5_PORT: ${{ env.GATEWAY_SOCKS5_PORT }}
           SR_API_KEY: ${{ secrets.SR_STAGING_API_KEY }}
-          NODE_LABEL: ${{ env.NODE_LABEL }}
