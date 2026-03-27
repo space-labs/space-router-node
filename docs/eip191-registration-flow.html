@@ -1,0 +1,1346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EIP-191 Node Registration — Implementation Guide</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg: #0a0e1a;
+    --bg2: #111827;
+    --card: #1a2036;
+    --border: #2a3352;
+    --accent: #6366f1;
+    --accent2: #818cf8;
+    --green: #22c55e;
+    --orange: #f59e0b;
+    --red: #ef4444;
+    --cyan: #06b6d4;
+    --pink: #ec4899;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --yellow: #eab308;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow-x: hidden;
+    line-height: 1.6;
+  }
+
+  /* ── Hero ── */
+  .hero {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .hero canvas {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    z-index: 0;
+  }
+
+  .hero-content {
+    position: relative;
+    z-index: 1;
+    text-align: center;
+    animation: fadeUp 1s ease-out;
+  }
+
+  .hero h1 {
+    font-size: 3.5rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, #818cf8, #06b6d4, #22c55e);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 0.5rem;
+    letter-spacing: -1px;
+  }
+
+  .hero .subtitle {
+    font-size: 1.2rem;
+    color: var(--muted);
+    margin-bottom: 1rem;
+    max-width: 650px;
+  }
+
+  .hero .badge-row {
+    display: flex;
+    gap: 0.75rem;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-top: 1.5rem;
+  }
+
+  .badge {
+    padding: 0.4rem 1rem;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .badge-node { background: #1e3a5f; color: #60a5fa; border: 1px solid #2563eb; }
+  .badge-coord { background: #064e3b; color: #34d399; border: 1px solid #059669; }
+  .badge-chain { background: #713f12; color: #fbbf24; border: 1px solid #d97706; }
+
+  .scroll-hint {
+    position: absolute;
+    bottom: 2rem;
+    z-index: 1;
+    animation: bounce 2s infinite;
+    color: var(--muted);
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+
+  .scroll-hint span { display: block; margin-top: 0.25rem; font-size: 1.5rem; }
+
+  @keyframes bounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(8px); }
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(30px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes dashflow {
+    to { stroke-dashoffset: -12; }
+  }
+
+  @keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 8px rgba(99,102,241,0.3); }
+    50% { box-shadow: 0 0 20px rgba(99,102,241,0.6); }
+  }
+
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateX(-30px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  /* ── Sections ── */
+  section {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 5rem 2rem;
+  }
+
+  section h2 {
+    font-size: 2rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: var(--accent2);
+  }
+
+  section h2 .num {
+    color: var(--muted);
+    font-weight: 400;
+    font-size: 1rem;
+    margin-right: 0.5rem;
+  }
+
+  .section-sub {
+    color: var(--muted);
+    margin-bottom: 2.5rem;
+    max-width: 700px;
+  }
+
+  /* ── Two-column layout ── */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+    margin-bottom: 2rem;
+  }
+
+  @media (max-width: 768px) {
+    .two-col { grid-template-columns: 1fr; }
+    .hero h1 { font-size: 2.2rem; }
+  }
+
+  /* ── Repo card ── */
+  .repo-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 2rem;
+    transition: border-color 0.3s, transform 0.3s;
+  }
+
+  .repo-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+  }
+
+  .repo-card h3 {
+    font-size: 1.2rem;
+    margin-bottom: 0.25rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .repo-card .repo-path {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--cyan);
+    margin-bottom: 1rem;
+  }
+
+  .repo-card p { font-size: 0.9rem; color: var(--muted); }
+
+  /* ── File tree ── */
+  .file-tree {
+    background: var(--bg2);
+    border-radius: 10px;
+    padding: 1.25rem 1.5rem;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    line-height: 2;
+    margin-top: 1rem;
+    border: 1px solid var(--border);
+    overflow-x: auto;
+  }
+
+  .file-tree .new { color: var(--green); }
+  .file-tree .modified { color: var(--orange); }
+  .file-tree .unchanged { color: var(--muted); }
+  .file-tree .dir { color: var(--accent2); }
+  .file-tree .badge-sm {
+    font-size: 0.6rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    margin-left: 0.5rem;
+  }
+  .file-tree .badge-new { background: #064e3b; color: #34d399; }
+  .file-tree .badge-mod { background: #713f12; color: #fbbf24; }
+
+  /* ── Animated sequence diagram ── */
+  .sequence-container {
+    background: var(--bg2);
+    border-radius: 16px;
+    padding: 2rem;
+    border: 1px solid var(--border);
+    overflow-x: auto;
+    position: relative;
+  }
+
+  .seq-actors {
+    display: flex;
+    justify-content: space-between;
+    padding: 0 2rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .seq-actor {
+    text-align: center;
+    min-width: 140px;
+    font-weight: 600;
+    font-size: 0.85rem;
+    padding: 0.6rem 1.2rem;
+    border-radius: 10px;
+    background: var(--card);
+    border: 1px solid var(--border);
+  }
+
+  .seq-actor.node { border-color: #2563eb; }
+  .seq-actor.coord { border-color: #059669; }
+  .seq-actor.chain { border-color: #d97706; }
+
+  .seq-lifelines {
+    position: relative;
+    min-height: 500px;
+    display: flex;
+    justify-content: space-between;
+    padding: 0 2rem;
+  }
+
+  .seq-lifeline {
+    width: 2px;
+    background: var(--border);
+    position: relative;
+    min-width: 140px;
+    display: flex;
+    justify-content: center;
+  }
+
+  .seq-lifeline::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 2px;
+    height: 100%;
+    background: repeating-linear-gradient(
+      180deg,
+      var(--border) 0px,
+      var(--border) 6px,
+      transparent 6px,
+      transparent 12px
+    );
+  }
+
+  .seq-messages {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  .seq-msg {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    opacity: 0;
+    transition: opacity 0.5s ease;
+    pointer-events: auto;
+  }
+
+  .seq-msg.visible { opacity: 1; }
+
+  .seq-msg .arrow-line {
+    height: 2px;
+    flex: 1;
+    position: relative;
+  }
+
+  .seq-msg .arrow-line::after {
+    content: '';
+    position: absolute;
+    right: -1px;
+    top: -4px;
+    border: 5px solid transparent;
+  }
+
+  .seq-msg.right .arrow-line {
+    background: linear-gradient(90deg, var(--cyan), var(--accent));
+  }
+  .seq-msg.right .arrow-line::after {
+    border-left-color: var(--accent);
+  }
+
+  .seq-msg.left .arrow-line {
+    background: linear-gradient(90deg, var(--accent), var(--green));
+  }
+  .seq-msg.left .arrow-line::after {
+    right: auto;
+    left: -1px;
+    border-right-color: var(--green);
+    border-left-color: transparent;
+  }
+
+  .seq-label {
+    position: absolute;
+    top: -22px;
+    font-size: 0.72rem;
+    font-family: 'JetBrains Mono', monospace;
+    white-space: nowrap;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    background: var(--card);
+    border: 1px solid var(--border);
+  }
+
+  .seq-label.above { top: -22px; }
+
+  /* ── Step cards ── */
+  .step-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .step-card {
+    display: grid;
+    grid-template-columns: 60px 1fr;
+    gap: 1.5rem;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 1.75rem;
+    opacity: 0;
+    transform: translateY(20px);
+    transition: all 0.5s ease;
+  }
+
+  .step-card.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .step-card:hover {
+    border-color: var(--accent);
+  }
+
+  .step-num {
+    width: 50px;
+    height: 50px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.4rem;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  .step-num.node-step { background: #1e3a5f; color: #60a5fa; }
+  .step-num.coord-step { background: #064e3b; color: #34d399; }
+  .step-num.chain-step { background: #713f12; color: #fbbf24; }
+  .step-num.both-step { background: #3b1764; color: #c084fc; }
+
+  .step-card h3 { font-size: 1.05rem; margin-bottom: 0.35rem; }
+  .step-card p { font-size: 0.85rem; color: var(--muted); }
+  .step-card .where {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--cyan);
+    margin-top: 0.5rem;
+  }
+
+  /* ── Code block ── */
+  .code-block {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem 1.5rem;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    line-height: 1.7;
+    overflow-x: auto;
+    margin-top: 1rem;
+    position: relative;
+  }
+
+  .code-block .code-title {
+    position: absolute;
+    top: -0.6rem;
+    left: 1rem;
+    background: var(--bg);
+    padding: 0 0.5rem;
+    font-size: 0.7rem;
+    color: var(--cyan);
+  }
+
+  .code-block .kw { color: #c084fc; }
+  .code-block .fn { color: #60a5fa; }
+  .code-block .str { color: #34d399; }
+  .code-block .cmt { color: #64748b; }
+  .code-block .num { color: #fbbf24; }
+  .code-block .op { color: #94a3b8; }
+
+  /* ── Security matrix ── */
+  .security-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 1.25rem;
+  }
+
+  .sec-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    transition: all 0.3s;
+  }
+
+  .sec-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+
+  .sec-card .sec-icon { font-size: 1.5rem; margin-bottom: 0.75rem; display: block; }
+  .sec-card h4 { font-size: 0.95rem; margin-bottom: 0.4rem; }
+  .sec-card p { font-size: 0.82rem; color: var(--muted); }
+
+  /* ── Test results ── */
+  .test-results {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    line-height: 1.8;
+  }
+
+  .test-pass { color: var(--green); }
+  .test-fail { color: var(--red); }
+  .test-section { color: var(--accent2); font-weight: 600; margin-top: 0.75rem; display: block; }
+
+  /* ── Tags ── */
+  .tag {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-family: 'JetBrains Mono', monospace;
+    margin-top: 0.5rem;
+    margin-right: 0.25rem;
+  }
+  .tag-python { background: #1e3a5f; color: #60a5fa; }
+  .tag-fastapi { background: #064e3b; color: #34d399; }
+  .tag-eip191 { background: #3b1764; color: #c084fc; }
+  .tag-tls { background: #713f12; color: #fbbf24; }
+  .tag-sqlite { background: #1e3a5f; color: #93c5fd; }
+  .tag-web3 { background: #5c1a1a; color: #fca5a5; }
+
+  /* ── Footer ── */
+  footer {
+    text-align: center;
+    padding: 3rem 2rem;
+    color: var(--muted);
+    font-size: 0.85rem;
+    border-top: 1px solid var(--border);
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  /* ── Interactive flow ── */
+  .interactive-flow {
+    position: relative;
+    min-height: 420px;
+    margin: 2rem 0;
+  }
+
+  .flow-entity {
+    position: absolute;
+    background: var(--card);
+    border: 2px solid var(--border);
+    border-radius: 14px;
+    padding: 1.2rem 1.5rem;
+    text-align: center;
+    min-width: 180px;
+    transition: all 0.3s;
+    cursor: default;
+  }
+
+  .flow-entity:hover {
+    border-color: var(--accent);
+    transform: scale(1.03);
+  }
+
+  .flow-entity .entity-icon { font-size: 2rem; margin-bottom: 0.4rem; display: block; }
+  .flow-entity .entity-name { font-weight: 600; font-size: 0.95rem; }
+  .flow-entity .entity-detail { font-size: 0.75rem; color: var(--muted); margin-top: 0.2rem; }
+
+  .flow-entity.home-node { border-color: #2563eb; }
+  .flow-entity.coord-api { border-color: #059669; }
+  .flow-entity.blockchain { border-color: #d97706; }
+  .flow-entity.target { border-color: #7c3aed; }
+  .flow-entity.gateway { border-color: #ec4899; }
+
+  /* ── Animated arrows in SVG overlay ── */
+  .flow-svg {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+  }
+
+  .flow-svg .arrow-path {
+    stroke-width: 2;
+    fill: none;
+    stroke-dasharray: 8 4;
+    animation: dashflow 1s linear infinite;
+  }
+
+  .flow-svg .arrow-head {
+    fill: var(--accent);
+  }
+
+  /* ── Tooltip ── */
+  .tooltip {
+    position: relative;
+  }
+
+  .tooltip .tip-text {
+    visibility: hidden;
+    background: var(--card);
+    border: 1px solid var(--accent);
+    color: var(--text);
+    text-align: left;
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    position: absolute;
+    z-index: 10;
+    bottom: 110%;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 280px;
+    font-size: 0.78rem;
+    font-weight: 400;
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+  }
+
+  .tooltip:hover .tip-text {
+    visibility: visible;
+    opacity: 1;
+  }
+
+  /* ── Nav dots ── */
+  .nav-dots {
+    position: fixed;
+    right: 1.5rem;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .nav-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--border);
+    cursor: pointer;
+    transition: all 0.3s;
+  }
+
+  .nav-dot.active {
+    background: var(--accent);
+    box-shadow: 0 0 8px rgba(99,102,241,0.5);
+    transform: scale(1.3);
+  }
+</style>
+</head>
+<body>
+
+<!-- Nav dots -->
+<div class="nav-dots" id="navDots"></div>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- HERO -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<div class="hero" id="sec-hero">
+  <canvas id="heroCanvas"></canvas>
+  <div class="hero-content">
+    <h1>EIP-191 Node Registration</h1>
+    <p class="subtitle">
+      Challenge-response authentication for Space Router home nodes,
+      backed by on-chain Creditcoin staking
+    </p>
+    <div class="badge-row">
+      <span class="badge badge-node">space-router-node</span>
+      <span class="badge badge-coord">coordination-api</span>
+      <span class="badge badge-chain">Creditcoin L1</span>
+    </div>
+  </div>
+  <div class="scroll-hint" onclick="document.getElementById('sec-overview').scrollIntoView({behavior:'smooth'})">
+    Scroll to explore
+    <span>&darr;</span>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- 1. OVERVIEW -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<section id="sec-overview">
+  <h2><span class="num">01</span> What We Built</h2>
+  <p class="section-sub">
+    A two-step challenge-verify registration flow that proves a home node operator
+    has staked at least 1,000 CTC on the Creditcoin blockchain. Changes span two repositories.
+  </p>
+
+  <div class="two-col">
+    <div class="repo-card">
+      <h3>Home Node</h3>
+      <div class="repo-path">gluwa/space-router-node</div>
+      <p>
+        The residential proxy daemon. On startup it generates an EVM keypair,
+        requests a challenge nonce, signs it with EIP-191, and sends the
+        signed proof to the Coordination API. Runs a TLS server for
+        proxying traffic.
+      </p>
+      <div class="file-tree">
+        <span class="dir">app/</span><br>
+        &nbsp;&nbsp;<span class="new">identity.py</span><span class="badge-sm badge-new">NEW</span> &mdash; NodeIdentity + EIP-191 signing<br>
+        &nbsp;&nbsp;<span class="modified">registration.py</span><span class="badge-sm badge-mod">MOD</span> &mdash; challenge-verify flow<br>
+        &nbsp;&nbsp;<span class="modified">config.py</span><span class="badge-sm badge-mod">MOD</span> &mdash; +NODE_PRIVATE_KEY, NODE_KEY_PATH<br>
+        &nbsp;&nbsp;<span class="modified">main.py</span><span class="badge-sm badge-mod">MOD</span> &mdash; load identity on startup<br>
+        &nbsp;&nbsp;<span class="modified">proxy_handler.py</span><span class="badge-sm badge-mod">MOD</span> &mdash; Python 3.9 compat fix<br>
+        <span class="dir">tests/</span><br>
+        &nbsp;&nbsp;<span class="modified">test_registration.py</span><span class="badge-sm badge-mod">MOD</span> &mdash; 12 unit tests<br>
+        &nbsp;&nbsp;<span class="dir">e2e/</span><br>
+        &nbsp;&nbsp;&nbsp;&nbsp;<span class="new">test_e2e_integration.py</span><span class="badge-sm badge-new">NEW</span> &mdash; 13 e2e tests<br>
+        <span class="modified">requirements.txt</span><span class="badge-sm badge-mod">MOD</span> &mdash; +eth-account
+      </div>
+      <div style="margin-top:0.75rem">
+        <span class="tag tag-python">Python</span>
+        <span class="tag tag-eip191">EIP-191</span>
+        <span class="tag tag-tls">TLS</span>
+      </div>
+    </div>
+
+    <div class="repo-card">
+      <h3>Coordination API</h3>
+      <div class="repo-path">gluwa/space-router</div>
+      <p>
+        The FastAPI backend that gates registration. Checks on-chain stake via
+        <code>stakeInfoEssential()</code>, issues nonces, verifies EIP-191
+        signatures, prevents Sybil attacks (unique IP per node), and classifies IPs.
+      </p>
+      <div class="file-tree">
+        <span class="dir">coordination-api/app/routers/</span><br>
+        &nbsp;&nbsp;<span class="modified">registration.py</span><span class="badge-sm badge-mod">MOD</span> &mdash; challenge + verify endpoints<br>
+        <span class="dir">coordination-api/tests/</span><br>
+        &nbsp;&nbsp;<span class="modified">test_registration.py</span><span class="badge-sm badge-mod">MOD</span> &mdash; 14 unit tests<br>
+        <span class="dir">coordination-api/</span><br>
+        &nbsp;&nbsp;<span class="modified">.env.example</span><span class="badge-sm badge-mod">MOD</span> &mdash; contract address default
+      </div>
+      <div style="margin-top:0.75rem">
+        <span class="tag tag-fastapi">FastAPI</span>
+        <span class="tag tag-web3">web3.py</span>
+        <span class="tag tag-sqlite">SQLite</span>
+        <span class="tag tag-eip191">EIP-191</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- 2. ARCHITECTURE FLOW -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<section id="sec-arch">
+  <h2><span class="num">02</span> Architecture Overview</h2>
+  <p class="section-sub">
+    Three actors participate in registration: the Home Node, the Coordination API,
+    and the Creditcoin blockchain.
+  </p>
+
+  <div class="interactive-flow" id="archFlow">
+    <svg class="flow-svg" viewBox="0 0 1000 400" preserveAspectRatio="xMidYMid meet">
+      <!-- Node -> Coord: Challenge -->
+      <path class="arrow-path" stroke="var(--cyan)" d="M 230 80 Q 400 40, 570 80" marker-end="url(#arrowCyan)"/>
+      <text x="380" y="45" fill="var(--cyan)" font-size="11" font-family="JetBrains Mono">1. POST /challenge {address}</text>
+
+      <!-- Coord -> Chain: Stake check -->
+      <path class="arrow-path" stroke="var(--orange)" d="M 760 100 Q 850 180, 850 240" marker-end="url(#arrowOrange)"/>
+      <text x="860" y="180" fill="var(--orange)" font-size="11" font-family="JetBrains Mono">2. stakeInfoEssential()</text>
+
+      <!-- Coord -> Node: Nonce -->
+      <path class="arrow-path" stroke="var(--green)" d="M 570 120 Q 400 160, 230 120" marker-end="url(#arrowGreen)"/>
+      <text x="350" y="155" fill="var(--green)" font-size="11" font-family="JetBrains Mono">3. {nonce, expires_in}</text>
+
+      <!-- Node signs locally -->
+      <text x="60" y="195" fill="var(--pink)" font-size="11" font-family="JetBrains Mono">4. EIP-191 sign(nonce)</text>
+
+      <!-- Node -> Coord: Verify -->
+      <path class="arrow-path" stroke="var(--cyan)" d="M 230 230 Q 400 190, 570 230" marker-end="url(#arrowCyan)"/>
+      <text x="310" y="205" fill="var(--cyan)" font-size="11" font-family="JetBrains Mono">5. POST /verify {signed_nonce, ...}</text>
+
+      <!-- Coord verifies + upserts -->
+      <text x="620" y="275" fill="var(--accent2)" font-size="11" font-family="JetBrains Mono">6. ecrecover + Sybil check + upsert</text>
+
+      <!-- Coord -> Node: Registered -->
+      <path class="arrow-path" stroke="var(--green)" d="M 570 310 Q 400 350, 230 310" marker-end="url(#arrowGreen)"/>
+      <text x="310" y="355" fill="var(--green)" font-size="11" font-family="JetBrains Mono">7. {node_id, status: registered}</text>
+
+      <defs>
+        <marker id="arrowCyan" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="var(--cyan)"/>
+        </marker>
+        <marker id="arrowGreen" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto">
+          <polygon points="8 0, 0 3, 8 6" fill="var(--green)"/>
+        </marker>
+        <marker id="arrowOrange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="var(--orange)"/>
+        </marker>
+      </defs>
+    </svg>
+
+    <div class="flow-entity home-node" style="left:2%; top:50px; min-width:200px;">
+      <span class="entity-icon">&#x1f3e0;</span>
+      <span class="entity-name">Home Node</span>
+      <span class="entity-detail">space-router-node</span>
+      <span class="entity-detail" style="color:var(--cyan)">:9090 TLS</span>
+    </div>
+
+    <div class="flow-entity coord-api" style="left:42%; top:50px; min-width:210px;">
+      <span class="entity-icon">&#x1f4e1;</span>
+      <span class="entity-name">Coordination API</span>
+      <span class="entity-detail">FastAPI + SQLite</span>
+      <span class="entity-detail" style="color:var(--green)">:8000 HTTP</span>
+    </div>
+
+    <div class="flow-entity blockchain" style="right:2%; top:230px; min-width:190px;">
+      <span class="entity-icon">&#x26d3;</span>
+      <span class="entity-name">Creditcoin L1</span>
+      <span class="entity-detail">Staking Contract</span>
+      <span class="entity-detail" style="color:var(--orange)">mainnet3 RPC</span>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- 3. STEP-BY-STEP -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<section id="sec-steps">
+  <h2><span class="num">03</span> Step-by-Step Flow</h2>
+  <p class="section-sub">
+    Each step shows what happens, where in the code it lives, and which project owns it.
+  </p>
+
+  <div class="step-cards">
+    <div class="step-card" data-anim>
+      <div class="step-num node-step">1</div>
+      <div>
+        <h3>Home Node Starts Up</h3>
+        <p>
+          Loads the EVM private key from <code>SR_NODE_PRIVATE_KEY</code> env var
+          (or reads from <code>SR_NODE_KEY_PATH</code> file). Creates a <code>NodeIdentity</code>
+          that derives the EVM address and provides an EIP-191 signing method.
+        </p>
+        <div class="where">space-router-node / app/identity.py &rarr; load_identity()</div>
+        <div class="code-block">
+          <span class="code-title">app/identity.py</span>
+          <span class="kw">class</span> <span class="fn">NodeIdentity</span>:<br>
+          &nbsp;&nbsp;<span class="kw">def</span> <span class="fn">__init__</span>(<span class="op">self</span>, private_key):<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;<span class="op">self</span>._account = Account.<span class="fn">from_key</span>(private_key)<br>
+          <br>
+          &nbsp;&nbsp;<span class="kw">def</span> <span class="fn">sign_message</span>(<span class="op">self</span>, text):<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;message = <span class="fn">encode_defunct</span>(text=text)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">return</span> <span class="op">self</span>._account.<span class="fn">sign_message</span>(message).signature.<span class="fn">hex</span>()
+        </div>
+      </div>
+    </div>
+
+    <div class="step-card" data-anim>
+      <div class="step-num node-step">2</div>
+      <div>
+        <h3>Request Challenge</h3>
+        <p>
+          The node sends its EVM address to the Coordination API to request a
+          registration challenge. This is the first HTTP call.
+        </p>
+        <div class="where">space-router-node / app/registration.py &rarr; register_node()</div>
+        <div class="code-block">
+          <span class="code-title">POST /nodes/register/challenge</span>
+          {<br>
+          &nbsp;&nbsp;<span class="str">"address"</span>: <span class="str">"0xabc...def"</span><br>
+          }
+        </div>
+      </div>
+    </div>
+
+    <div class="step-card" data-anim>
+      <div class="step-num chain-step">3</div>
+      <div>
+        <h3>On-Chain Stake Verification</h3>
+        <p>
+          The Coordination API queries the Creditcoin staking contract at
+          <code>0x5d07...40Fd8</code> via <code>stakeInfoEssential(address)</code>.
+          Returns <code>(stakedAmount, firstStakeTimestamp, isLocked)</code>.
+          If stake &lt; 1,000 CTC, the request is rejected with HTTP 403.
+        </p>
+        <div class="where">coordination-api / app/routers/registration.py &rarr; _get_staked_wei()</div>
+        <div class="code-block">
+          <span class="code-title">ABI</span>
+          stakeInfoEssential(address) &rarr; (<span class="num">uint128</span> stakedAmount, <span class="num">uint64</span> firstStakeTimestamp, <span class="num">bool</span> isLocked)<br>
+          <br>
+          <span class="cmt">// Minimum: 1000 CTC = 1000 * 10^18 wei</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="step-card" data-anim>
+      <div class="step-num coord-step">4</div>
+      <div>
+        <h3>Issue Nonce</h3>
+        <p>
+          If stake is sufficient, the API generates a cryptographically random 64-char hex nonce,
+          stores it in memory with a 5-minute TTL keyed by address, and returns it.
+        </p>
+        <div class="where">coordination-api / app/routers/registration.py &rarr; request_challenge()</div>
+        <div class="code-block">
+          <span class="code-title">Response: 200</span>
+          {<br>
+          &nbsp;&nbsp;<span class="str">"nonce"</span>: <span class="str">"a1b2c3...64 hex chars"</span>,<br>
+          &nbsp;&nbsp;<span class="str">"expires_in"</span>: <span class="num">300</span><br>
+          }
+        </div>
+      </div>
+    </div>
+
+    <div class="step-card" data-anim>
+      <div class="step-num node-step">5</div>
+      <div>
+        <h3>Sign Nonce (EIP-191)</h3>
+        <p>
+          The home node signs the nonce using its private key with EIP-191
+          <code>personal_sign</code>. This creates a 65-byte signature
+          that proves key ownership without revealing the private key.
+        </p>
+        <div class="where">space-router-node / app/identity.py &rarr; NodeIdentity.sign_message()</div>
+        <div class="code-block">
+          <span class="code-title">EIP-191 Signing</span>
+          <span class="cmt"># Prepends "\x19Ethereum Signed Message:\n{len}" before hashing</span><br>
+          message = <span class="fn">encode_defunct</span>(text=nonce)<br>
+          signature = account.<span class="fn">sign_message</span>(message)
+        </div>
+      </div>
+    </div>
+
+    <div class="step-card" data-anim>
+      <div class="step-num node-step">6</div>
+      <div>
+        <h3>Submit Verification</h3>
+        <p>
+          The node sends the signed nonce along with its endpoint URL, public IP,
+          connectivity type, and optional metadata (region, label).
+        </p>
+        <div class="where">space-router-node / app/registration.py &rarr; register_node()</div>
+        <div class="code-block">
+          <span class="code-title">POST /nodes/register/verify</span>
+          {<br>
+          &nbsp;&nbsp;<span class="str">"address"</span>: <span class="str">"0xabc...def"</span>,<br>
+          &nbsp;&nbsp;<span class="str">"endpoint_url"</span>: <span class="str">"https://1.2.3.4:9090"</span>,<br>
+          &nbsp;&nbsp;<span class="str">"signed_nonce"</span>: <span class="str">"0x1a2b3c..."</span>,<br>
+          &nbsp;&nbsp;<span class="str">"public_ip"</span>: <span class="str">"1.2.3.4"</span>,<br>
+          &nbsp;&nbsp;<span class="str">"connectivity_type"</span>: <span class="str">"direct"</span> | <span class="str">"upnp"</span>,<br>
+          &nbsp;&nbsp;<span class="str">"region"</span>: <span class="str">"us-west"</span>,<br>
+          &nbsp;&nbsp;<span class="str">"label"</span>: <span class="str">"my-node"</span><br>
+          }
+        </div>
+      </div>
+    </div>
+
+    <div class="step-card" data-anim>
+      <div class="step-num coord-step">7</div>
+      <div>
+        <h3>Verify Signature + Security Checks</h3>
+        <p>
+          The API performs four checks:<br>
+          <strong>a)</strong> Recovers the signer via <code>ecrecover</code> and checks it matches the claimed address.<br>
+          <strong>b)</strong> Consumes the nonce (one-time use, prevents replay).<br>
+          <strong>c)</strong> <strong>Sybil prevention:</strong> rejects if another online node already uses the same public IP.<br>
+          <strong>d)</strong> Classifies the IP via ipinfo.io (residential/datacenter/mobile).
+        </p>
+        <div class="where">coordination-api / app/routers/registration.py &rarr; verify_and_register()</div>
+      </div>
+    </div>
+
+    <div class="step-card" data-anim>
+      <div class="step-num coord-step">8</div>
+      <div>
+        <h3>Upsert Node Record</h3>
+        <p>
+          The API either creates a new node row or updates an existing one
+          (matched by EVM address). Sets status to <code>online</code> with
+          <code>health_score: 1.0</code>. Returns the <code>node_id</code>.
+        </p>
+        <div class="where">coordination-api / app/routers/registration.py &rarr; verify_and_register()</div>
+        <div class="code-block">
+          <span class="code-title">Response: 200</span>
+          {<br>
+          &nbsp;&nbsp;<span class="str">"status"</span>: <span class="str">"registered"</span> | <span class="str">"updated"</span>,<br>
+          &nbsp;&nbsp;<span class="str">"node_id"</span>: <span class="str">"uuid-here"</span>,<br>
+          &nbsp;&nbsp;<span class="str">"address"</span>: <span class="str">"0xabc...def"</span>,<br>
+          &nbsp;&nbsp;<span class="str">"endpoint_url"</span>: <span class="str">"https://1.2.3.4:9090"</span>,<br>
+          &nbsp;&nbsp;<span class="str">"ip_type"</span>: <span class="str">"residential"</span>,<br>
+          &nbsp;&nbsp;<span class="str">"ip_region"</span>: <span class="str">"Portland, US"</span><br>
+          }
+        </div>
+      </div>
+    </div>
+
+    <div class="step-card" data-anim>
+      <div class="step-num node-step">9</div>
+      <div>
+        <h3>Start TLS Proxy Server</h3>
+        <p>
+          With the <code>node_id</code> in hand, the home node starts its TLS server
+          (auto-generated self-signed cert) and begins accepting proxied traffic
+          from the Proxy Gateway. On shutdown, it deregisters (best-effort PATCH to set status = offline).
+        </p>
+        <div class="where">space-router-node / app/main.py &rarr; _run()</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- 4. SECURITY MECHANISMS -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<section id="sec-security">
+  <h2><span class="num">04</span> Security Mechanisms</h2>
+  <p class="section-sub">
+    Multiple layers protect the network from unauthorized nodes and attacks.
+  </p>
+
+  <div class="security-grid">
+    <div class="sec-card">
+      <span class="sec-icon">&#x1f512;</span>
+      <h4>EIP-191 Signatures</h4>
+      <p>
+        Nodes prove private key ownership without transmitting the key.
+        The <code>personal_sign</code> prefix prevents cross-protocol replay attacks.
+      </p>
+    </div>
+
+    <div class="sec-card">
+      <span class="sec-icon">&#x26d3;</span>
+      <h4>On-Chain Stake Gate</h4>
+      <p>
+        Must have &ge; 1,000 CTC staked on Creditcoin L1.
+        Checked via <code>stakeInfoEssential()</code> before any nonce is issued.
+        Economic cost deters Sybil attacks.
+      </p>
+    </div>
+
+    <div class="sec-card">
+      <span class="sec-icon">&#x1f6e1;</span>
+      <h4>Sybil Prevention</h4>
+      <p>
+        Only one online node per public IP address.
+        Different wallets attempting to register with the same IP get HTTP 409.
+        Same wallet can re-register (upsert).
+      </p>
+    </div>
+
+    <div class="sec-card">
+      <span class="sec-icon">&#x23f1;</span>
+      <h4>Nonce TTL + One-Time Use</h4>
+      <p>
+        Challenge nonces expire after 5 minutes and are consumed on first use.
+        Prevents replay of old signatures.
+      </p>
+    </div>
+
+    <div class="sec-card">
+      <span class="sec-icon">&#x1f50d;</span>
+      <h4>IP Classification</h4>
+      <p>
+        Each node's IP is classified via ipinfo.io as residential, datacenter,
+        mobile, or business. Datacenter IPs can be flagged or deprioritized.
+      </p>
+    </div>
+
+    <div class="sec-card">
+      <span class="sec-icon">&#x1f510;</span>
+      <h4>TLS Everywhere</h4>
+      <p>
+        Home nodes auto-generate self-signed TLS certificates. All proxy
+        traffic between the Gateway and Home Node is encrypted.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- 5. WHAT EACH PROJECT DOES -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<section id="sec-projects">
+  <h2><span class="num">05</span> What Each Project Does</h2>
+  <p class="section-sub">
+    Side-by-side comparison of responsibilities.
+  </p>
+
+  <div class="two-col">
+    <div class="repo-card" style="border-color:#2563eb;">
+      <h3 style="color:#60a5fa;">&#x1f3e0; space-router-node</h3>
+      <div class="repo-path" style="margin-bottom:1.5rem;">Home Node Daemon</div>
+      <div style="font-size:0.88rem; color:var(--muted); line-height:2;">
+        <strong style="color:var(--text);">Owns:</strong><br>
+        &#x2022; EVM private key storage + loading<br>
+        &#x2022; EIP-191 message signing<br>
+        &#x2022; HTTP calls to Coordination API<br>
+        &#x2022; TLS certificate generation<br>
+        &#x2022; TCP proxy server (CONNECT + HTTP forward)<br>
+        &#x2022; UPnP port mapping<br>
+        &#x2022; Graceful shutdown + deregistration<br>
+        <br>
+        <strong style="color:var(--text);">Does NOT:</strong><br>
+        &#x2022; Verify signatures<br>
+        &#x2022; Query the blockchain<br>
+        &#x2022; Store any state in a database<br>
+        &#x2022; Know about other nodes
+      </div>
+    </div>
+
+    <div class="repo-card" style="border-color:#059669;">
+      <h3 style="color:#34d399;">&#x1f4e1; coordination-api</h3>
+      <div class="repo-path" style="margin-bottom:1.5rem;">Coordination API (FastAPI)</div>
+      <div style="font-size:0.88rem; color:var(--muted); line-height:2;">
+        <strong style="color:var(--text);">Owns:</strong><br>
+        &#x2022; On-chain stake verification (web3.py)<br>
+        &#x2022; Nonce generation + TTL management<br>
+        &#x2022; EIP-191 signature recovery (ecrecover)<br>
+        &#x2022; Sybil prevention (unique IP check)<br>
+        &#x2022; IP classification (ipinfo.io)<br>
+        &#x2022; Node registry (SQLite / Supabase)<br>
+        &#x2022; Node routing for the Proxy Gateway<br>
+        <br>
+        <strong style="color:var(--text);">Does NOT:</strong><br>
+        &#x2022; Hold any private keys<br>
+        &#x2022; Proxy any user traffic<br>
+        &#x2022; Generate TLS certificates
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- 6. TEST COVERAGE -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<section id="sec-tests">
+  <h2><span class="num">06</span> Test Coverage</h2>
+  <p class="section-sub">
+    39 tests total across both projects: unit tests with mocked HTTP (respx) and
+    full e2e integration tests with a real Coordination API subprocess.
+  </p>
+
+  <div class="two-col">
+    <div>
+      <h3 style="color:#60a5fa; font-size:1rem; margin-bottom:0.75rem;">space-router-node (25 tests)</h3>
+      <div class="test-results">
+        <span class="test-section">Unit: Registration (12 tests)</span>
+        <span class="test-pass">PASS</span> test_first_service_succeeds<br>
+        <span class="test-pass">PASS</span> test_fallback_to_second_service<br>
+        <span class="test-pass">PASS</span> test_fallback_to_third_service<br>
+        <span class="test-pass">PASS</span> test_all_services_fail<br>
+        <span class="test-pass">PASS</span> test_register_success<br>
+        <span class="test-pass">PASS</span> test_register_with_upnp_endpoint<br>
+        <span class="test-pass">PASS</span> test_insufficient_stake_raises<br>
+        <span class="test-pass">PASS</span> test_verify_failure_raises<br>
+        <span class="test-pass">PASS</span> test_challenge_server_error_raises<br>
+        <span class="test-pass">PASS</span> test_register_without_optional_fields<br>
+        <span class="test-pass">PASS</span> test_deregister_success<br>
+        <span class="test-pass">PASS</span> test_deregister_failure_logged_not_raised<br>
+        <span class="test-section">E2E Integration (13 tests)</span>
+        <span class="test-pass">PASS</span> test_full_registration_lifecycle<br>
+        <span class="test-pass">PASS</span> test_registration_via_node_functions<br>
+        <span class="test-pass">PASS</span> test_wrong_signature_rejected<br>
+        <span class="test-pass">PASS</span> test_nonce_consumed_after_use<br>
+        <span class="test-pass">PASS</span> test_sybil_prevention_same_ip<br>
+        <span class="test-pass">PASS</span> test_re_registration_updates_node<br>
+        <span class="test-pass">PASS</span> test_two_nodes_different_ips<br>
+        <span class="test-pass">PASS</span> test_node_re_registers_after_offline<br>
+        <span class="test-pass">PASS</span> test_register_and_proxy_http<br>
+        <span class="test-pass">PASS</span> test_connect_tunnel<br>
+        <span class="test-pass">PASS</span> test_rejects_bad_request<br>
+        <span class="test-pass">PASS</span> test_returns_502_for_unreachable_target<br>
+        <span class="test-pass">PASS</span> test_strips_spacerouter_headers
+      </div>
+    </div>
+
+    <div>
+      <h3 style="color:#34d399; font-size:1rem; margin-bottom:0.75rem;">coordination-api (14 tests)</h3>
+      <div class="test-results">
+        <span class="test-section">Unit: Registration Endpoints</span>
+        <span class="test-pass">PASS</span> test_challenge_returns_nonce<br>
+        <span class="test-pass">PASS</span> test_challenge_insufficient_stake<br>
+        <span class="test-pass">PASS</span> test_challenge_invalid_address<br>
+        <span class="test-pass">PASS</span> test_verify_registers_node<br>
+        <span class="test-pass">PASS</span> test_verify_upserts_existing<br>
+        <span class="test-pass">PASS</span> test_verify_wrong_signature<br>
+        <span class="test-pass">PASS</span> test_verify_no_pending_challenge<br>
+        <span class="test-pass">PASS</span> test_verify_expired_nonce<br>
+        <span class="test-pass">PASS</span> test_nonce_consumed_on_verify<br>
+        <span class="test-section">Sybil Prevention</span>
+        <span class="test-pass">PASS</span> test_sybil_duplicate_ip_rejected<br>
+        <span class="test-pass">PASS</span> test_sybil_same_wallet_allowed<br>
+        <span class="test-pass">PASS</span> test_sybil_different_ips_allowed<br>
+        <span class="test-section">IP Classification</span>
+        <span class="test-pass">PASS</span> test_ip_classification_during_register<br>
+        <span class="test-pass">PASS</span> test_ip_classification_failure_non_blocking
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- 7. ERROR SCENARIOS -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<section id="sec-errors">
+  <h2><span class="num">07</span> Error Scenarios</h2>
+  <p class="section-sub">
+    What happens when things go wrong at each step.
+  </p>
+
+  <div style="overflow-x:auto;">
+    <table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
+      <thead>
+        <tr style="border-bottom:2px solid var(--border);">
+          <th style="text-align:left; padding:0.75rem; color:var(--accent2);">Scenario</th>
+          <th style="text-align:left; padding:0.75rem; color:var(--accent2);">HTTP Code</th>
+          <th style="text-align:left; padding:0.75rem; color:var(--accent2);">Who Handles</th>
+          <th style="text-align:left; padding:0.75rem; color:var(--accent2);">Node Behavior</th>
+        </tr>
+      </thead>
+      <tbody style="color:var(--muted);">
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.75rem;">Stake below 1,000 CTC</td>
+          <td style="padding:0.75rem;"><span style="color:var(--orange)">403</span></td>
+          <td style="padding:0.75rem;">Coordination API</td>
+          <td style="padding:0.75rem;">Raises RuntimeError, aborts startup</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.75rem;">Invalid EVM address</td>
+          <td style="padding:0.75rem;"><span style="color:var(--red)">400</span></td>
+          <td style="padding:0.75rem;">Coordination API</td>
+          <td style="padding:0.75rem;">HTTPStatusError, aborts</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.75rem;">Wrong signature (key mismatch)</td>
+          <td style="padding:0.75rem;"><span style="color:var(--orange)">403</span></td>
+          <td style="padding:0.75rem;">Coordination API</td>
+          <td style="padding:0.75rem;">HTTPStatusError, aborts</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.75rem;">Nonce expired (&gt;5 min)</td>
+          <td style="padding:0.75rem;"><span style="color:var(--red)">400</span></td>
+          <td style="padding:0.75rem;">Coordination API</td>
+          <td style="padding:0.75rem;">HTTPStatusError, aborts</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.75rem;">Nonce already used (replay)</td>
+          <td style="padding:0.75rem;"><span style="color:var(--red)">400</span></td>
+          <td style="padding:0.75rem;">Coordination API</td>
+          <td style="padding:0.75rem;">HTTPStatusError, aborts</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.75rem;">Duplicate IP (Sybil)</td>
+          <td style="padding:0.75rem;"><span style="color:var(--pink)">409</span></td>
+          <td style="padding:0.75rem;">Coordination API</td>
+          <td style="padding:0.75rem;">HTTPStatusError, aborts</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.75rem;">Creditcoin RPC down</td>
+          <td style="padding:0.75rem;"><span style="color:var(--red)">502</span></td>
+          <td style="padding:0.75rem;">Coordination API</td>
+          <td style="padding:0.75rem;">HTTPStatusError, aborts</td>
+        </tr>
+        <tr>
+          <td style="padding:0.75rem;">Deregistration fails</td>
+          <td style="padding:0.75rem;"><span style="color:var(--muted)">any</span></td>
+          <td style="padding:0.75rem;">Home Node</td>
+          <td style="padding:0.75rem;">Logged as warning, NOT raised (best-effort)</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  <p>Space Router &mdash; EIP-191 Node Registration Implementation</p>
+  <p style="margin-top:0.5rem; font-family:'JetBrains Mono', monospace; font-size:0.75rem; color:var(--border);">
+    gluwa/space-router-node &bull; gluwa/space-router &bull; Creditcoin L1
+  </p>
+</footer>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- SCRIPTS -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<script>
+// ── Hero particle canvas ──
+(function() {
+  const c = document.getElementById('heroCanvas');
+  const ctx = c.getContext('2d');
+  let W, H;
+  const particles = [];
+  const N = 60;
+
+  function resize() {
+    W = c.width = c.offsetWidth;
+    H = c.height = c.offsetHeight;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  for (let i = 0; i < N; i++) {
+    particles.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      vx: (Math.random() - 0.5) * 0.4,
+      vy: (Math.random() - 0.5) * 0.4,
+      r: Math.random() * 2 + 1,
+    });
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    for (const p of particles) {
+      p.x += p.vx; p.y += p.vy;
+      if (p.x < 0 || p.x > W) p.vx *= -1;
+      if (p.y < 0 || p.y > H) p.vy *= -1;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(99,102,241,0.35)';
+      ctx.fill();
+    }
+    // Lines
+    for (let i = 0; i < N; i++) {
+      for (let j = i + 1; j < N; j++) {
+        const dx = particles[i].x - particles[j].x;
+        const dy = particles[i].y - particles[j].y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < 150) {
+          ctx.beginPath();
+          ctx.moveTo(particles[i].x, particles[i].y);
+          ctx.lineTo(particles[j].x, particles[j].y);
+          ctx.strokeStyle = `rgba(99,102,241,${0.1 * (1 - d / 150)})`;
+          ctx.stroke();
+        }
+      }
+    }
+    requestAnimationFrame(draw);
+  }
+  draw();
+})();
+
+// ── Scroll-triggered animation ──
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      e.target.classList.add('visible');
+    }
+  });
+}, { threshold: 0.15 });
+
+document.querySelectorAll('[data-anim]').forEach(el => observer.observe(el));
+
+// ── Nav dots ──
+(function() {
+  const sections = document.querySelectorAll('section, .hero');
+  const dotsContainer = document.getElementById('navDots');
+  sections.forEach((sec, i) => {
+    const dot = document.createElement('div');
+    dot.className = 'nav-dot';
+    dot.title = sec.querySelector('h2')?.textContent || 'Top';
+    dot.onclick = () => sec.scrollIntoView({ behavior: 'smooth' });
+    dotsContainer.appendChild(dot);
+  });
+
+  const dots = dotsContainer.querySelectorAll('.nav-dot');
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        const idx = [...sections].indexOf(e.target);
+        dots.forEach((d, i) => d.classList.toggle('active', i === idx));
+      }
+    });
+  }, { threshold: 0.3 });
+
+  sections.forEach(s => io.observe(s));
+})();
+</script>
+</body>
+</html>

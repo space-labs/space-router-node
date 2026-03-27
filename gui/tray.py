@@ -46,6 +46,11 @@ if _MACOS:
             if t:
                 t._setup_on_main_thread()
 
+        def shutdownTray_(self, sender):  # noqa: N802
+            t = self.tray
+            if t:
+                t._shutdown_on_main_thread()
+
 
 class SpaceRouterTray:
     """Menu bar status icon — macOS only, no-op on other platforms."""
@@ -131,7 +136,15 @@ class SpaceRouterTray:
         button.setAttributedTitle_(title)
 
     def shutdown(self) -> None:
-        """Remove the status item and stop the timer."""
+        """Schedule tray removal on the main thread (required by AppKit)."""
+        if not _MACOS or not self._delegate:
+            return
+        self._delegate.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "shutdownTray:", None, True,  # waitUntilDone=True so we block until removed
+        )
+
+    def _shutdown_on_main_thread(self) -> None:
+        """Remove the status item — called on the main thread."""
         if self._timer:
             self._timer.invalidate()
             self._timer = None

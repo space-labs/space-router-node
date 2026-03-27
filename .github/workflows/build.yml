@@ -67,6 +67,7 @@ jobs:
         shell: bash
         run: |
           echo "BUILD_VERSION = \"${{ steps.version.outputs.version }}\"" > app/_build_version.py
+          echo "BUILD_VARIANT = \"production\"" > app/_build_variant.py
 
       - name: Build binary
         run: pyinstaller homenode.spec
@@ -377,6 +378,7 @@ jobs:
         shell: bash
         run: |
           echo "BUILD_VERSION = \"${{ steps.version.outputs.version }}\"" > app/_build_version.py
+          echo "BUILD_VARIANT = \"production\"" > app/_build_variant.py
 
       - name: Build GUI app
         run: pyinstaller spacerouter_gui.spec

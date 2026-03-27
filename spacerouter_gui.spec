@@ -44,6 +44,12 @@ hiddenimports = [
     "cryptography.hazmat.primitives.serialization",
     "cryptography.x509",
     "cryptography.x509.oid",
+    # Identity signing (eth-account / web3)
+    "eth_account",
+    "eth_account.messages",
+    "eth_keys",
+    "eth_hash",
+    "web3",
     # pywebview
     "webview",
 ]
@@ -67,6 +73,8 @@ elif sys.platform == "win32":
 # Collect all pydantic submodules to handle dynamic imports
 hiddenimports += collect_submodules("pydantic")
 hiddenimports += collect_submodules("pydantic_core")
+hiddenimports += collect_submodules("eth_account")
+hiddenimports += collect_submodules("web3")
 
 a = Analysis(
     ["gui/app.py"],
@@ -94,9 +102,8 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="SpaceRouter",
     debug=False,
     bootloader_ignore_signals=False,
@@ -112,10 +119,20 @@ exe = EXE(
     entitlements_file=None,
 )
 
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name="SpaceRouter",
+)
+
 # macOS .app bundle
 if sys.platform == "darwin":
     app = BUNDLE(
-        exe,
+        coll,
         name="SpaceRouter.app",
         icon="packaging/macos/SpaceRouter.icns",
         bundle_identifier="com.spacerouter.desktop",

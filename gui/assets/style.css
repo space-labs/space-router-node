@@ -62,9 +62,13 @@ h2 {
 
 /* Input */
 .input-group {
-  margin-top: 24px;
-  margin-bottom: 0;
+  margin-top: 16px;
+  margin-bottom: 16px;
   text-align: left;
+}
+
+.input-group:first-of-type {
+  margin-top: 24px;
 }
 
 .input-group label {
@@ -77,6 +81,14 @@ h2 {
   margin-bottom: 8px;
 }
 
+.input-group label .optional {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #606078;
+  font-size: 11px;
+}
+
 .input-group input[type="text"],
 .input-group input[type="password"] {
   width: 100%;
@@ -86,9 +98,35 @@ h2 {
   border-radius: 8px;
   color: #ffffff;
   font-size: 14px;
-  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   outline: none;
   transition: border-color 0.2s;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.input-group select {
+  width: 100%;
+  padding: 12px 16px;
+  background: #1a1a2e;
+  border: 1px solid #2a2a40;
+  border-radius: 8px;
+  color: #ffffff;
+  font-size: 14px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  outline: none;
+  transition: border-color 0.2s;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%238080a0' stroke-width='2' fill='none'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 16px center;
+  padding-right: 40px;
+}
+
+.input-group input {
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
 }
 
 .input-group input[type="text"]:focus,
@@ -271,16 +309,56 @@ h2 {
   50% { opacity: 0.5; }
 }
 
+/* Status detail */
+.status-detail {
+  font-size: 12px;
+  color: #8080a0;
+  margin-top: 8px;
+  min-height: 16px;
+}
+
+/* Idle dot */
+.dot-idle {
+  background: #606078;
+}
+
+/* Reconnecting dot */
+.dot-reconnecting {
+  background: #e67e22;
+  box-shadow: 0 0 8px rgba(230, 126, 34, 0.4);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+/* Environment badge */
+.env-badge {
+  display: none;
+  margin-top: 12px;
+  padding: 4px 10px;
+  background: rgba(243, 156, 18, 0.15);
+  border: 1px solid rgba(243, 156, 18, 0.3);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #f39c12;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  text-align: center;
+}
+
 /* Wallet display */
 .wallet-display {
   background: #1a1a2e;
   border: 1px solid #2a2a40;
   border-radius: 8px;
   padding: 12px 16px;
-  margin-bottom: 24px;
+  margin-bottom: 8px;
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.wallet-display:last-of-type {
+  margin-bottom: 24px;
 }
 
 .wallet-label {
@@ -334,6 +412,345 @@ h2 {
   font-size: 13px;
   color: #e74c3c;
   text-align: left;
+}
+
+/* Action buttons container */
+.action-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 24px;
+}
+
+/* Cert expiry warning */
+.cert-warning {
+  background: rgba(243, 156, 18, 0.1);
+  border: 1px solid rgba(243, 156, 18, 0.3);
+  border-radius: 8px;
+  padding: 10px 16px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: #f39c12;
+}
+
+/* Fresh Restart / Danger button */
+.btn-danger {
+  width: 100%;
+  padding: 12px 24px;
+  background: transparent;
+  color: #e74c3c;
+  border: 1px solid rgba(231, 76, 60, 0.3);
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+  margin-top: 24px;
+}
+
+.btn-danger:hover {
+  background: rgba(231, 76, 60, 0.1);
+  border-color: rgba(231, 76, 60, 0.5);
+}
+
+/* Secondary button */
+.btn-secondary {
+  width: 100%;
+  padding: 14px 24px;
+  background: transparent;
+  color: #e74c3c;
+  border: 1px solid rgba(231, 76, 60, 0.4);
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-secondary:hover {
+  background: rgba(231, 76, 60, 0.1);
+}
+
+/* Restart actions */
+.restart-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.restart-actions .btn-back {
+  text-align: center;
+  margin-top: 4px;
+}
+
+/* Network setup radio cards */
+.network-options {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 20px;
+  margin-bottom: 20px;
+}
+
+.radio-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  background: #1a1a2e;
+  border: 1px solid #2a2a40;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 0.2s;
+  text-align: left;
+}
+
+.radio-card:hover {
+  border-color: #4a4a60;
+}
+
+.radio-card input[type="radio"] {
+  margin-top: 2px;
+  accent-color: #6C5CE7;
+  flex-shrink: 0;
+}
+
+.radio-card input[type="radio"]:checked ~ .radio-card-content .radio-card-title {
+  color: #ffffff;
+}
+
+.radio-card-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.radio-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #c0c0d8;
+}
+
+.radio-card-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #8080a0;
+}
+
+.hint {
+  display: block;
+  font-size: 11px;
+  color: #606078;
+  margin-top: 6px;
+}
+
+/* ── Test Build Banner ── */
+.test-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: #e67e22;
+  color: #ffffff;
+  text-align: center;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  z-index: 100;
+}
+
+body.has-test-banner .screen {
+  padding-top: 32px;
+}
+
+/* ── Settings gear button ── */
+.status-header {
+  position: relative;
+  text-align: center;
+}
+
+.btn-settings {
+  position: absolute;
+  top: 0;
+  right: 0;
+  background: none;
+  border: 1px solid #2a2a40;
+  border-radius: 8px;
+  padding: 8px;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+.btn-settings:hover {
+  border-color: #6C5CE7;
+}
+
+.btn-settings svg path {
+  transition: stroke 0.2s;
+}
+
+.btn-settings:hover svg path {
+  stroke: #6C5CE7;
+}
+
+/* ── Settings Panel ── */
+.settings-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.settings-header h2 {
+  margin-bottom: 0;
+  flex: 1;
+  text-align: center;
+  padding-right: 40px; /* balance the back button width */
+}
+
+.btn-back {
+  background: none;
+  border: none;
+  color: #6C5CE7;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 4px 0;
+  white-space: nowrap;
+}
+
+.btn-back:hover {
+  color: #5a4bd1;
+}
+
+.select-input {
+  width: 100%;
+  padding: 12px 16px;
+  background: #1a1a2e;
+  border: 1px solid #2a2a40;
+  border-radius: 8px;
+  color: #ffffff;
+  font-size: 14px;
+  outline: none;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238080a0' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 16px center;
+}
+
+.select-input:focus {
+  border-color: #6C5CE7;
+}
+
+.select-input option {
+  background: #1a1a2e;
+  color: #ffffff;
+}
+
+.custom-url-input {
+  width: 100%;
+  padding: 12px 16px;
+  background: #1a1a2e;
+  border: 1px solid #2a2a40;
+  border-radius: 8px;
+  color: #ffffff;
+  font-size: 14px;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+  outline: none;
+  transition: border-color 0.2s;
+  margin-top: 8px;
+}
+
+.custom-url-input:focus {
+  border-color: #6C5CE7;
+}
+
+/* Toggle switch */
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: #1a1a2e;
+  border: 1px solid #2a2a40;
+  border-radius: 8px;
+}
+
+.toggle-label {
+  font-size: 14px;
+  color: #c0c0d8;
+}
+
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #e74c3c;
+  transition: background-color 0.3s;
+  border-radius: 24px;
+}
+
+.toggle-slider:before {
+  content: "";
+  position: absolute;
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background-color: white;
+  transition: transform 0.3s;
+  border-radius: 50%;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+  background-color: #2ecc71;
+}
+
+.toggle-switch input:checked + .toggle-slider:before {
+  transform: translateX(20px);
+}
+
+/* mTLS warning */
+.mtls-warning {
+  background: rgba(231, 76, 60, 0.15);
+  border: 1px solid rgba(231, 76, 60, 0.4);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #e74c3c;
+  font-weight: 500;
+}
+
+/* Settings status message */
+.settings-status {
+  margin-top: 12px;
+  font-size: 13px;
+  color: #8080a0;
+  min-height: 20px;
 }
 
 /* Passphrase unlock dialog */

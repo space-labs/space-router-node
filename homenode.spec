@@ -30,11 +30,19 @@ hiddenimports = [
     "cryptography.hazmat.primitives.serialization",
     "cryptography.x509",
     "cryptography.x509.oid",
+    # Identity signing (eth-account / web3)
+    "eth_account",
+    "eth_account.messages",
+    "eth_keys",
+    "eth_hash",
+    "web3",
 ]
 
 # Collect all pydantic submodules to handle dynamic imports
 hiddenimports += collect_submodules("pydantic")
 hiddenimports += collect_submodules("pydantic_core")
+hiddenimports += collect_submodules("eth_account")
+hiddenimports += collect_submodules("web3")
 
 a = Analysis(
     ["app/main.py"],

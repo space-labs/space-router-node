@@ -73,6 +73,19 @@ def ensure_certificates(cert_path: str, key_path: str) -> None:
     logger.info("TLS certificate written to %s / %s", cert_path, key_path)
 
 
+def check_certificate_expiry(cert_path: str) -> datetime.datetime | None:
+    """Return the certificate's not_valid_after timestamp, or None if missing."""
+    if not os.path.isfile(cert_path):
+        return None
+    try:
+        with open(cert_path, "rb") as f:
+            cert = x509.load_pem_x509_certificate(f.read())
+        return cert.not_valid_after_utc
+    except Exception:
+        logger.warning("Cannot read certificate at %s", cert_path)
+        return None
+
+
 def create_server_ssl_context(cert_path: str, key_path: str) -> ssl.SSLContext:
     """Return an SSL context configured for the Home Node server."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

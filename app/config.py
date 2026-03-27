@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     NODE_LABEL: str = ""
 
     PUBLIC_IP: str = ""  # Auto-detected if empty
+    PUBLIC_PORT: int = 0  # Override advertised port (0 = use NODE_PORT)
 
     # Wallet addresses
     # AliasChoices: accept SR_WALLET_ADDRESS (v0.1.2 name) as well as SR_STAKING_ADDRESS.
@@ -49,6 +50,9 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
 
+    # Registration retry limits
+    REGISTER_MAX_RETRIES: int = 5
+
     # Node identity keypair (auto-generated secp256k1 for signing API requests)
     IDENTITY_KEY_PATH: str = "certs/node-identity.key"
     IDENTITY_PASSPHRASE: str = ""   # If set, encrypt identity key with Web3 keystore JSON
@@ -70,13 +74,24 @@ class Settings(BaseSettings):
         return v
 
 
-settings = Settings()
+def load_settings() -> Settings:
+    """Create a fresh Settings instance from current environment variables.
 
-# Warn if Coordination API uses plain HTTP in non-localhost scenarios
-if not settings.COORDINATION_API_URL.startswith("https://"):
-    if "localhost" not in settings.COORDINATION_API_URL and "127.0.0.1" not in settings.COORDINATION_API_URL:
-        warnings.warn(
-            f"COORDINATION_API_URL uses plain HTTP ({settings.COORDINATION_API_URL}). "
-            "This exposes registration data to MITM attacks. Use HTTPS in production.",
-            stacklevel=1,
-        )
+    Call this instead of importing the module-level ``settings`` when you need
+    to pick up env-var changes (e.g. after a config reload or fresh restart).
+    """
+    s = Settings()
+    if not s.COORDINATION_API_URL.startswith("https://"):
+        if "localhost" not in s.COORDINATION_API_URL and "127.0.0.1" not in s.COORDINATION_API_URL:
+            warnings.warn(
+                f"COORDINATION_API_URL uses plain HTTP ({s.COORDINATION_API_URL}). "
+                "This exposes registration data to MITM attacks. Use HTTPS in production.",
+                stacklevel=2,
+            )
+    return s
+
+
+# Lazy module-level singleton for backward compatibility.
+# Code that imports ``from app.config import settings`` still works, but new
+# code should call ``load_settings()`` for a guaranteed-fresh instance.
+settings = load_settings()

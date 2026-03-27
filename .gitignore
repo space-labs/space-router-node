@@ -9,11 +9,13 @@ build/
 # PyInstaller
 *.spec.bak
 
-# Build-time generated version file
+# Build-time generated files
 app/_build_version.py
+app/_build_variant.py
 
 # Virtual environments
 .venv/
+.venv*/
 venv/
 env/
 

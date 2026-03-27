@@ -1,6 +1,7 @@
 """Tests for node registration and IP detection."""
 
 import json
+import time
 
 import pytest
 import respx
@@ -13,6 +14,7 @@ from app.config import Settings
 from app.identity import sign_vouch
 import app.registration as registration_mod
 from app.registration import (
+    check_node_status,
     deregister_node,
     detect_public_ip,
     register_node,
@@ -23,6 +25,7 @@ from app.registration import (
 _w3 = Web3()
 
 TEST_WALLET = "0x742d35cc6634c0532925a3b844bc9e7595f2bd18"
+TEST_COLLECTION = "0x1234567890abcdef1234567890abcdef12345678"
 # Test identity keypair (deterministic for reproducible tests)
 _TEST_IDENTITY = Account.from_key("0x" + "ab" * 32)
 TEST_IDENTITY_KEY = _TEST_IDENTITY.key.hex()
@@ -171,9 +174,13 @@ def _v1_register_response(node_id="node-abc-123", **overrides):
     data = {
         "status": "registered",
         "node_id": node_id,
+        "identity_address": _TEST_IDENTITY.address.lower(),
+        "staking_address": TEST_WALLET,
+        "collection_address": TEST_WALLET,
+        "endpoint_url": "https://1.2.3.4:9090",
+        # Deprecated v0.1.2 aliases
         "wallet_address": TEST_WALLET,
         "node_address": TEST_NODE_ADDRESS,
-        "endpoint_url": "https://1.2.3.4:9090",
     }
     data.update(overrides)
     return data
@@ -321,8 +328,9 @@ class TestRegisterNode:
         body = json.loads(respx.calls[0].request.content)
         assert "identity_signature" in body
         assert "timestamp" in body
-        # Server-only fields must NOT be in payload
-        for field in ("public_ip", "node_type", "region", "ip_type", "ip_region", "as_type"):
+        # Server-only classification fields must NOT be in payload
+        # (public_ip IS allowed — node sends its real exit IP for tunnel mode)
+        for field in ("node_type", "region", "ip_type", "ip_region", "as_type"):
             assert field not in body, f"{field} should not be in registration payload"
 
     @pytest.mark.asyncio
@@ -398,7 +406,7 @@ class TestRegisterNodeV2:
         assert body["identity_address"] == TEST_NODE_ADDRESS
         assert "staking_address" in body
         assert "collection_address" in body
-        assert "vouching_signature" in body
+        assert "staking_vouching_signature" in body
         assert "identity_signature" in body
         assert "timestamp" in body
         assert body.get("label") == "test-node"
@@ -509,10 +517,11 @@ class TestRegisterNodeV2:
             )
 
         body = json.loads(respx.calls[0].request.content)
-        vouching_sig = body["vouching_signature"]
+        vouching_sig = body["staking_vouching_signature"]
+        ts = body["timestamp"]
 
         # Recover signer from vouching signature
-        message_text = f"space-router:vouch:{TEST_STAKING_ADDRESS}:{TEST_COLLECTION_ADDRESS}"
+        message_text = f"space-router:vouch:{TEST_STAKING_ADDRESS}:{TEST_COLLECTION_ADDRESS}:{ts}"
         message = encode_defunct(text=message_text)
         recovered = _w3.eth.account.recover_message(message, signature=vouching_sig)
         assert recovered.lower() == TEST_NODE_ADDRESS
@@ -708,7 +717,7 @@ class TestV1PayloadIsolation:
             )
 
         body = json.loads(respx.calls[0].request.content)
-        for field in ("identity_address", "staking_address", "collection_address", "vouching_signature"):
+        for field in ("identity_address", "staking_address", "collection_address", "staking_vouching_signature"):
             assert field not in body, f"v1 payload must not contain {field}"
         # Must contain v1 fields
         assert "wallet_address" in body
@@ -870,7 +879,7 @@ class TestAutoModePayloads:
 
         body = json.loads(respx.calls[0].request.content)
         assert "identity_address" in body
-        assert "vouching_signature" in body
+        assert "staking_vouching_signature" in body
         assert "wallet_address" not in body
 
     @pytest.mark.asyncio
@@ -1215,7 +1224,7 @@ class TestDeregisterPayloadConsistency:
         assert "timestamp" in body
         # Must NOT contain v2-only fields
         assert "identity_address" not in body
-        assert "vouching_signature" not in body
+        assert "staking_vouching_signature" not in body
 
 
 # ---------------------------------------------------------------------------
@@ -1224,27 +1233,28 @@ class TestDeregisterPayloadConsistency:
 
 class TestSignVouch:
     def test_vouch_signature_format(self):
-        """Vouching message must be space-router:vouch:{staking}:{collection}."""
-        sig = sign_vouch(TEST_IDENTITY_KEY, TEST_STAKING_ADDRESS, TEST_COLLECTION_ADDRESS)
+        """Vouching message must be space-router:vouch:{staking}:{collection}:{timestamp}."""
+        sig, ts = sign_vouch(TEST_IDENTITY_KEY, TEST_STAKING_ADDRESS, TEST_COLLECTION_ADDRESS)
 
-        message_text = f"space-router:vouch:{TEST_STAKING_ADDRESS}:{TEST_COLLECTION_ADDRESS}"
+        message_text = f"space-router:vouch:{TEST_STAKING_ADDRESS}:{TEST_COLLECTION_ADDRESS}:{ts}"
         message = encode_defunct(text=message_text)
         recovered = _w3.eth.account.recover_message(message, signature=sig)
         assert recovered.lower() == TEST_NODE_ADDRESS
 
     def test_vouch_signature_recovers_to_signer(self):
         """Recovered address must match the identity key's address."""
-        sig = sign_vouch(TEST_IDENTITY_KEY, TEST_WALLET, TEST_WALLET)
+        sig, ts = sign_vouch(TEST_IDENTITY_KEY, TEST_WALLET, TEST_WALLET)
 
-        message_text = f"space-router:vouch:{TEST_WALLET}:{TEST_WALLET}"
+        message_text = f"space-router:vouch:{TEST_WALLET}:{TEST_WALLET}:{ts}"
         message = encode_defunct(text=message_text)
         recovered = _w3.eth.account.recover_message(message, signature=sig)
         assert recovered.lower() == TEST_NODE_ADDRESS
 
     def test_vouch_different_addresses_produce_different_signatures(self):
         """Different staking/collection addresses must produce different signatures."""
-        sig1 = sign_vouch(TEST_IDENTITY_KEY, TEST_STAKING_ADDRESS, TEST_COLLECTION_ADDRESS)
-        sig2 = sign_vouch(TEST_IDENTITY_KEY, TEST_COLLECTION_ADDRESS, TEST_STAKING_ADDRESS)
+        ts = int(time.time())
+        sig1, _ = sign_vouch(TEST_IDENTITY_KEY, TEST_STAKING_ADDRESS, TEST_COLLECTION_ADDRESS, timestamp=ts)
+        sig2, _ = sign_vouch(TEST_IDENTITY_KEY, TEST_COLLECTION_ADDRESS, TEST_STAKING_ADDRESS, timestamp=ts)
         assert sig1 != sig2
 
 
@@ -1289,6 +1299,27 @@ class TestRequestProbe:
         async with httpx.AsyncClient() as client:
             # Should not raise
             await request_probe(client, reg_settings, "node-abc-123", identity_key=TEST_IDENTITY_KEY)
+
+
+# ---------------------------------------------------------------------------
+# check_node_status
+# ---------------------------------------------------------------------------
+
+class TestCheckNodeStatus:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_check_status_returns_status(self, reg_settings):
+        """check_node_status should return the status string."""
+        respx.get("http://coordination:8000/nodes/node-abc-123/status").mock(
+            return_value=Response(200, json={"status": "online"})
+        )
+
+        import httpx
+        async with httpx.AsyncClient() as client:
+            status = await check_node_status(
+                client, reg_settings, "node-abc-123", identity_key=TEST_IDENTITY_KEY,
+            )
+        assert status == "online"
 
 
 # ---------------------------------------------------------------------------

@@ -72,31 +72,81 @@ async def _register_v1(
     *,
     identity_key: str,
     wallet_address: str,
+    staking_address: str = "",
+    collection_address: str = "",
     upnp_endpoint: tuple | None = None,
 ) -> tuple[str, str | None]:
-    """v0.1.2 registration: ``wallet_address`` + ``identity_signature``."""
+    """Register this node with the Coordination API.
+
+    Uses the unified ``POST /nodes/register`` endpoint with an identity
+    signature.  The server recovers the node identity address from the
+    signature.
+
+    When *staking_address* is provided, sends the v0.2.0 multi-wallet
+    payload (staking_address + collection_address + vouch signature).
+    Otherwise falls back to the v0.1.2 single wallet_address format.
+
+    Returns ``(node_id, gateway_ca_cert_pem_or_None)``.
+    Raises on failure — the caller should abort startup.
+    """
     if upnp_endpoint:
         upnp_ip, upnp_port = upnp_endpoint
         endpoint_url = f"https://{upnp_ip}:{upnp_port}"
     else:
-        endpoint_url = f"https://{public_ip}:{settings.NODE_PORT}"
+        advertised_port = settings.PUBLIC_PORT if settings.PUBLIC_PORT else settings.NODE_PORT
+        endpoint_url = f"https://{public_ip}:{advertised_port}"
 
-    # Sign: space-router:register:{wallet_address}:{timestamp}
-    signature, timestamp = sign_request(identity_key, "register", wallet_address)
+    use_v2 = bool(staking_address)
 
-    payload = {
-        "wallet_address": wallet_address,
-        "endpoint_url": endpoint_url,
-        "identity_signature": signature,
-        "timestamp": timestamp,
-    }
+    # For tunnel setups (ngrok, bore), public_ip is the tunnel hostname
+    # but real_exit_ip is the node's actual residential IP for classification
+    real_exit_ip = getattr(settings, "_REAL_EXIT_IP", None)
+
+    if use_v2:
+        effective_collection = collection_address or staking_address
+
+        # Both signatures share the same timestamp — the Coordination
+        # API verifies both against the single body.timestamp value.
+        signature, timestamp = sign_request(
+            identity_key, "register", staking_address,
+        )
+        vouch_signature, _ = sign_vouch(
+            identity_key, staking_address, effective_collection, timestamp=timestamp,
+        )
+
+        payload = {
+            "staking_address": staking_address,
+            "collection_address": effective_collection,
+            "staking_vouching_signature": vouch_signature,
+            "endpoint_url": endpoint_url,
+            "identity_signature": signature,
+            "timestamp": timestamp,
+        }
+        log_wallet = f"staking={staking_address}, collection={effective_collection}"
+    else:
+        # v0.1.2 fallback — single wallet_address
+        signature, timestamp = sign_request(
+            identity_key, "register", wallet_address,
+        )
+        payload = {
+            "wallet_address": wallet_address,
+            "endpoint_url": endpoint_url,
+            "identity_signature": signature,
+            "timestamp": timestamp,
+        }
+        log_wallet = f"wallet={wallet_address}"
+
+    # Send real exit IP for IPinfo classification (tunnel mode)
+    if real_exit_ip:
+        payload["public_ip"] = real_exit_ip
+
     if settings.NODE_LABEL:
         payload["label"] = settings.NODE_LABEL
 
     url = f"{settings.COORDINATION_API_URL}/nodes/register"
     logger.info(
-        "Registering node (v1) at %s → endpoint=%s wallet=%s",
-        url, endpoint_url, wallet_address,
+        "Registering node at %s → endpoint=%s %s (protocol=%s)",
+        url, endpoint_url, log_wallet, "v0.2.0" if use_v2 else "v0.1.2",
     )
 
     resp = await http_client.post(url, json=payload, timeout=15.0)
@@ -105,12 +155,12 @@ async def _register_v1(
 
     node_id = data["node_id"]
     gateway_ca_cert = data.get("gateway_ca_cert")
-    node_address = data.get("node_address", "unknown")
+    identity_address = data.get("identity_address") or data.get("node_address", "unknown")
     reg_status = data.get("status", "registered")
 
     logger.info(
-        "Registered as node %s (v1, status=%s, identity=%s, wallet=%s, mtls_ca=%s)",
-        node_id, reg_status, node_address, wallet_address,
+        "Registered as node %s (status=%s, identity=%s, %s, mtls_ca=%s)",
+        node_id, reg_status, identity_address, log_wallet,
         "provided" if gateway_ca_cert else "not provided",
     )
 
@@ -139,7 +189,8 @@ async def _register_v2(
         upnp_ip, upnp_port = upnp_endpoint
         endpoint_url = f"https://{upnp_ip}:{upnp_port}"
     else:
-        endpoint_url = f"https://{public_ip}:{settings.NODE_PORT}"
+        advertised_port = settings.PUBLIC_PORT if settings.PUBLIC_PORT else settings.NODE_PORT
+        endpoint_url = f"https://{public_ip}:{advertised_port}"
 
     # Resolve staking/collection addresses (wallet collapsing)
     staking_address = wallet_address.lower()
@@ -150,14 +201,16 @@ async def _register_v2(
         identity_key, "register", node_address,
     )
 
-    # Vouch: space-router:vouch:{staking_address}:{collection_address}
-    vouching_sig = sign_vouch(identity_key, staking_address, collection_address)
+    # Vouch: space-router:vouch:{staking}:{collection}:{timestamp}
+    vouching_sig, _ = sign_vouch(
+        identity_key, staking_address, collection_address, timestamp=timestamp,
+    )
 
     payload = {
         "identity_address": node_address,
         "staking_address": staking_address,
         "collection_address": collection_address,
-        "vouching_signature": vouching_sig,
+        "staking_vouching_signature": vouching_sig,
         "identity_signature": identity_signature,
         "endpoint_url": endpoint_url,
         "timestamp": timestamp,
@@ -201,8 +254,10 @@ async def register_node(
     public_ip: str,
     *,
     identity_key: str,
-    node_address: str,
+    node_address: str = "",
     wallet_address: str,
+    staking_address: str = "",
+    collection_address: str = "",
     upnp_endpoint: tuple | None = None,
 ) -> tuple[str, str | None]:
     """Register this node with the Coordination API.
@@ -219,6 +274,8 @@ async def register_node(
             http_client, settings, public_ip,
             identity_key=identity_key,
             wallet_address=wallet_address,
+            staking_address=staking_address,
+            collection_address=collection_address,
             upnp_endpoint=upnp_endpoint,
         )
         _active_mode = "v1"
@@ -273,6 +330,11 @@ def save_gateway_ca_cert(pem_data: str, path: str) -> None:
     logger.info("Gateway CA certificate saved to %s", path)
 
 
+def _effective_wallet(settings: Settings) -> str:
+    """Return the best wallet address for authenticated requests."""
+    return settings.STAKING_ADDRESS.lower()
+
+
 async def request_probe(
     http_client: httpx.AsyncClient,
     settings: Settings,
@@ -286,7 +348,7 @@ async def request_probe(
     url = f"{settings.COORDINATION_API_URL}/nodes/{node_id}/request-probe"
     try:
         resp = await http_client.post(url, json={
-            "wallet_address": settings.STAKING_ADDRESS.lower(),
+            "wallet_address": _effective_wallet(settings),
             "signature": signature,
             "timestamp": timestamp,
         }, timeout=10.0)
@@ -298,6 +360,34 @@ async def request_probe(
             logger.warning("Probe request failed: %s %s", resp.status_code, resp.text)
     except Exception as exc:
         logger.warning("Failed to request probe for node %s: %s", node_id, exc)
+
+
+async def check_node_status(
+    http_client: httpx.AsyncClient,
+    settings: Settings,
+    node_id: str,
+    *,
+    identity_key: str,
+) -> str:
+    """Check if the node is still registered and online.
+
+    Returns the status string ('online', 'offline', etc.) or raises on error.
+    """
+    signature, timestamp = sign_request(identity_key, "check_status", node_id)
+
+    url = f"{settings.COORDINATION_API_URL}/nodes/{node_id}/status"
+    resp = await http_client.get(
+        url,
+        params={
+            "wallet_address": _effective_wallet(settings),
+            "signature": signature,
+            "timestamp": timestamp,
+        },
+        timeout=10.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("status", "unknown")
 
 
 async def deregister_node(
@@ -314,7 +404,7 @@ async def deregister_node(
     try:
         resp = await http_client.patch(url, json={
             "status": "offline",
-            "wallet_address": settings.STAKING_ADDRESS.lower(),
+            "wallet_address": _effective_wallet(settings),
             "signature": signature,
             "timestamp": timestamp,
         }, timeout=10.0)

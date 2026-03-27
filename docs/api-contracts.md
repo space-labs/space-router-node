@@ -183,7 +183,7 @@ space-router:register:{identity_address}:{timestamp}
 
 **vouching_signature message (no timestamp — one-time binding):**
 ```
-space-router:vouch:{staking_address}:{collection_address}
+space-router:vouch:{staking_address}:{collection_address}:{timestamp}
 ```
 
 Both signatures are signed by the identity wallet's private key.

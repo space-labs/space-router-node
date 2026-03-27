@@ -51,9 +51,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({
                 'status': 'registered',
                 'node_id': 'test-node-001',
+                'identity_address': '0x0000000000000000000000000000000000000001',
+                'staking_address': '0x0000000000000000000000000000000000000001',
+                'collection_address': '0x0000000000000000000000000000000000000001',
+                'endpoint_url': 'https://127.0.0.1:${BASE_PORT}',
                 'wallet_address': '0x0000000000000000000000000000000000000001',
                 'node_address': '0x0000000000000000000000000000000000000000',
-                'endpoint_url': 'https://127.0.0.1:${BASE_PORT}',
             }).encode())
     def do_PATCH(self):
         length = int(self.headers.get('Content-Length', 0))

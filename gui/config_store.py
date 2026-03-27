@@ -15,12 +15,33 @@ from app.wallet import validate_wallet_address
 # Default Coordination API for production
 _DEFAULT_COORDINATION_API_URL = "https://spacerouter-coordination-api.fly.dev"
 
+# Pre-configured environments for easy switching
+ENVIRONMENTS = {
+    "production": {
+        "label": "Production",
+        "url": "https://spacerouter-coordination-api.fly.dev",
+    },
+    "test": {
+        "label": "Test (CC Testnet)",
+        "url": "https://spacerouter-coordination-api-test.fly.dev",
+    },
+    "staging": {
+        "label": "Staging",
+        "url": "https://spacerouter-coordination-api-staging.fly.dev",
+    },
+    "local": {
+        "label": "Local",
+        "url": "http://localhost:8000",
+    },
+}
+
 _DEFAULTS = {
     "SR_COORDINATION_API_URL": _DEFAULT_COORDINATION_API_URL,
     "SR_STAKING_ADDRESS": "",
     "SR_COLLECTION_ADDRESS": "",
     "SR_NODE_PORT": "9090",
     "SR_UPNP_ENABLED": "true",
+    "SR_MTLS_ENABLED": "true",
     "SR_LOG_LEVEL": "INFO",
     "SR_REGISTRATION_MODE": "v1",
     "SR_IDENTITY_PASSPHRASE": "",
@@ -75,6 +96,41 @@ class ConfigStore:
         vals = self.load()
         return vals.get(key) or default
 
+    def save_wallets(self, staking_address: str, collection_address: str = "") -> tuple[str, str]:
+        """Validate and persist staking and collection addresses.
+
+        Returns ``(normalised_staking, normalised_collection)``.
+        """
+        normalised_staking = validate_wallet_address(staking_address)
+        set_key(str(self._path), "SR_STAKING_ADDRESS", normalised_staking)
+
+        if collection_address.strip():
+            normalised_collection = validate_wallet_address(collection_address)
+        else:
+            normalised_collection = normalised_staking
+        set_key(str(self._path), "SR_COLLECTION_ADDRESS", normalised_collection)
+
+        return normalised_staking, normalised_collection
+
+    def save_environment(self, env_key: str) -> str:
+        """Switch the coordination API URL to the given environment.
+
+        Returns the URL that was set.
+        """
+        env = ENVIRONMENTS.get(env_key)
+        if not env:
+            raise ValueError(f"Unknown environment: {env_key}")
+        set_key(str(self._path), "SR_COORDINATION_API_URL", env["url"])
+        return env["url"]
+
+    def get_environment(self) -> str:
+        """Return the current environment key based on the coordination URL."""
+        url = self.get("SR_COORDINATION_API_URL")
+        for key, env in ENVIRONMENTS.items():
+            if env["url"] == url:
+                return key
+        return "custom"
+
     def needs_onboarding(self) -> bool:
         """True if the identity key file has not been created yet."""
         key_path = self.get("SR_IDENTITY_KEY_PATH") or str(
@@ -113,6 +169,56 @@ class ConfigStore:
                 self._dir / "certs" / "node-identity.key"
             )
             write_identity_key(key_path, identity_key_hex, passphrase)
+
+    def save_settings(self, coordination_api_url: str, mtls_enabled: bool) -> None:
+        """Persist advanced settings (coordination API URL and mTLS toggle)."""
+        set_key(str(self._path), "SR_COORDINATION_API_URL", coordination_api_url)
+        set_key(str(self._path), "SR_MTLS_ENABLED", str(mtls_enabled).lower())
+
+    def save_network_mode(self, mode: str, public_host: str = "", port: str = "") -> None:
+        """Persist network mode settings.
+
+        Args:
+            mode: 'upnp' or 'tunnel'
+            public_host: hostname/IP for tunnel mode (e.g. 'bore.pub')
+            port: remote/advertised port for tunnel mode (e.g. '21781').
+                  The node always listens on SR_NODE_PORT (9090) locally.
+        """
+        if mode == "upnp":
+            set_key(str(self._path), "SR_UPNP_ENABLED", "true")
+            set_key(str(self._path), "SR_PUBLIC_IP", "")
+            set_key(str(self._path), "SR_PUBLIC_PORT", "")
+        elif mode == "tunnel":
+            set_key(str(self._path), "SR_UPNP_ENABLED", "false")
+            set_key(str(self._path), "SR_PUBLIC_IP", public_host)
+            set_key(str(self._path), "SR_PUBLIC_PORT", port or "")
+
+    def get_network_mode(self) -> dict:
+        """Return current network mode settings."""
+        upnp = self.get("SR_UPNP_ENABLED", "true").lower() == "true"
+        public_ip = self.get("SR_PUBLIC_IP", "")
+        public_port = self.get("SR_PUBLIC_PORT", "")
+        if upnp:
+            return {"mode": "upnp", "public_host": "", "port": ""}
+        else:
+            return {"mode": "tunnel", "public_host": public_ip, "port": public_port}
+
+    def reset(self, keep_addresses: bool = False) -> None:
+        """Reset config to defaults. Optionally keep wallet addresses."""
+        saved = {}
+        if keep_addresses:
+            saved["SR_STAKING_ADDRESS"] = self.get("SR_STAKING_ADDRESS")
+            saved["SR_COLLECTION_ADDRESS"] = self.get("SR_COLLECTION_ADDRESS")
+
+        # Rewrite with defaults
+        lines = [f"{k}={v}" for k, v in _DEFAULTS.items()]
+        self._path.write_text("\n".join(lines) + "\n")
+
+        # Restore addresses if requested
+        if keep_addresses:
+            for key, value in saved.items():
+                if value:
+                    set_key(str(self._path), key, value)
 
     def apply_to_env(self) -> None:
         """Load all config values into os.environ so pydantic-settings picks them up."""

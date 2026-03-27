@@ -158,17 +158,26 @@ def write_identity_key(key_path: str, private_key_hex: str, passphrase: str = ""
     return account.address.lower()
 
 
-def sign_request(private_key: str, action: str, target: str) -> tuple[str, int]:
+def sign_request(
+    private_key: str,
+    action: str,
+    target: str,
+    *,
+    timestamp: int | None = None,
+) -> tuple[str, int]:
     """Sign a Space Router API request.
 
     Creates an EIP-191 signature of ``space-router:{action}:{target}:{timestamp}``.
 
-    *target* is the ``node_id`` for most actions, or ``staking_address`` /
-    ``identity_address`` for registration.
+    *target* is the ``node_id`` for most actions, or ``staking_address`` for
+    registration.  Pass *timestamp* to reuse a previously generated value
+    (required when multiple signatures must share the same timestamp, e.g.
+    the identity and vouching signatures during v0.2.0 registration).
 
     Returns ``(signature_hex, timestamp)``.
     """
-    timestamp = int(time.time())
+    if timestamp is None:
+        timestamp = int(time.time())
     message_text = f"space-router:{action}:{target}:{timestamp}"
     message = encode_defunct(text=message_text)
     signed = _w3.eth.account.sign_message(message, private_key=private_key)
@@ -176,19 +185,21 @@ def sign_request(private_key: str, action: str, target: str) -> tuple[str, int]:
 
 
 def sign_vouch(
-    private_key: str, staking_address: str, collection_address: str,
-) -> str:
+    private_key: str,
+    staking_address: str,
+    collection_address: str,
+    timestamp: int | None = None,
+) -> tuple[str, int]:
     """Sign a vouching message binding the identity to staking + collection wallets.
 
     Creates an EIP-191 signature of
-    ``space-router:vouch:{staking_address}:{collection_address}``.
+    ``space-router:vouch:{staking_address}:{collection_address}:{timestamp}``.
 
-    No timestamp — vouching is a one-time binding that persists across
-    registrations until the wallet configuration changes.
-
-    Returns ``signature_hex``.
+    Returns ``(signature_hex, timestamp)``.
     """
-    message_text = f"space-router:vouch:{staking_address}:{collection_address}"
+    if timestamp is None:
+        timestamp = int(time.time())
+    message_text = f"space-router:vouch:{staking_address}:{collection_address}:{timestamp}"
     message = encode_defunct(text=message_text)
     signed = _w3.eth.account.sign_message(message, private_key=private_key)
-    return signed.signature.hex()
+    return signed.signature.hex(), timestamp

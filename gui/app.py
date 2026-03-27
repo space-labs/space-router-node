@@ -94,13 +94,14 @@ def _run_smoke_tests(window, api: Api) -> None:
     )
 
     check(
-        "Two screen elements in DOM",
-        lambda: window.evaluate_js("document.querySelectorAll('.screen').length") == 2,
+        "Screen elements in DOM (2 production, 3 test)",
+        lambda: window.evaluate_js("document.querySelectorAll('.screen').length") >= 2,
     )
 
     check(
-        "Either onboarding or status screen is visible",
+        "A screen is visible (network, onboarding, or status)",
         lambda: window.evaluate_js(
+            "document.getElementById('screen-network').style.display === 'flex' || "
             "document.getElementById('screen-onboarding').style.display === 'flex' || "
             "document.getElementById('screen-status').style.display === 'flex'"
         )
@@ -154,11 +155,16 @@ def main() -> None:
     else:
         # Normal mode: tray icon and hide-on-close behaviour
         tray = SpaceRouterTray()
+        _quitting = False
 
         def on_closing() -> bool:
+            nonlocal _quitting
+            if _quitting:
+                return True  # Allow the close — we're shutting down
+            # Hide to tray instead of closing
             logger.info("Window closing — hiding to tray")
             window.hide()
-            return False  # Cancel the close so the window stays alive
+            return False
 
         window.events.closing += on_closing
 
@@ -166,7 +172,9 @@ def main() -> None:
             window.show()
 
         def on_quit() -> None:
+            nonlocal _quitting
             logger.info("Quit requested — stopping node…")
+            _quitting = True
 
             def _shutdown() -> None:
                 try:
@@ -174,7 +182,11 @@ def main() -> None:
                 except Exception:
                     logger.exception("Error stopping node")
                 tray.shutdown()
-                window.destroy()
+                logger.info("Shutdown complete — exiting")
+                # Use os._exit to terminate immediately. The node and tray
+                # are already stopped; calling window.destroy() from a
+                # background thread crashes Cocoa's main-thread-only UI.
+                os._exit(0)
 
             threading.Thread(target=_shutdown, daemon=True).start()
 

@@ -1,42 +1,55 @@
 """Home Node Daemon — entry point.
 
-Lifecycle:
-  1. If UPnP enabled, try UPnP/NAT-PMP port mapping
-  2. Detect public IP (or use configured value)
-  3. Load/generate identity keypair + derive addresses
-  4. Start TLS server (must be running before registration for challenge probe)
-  5. Register with Coordination API (triggers challenge probe)
-  6. Upgrade to mTLS if enabled + start UPnP renewal
-  7. Wait for SIGTERM / SIGINT
-  8. Cancel UPnP renewal + remove port mapping
-  9. Deregister node (best-effort)
-  10. Shutdown
+Lifecycle phases:
+  1. INITIALIZING — UPnP, IP detection, wallet validation, identity key, TLS certs
+  2. BINDING — Start TLS server on configured port
+  3. REGISTERING — Register with Coordination API (triggers challenge probe)
+  4. RUNNING — Serve traffic, health checks, UPnP renewal
+  5. STOPPING — Deregister, close server, remove UPnP mapping
 """
 
 import asyncio
+import datetime
 import functools
 import getpass
 import logging
 import os
 import signal
+import socket
 import sys
 
 import httpx
 from dotenv import set_key
 
-from app.config import settings
+from app.config import Settings, load_settings
+from app.errors import NodeError, NodeErrorCode, classify_error
 from app.identity import KeystorePassphraseRequired, load_or_create_identity, write_identity_key
 from app.proxy_handler import handle_client
-from app.registration import deregister_node, detect_public_ip, register_node, save_gateway_ca_cert
-from app.tls import create_mtls_server_ssl_context, create_server_ssl_context, ensure_certificates
+from app.registration import (
+    check_node_status,
+    deregister_node,
+    detect_public_ip,
+    register_node,
+    request_probe,
+    save_gateway_ca_cert,
+)
+from app.state import NodeState, NodeStateMachine
+from app.tls import (
+    check_certificate_expiry,
+    create_mtls_server_ssl_context,
+    create_server_ssl_context,
+    ensure_certificates,
+)
 from app.version import __version__
 from app.wallet import validate_wallet_address
 
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
 logger = logging.getLogger(__name__)
+
+# Health check intervals
+_HEARTBEAT_INTERVAL = 300  # 5 minutes
+_CERT_CHECK_INTERVAL = 86400  # 24 hours
+_PROBE_REQUEST_INTERVAL = 1800  # 30 minutes
+_HEARTBEAT_FAIL_THRESHOLD = 3
 
 _ENV_FILE = ".env"
 
@@ -61,6 +74,7 @@ def _first_run_setup() -> bool:
     Creates the identity key file and writes settings to .env.
     Returns True on success, False if user cancels (Ctrl+C).
     """
+    s = load_settings()
     print()
     print("─" * 53)
     print("  SpaceRouter Node — First-Time Setup")
@@ -107,7 +121,7 @@ def _first_run_setup() -> bool:
                 print("   Passphrases do not match — try again.")
 
         # Write the identity key file now (so we can show the address for steps 3+)
-        key_path = settings.IDENTITY_KEY_PATH
+        key_path = s.IDENTITY_KEY_PATH
         if identity_key_hex is not None:
             node_address = write_identity_key(key_path, identity_key_hex, passphrase)
         else:
@@ -168,28 +182,287 @@ def _first_run_setup() -> bool:
         return False
 
 
-# ---------------------------------------------------------------------------
-# Main async run loop
-# ---------------------------------------------------------------------------
+# ── Phase functions ──────────────────────────────────────────────────────────
 
-async def _run(settings_override=None, stop_event=None) -> None:  # noqa: ANN001
-    s = settings_override or settings
-    stop_event_arg = stop_event
+class _NodeContext:
+    """Mutable context passed between phases to accumulate state."""
+
+    def __init__(self, settings: Settings, http_client: httpx.AsyncClient) -> None:
+        self.s = settings
+        self.http = http_client
+        self.public_ip: str = ""
+        self.upnp_endpoint: tuple[str, int] | None = None
+        self.identity_key: str = ""
+        self.node_address: str = ""
+        self.staking_address: str = ""
+        self.collection_address: str = ""
+        self.wallet_address: str = ""
+        self.ssl_ctx = None
+        self.server: asyncio.Server | None = None
+        self.node_id: str = ""
+        self.gateway_ca_cert: str | None = None
+
+
+async def _phase_init(ctx: _NodeContext) -> None:
+    """INITIALIZING: UPnP, IP detection, wallet validation, identity, TLS."""
+    s = ctx.s
+
+    # 1. UPnP port mapping
+    if s.UPNP_ENABLED:
+        from app.upnp import setup_upnp_mapping
+
+        ctx.upnp_endpoint = await setup_upnp_mapping(
+            s.NODE_PORT, lease_duration=s.UPNP_LEASE_DURATION,
+        )
+        if ctx.upnp_endpoint:
+            logger.info("UPnP mapping active: %s:%d", ctx.upnp_endpoint[0], ctx.upnp_endpoint[1])
+        else:
+            logger.warning("UPnP enabled but mapping failed — falling back to direct public IP mode")
+
+    # 2. Public IP detection
+    try:
+        real_ip = await detect_public_ip(ctx.http)
+    except RuntimeError:
+        real_ip = None
+
+    if s.PUBLIC_IP:
+        ctx.public_ip = s.PUBLIC_IP
+        logger.info("Using configured public IP: %s", ctx.public_ip)
+        if real_ip and real_ip != ctx.public_ip:
+            logger.info("Detected exit IP: %s (tunnel mode)", real_ip)
+    else:
+        if not real_ip:
+            raise NodeError(NodeErrorCode.NETWORK_UNREACHABLE, "Cannot detect public IP")
+        ctx.public_ip = real_ip
+    s.PUBLIC_IP = ctx.public_ip
+    s._REAL_EXIT_IP = real_ip
+
+    # 3. Wallet validation
+    staking = s.STAKING_ADDRESS.strip()
+    collection = s.COLLECTION_ADDRESS.strip()
+
+    if staking:
+        try:
+            staking = validate_wallet_address(staking)
+        except ValueError as exc:
+            raise NodeError(NodeErrorCode.INVALID_WALLET, f"Invalid staking address: {exc}")
+        if collection:
+            try:
+                collection = validate_wallet_address(collection)
+            except ValueError as exc:
+                raise NodeError(NodeErrorCode.INVALID_WALLET, f"Invalid collection address: {exc}")
+        else:
+            collection = staking
+        ctx.staking_address = staking
+        ctx.collection_address = collection
+        ctx.wallet_address = staking
+        logger.info("Staking address: %s (v0.2.0)", staking)
+        logger.info("Collection address: %s", collection)
+    else:
+        # No staking address configured — identity address will be used as fallback
+        logger.info("No staking address configured — will use identity address as fallback")
+
+    # 4. Identity keypair (with passphrase support)
+    try:
+        ctx.identity_key, ctx.node_address = load_or_create_identity(
+            s.IDENTITY_KEY_PATH, s.IDENTITY_PASSPHRASE,
+        )
+    except KeystorePassphraseRequired:
+        raise  # Let caller (NodeManager or CLI) handle passphrase prompt
+    except Exception as exc:
+        raise NodeError(NodeErrorCode.IDENTITY_KEY_ERROR, str(exc))
+    logger.info("Node identity: %s", ctx.node_address)
+
+    # Staking address falls back to identity address if not configured
+    if not ctx.staking_address:
+        ctx.staking_address = ctx.node_address
+        ctx.wallet_address = ctx.node_address
+        logger.info("Staking address (identity fallback): %s", ctx.staking_address)
+
+    # 5. TLS certificates
+    try:
+        ensure_certificates(s.TLS_CERT_PATH, s.TLS_KEY_PATH)
+        ctx.ssl_ctx = create_server_ssl_context(s.TLS_CERT_PATH, s.TLS_KEY_PATH)
+    except Exception as exc:
+        raise NodeError(NodeErrorCode.TLS_CERT_ERROR, str(exc))
+
+
+async def _phase_bind(ctx: _NodeContext) -> None:
+    """BINDING: Start the TLS server."""
+    s = ctx.s
+    handler = functools.partial(handle_client, settings=s)
+
+    # Use SO_REUSEADDR to avoid "address already in use" after restart
+    server = await asyncio.start_server(
+        handler,
+        host=s.BIND_ADDRESS,
+        port=s.NODE_PORT,
+        ssl=ctx.ssl_ctx,
+        reuse_address=True,
+    )
+    ctx.server = server
+    logger.info("Home Node listening on port %d", s.NODE_PORT)
+
+
+async def _phase_register(ctx: _NodeContext) -> None:
+    """REGISTERING: Register with the Coordination API."""
+    node_id, gateway_ca_cert = await register_node(
+        ctx.http, ctx.s, ctx.public_ip,
+        identity_key=ctx.identity_key,
+        upnp_endpoint=ctx.upnp_endpoint,
+        wallet_address=ctx.wallet_address,
+        staking_address=ctx.staking_address,
+        collection_address=ctx.collection_address,
+    )
+    ctx.node_id = node_id
+    ctx.gateway_ca_cert = gateway_ca_cert
+
+    # Save gateway CA cert if provided
+    if gateway_ca_cert:
+        save_gateway_ca_cert(gateway_ca_cert, ctx.s.GATEWAY_CA_CERT_PATH)
+
+    # Upgrade to mTLS if enabled
+    _upgrade_mtls(ctx)
+
+
+def _upgrade_mtls(ctx: _NodeContext) -> None:
+    """Attempt mTLS upgrade (non-fatal on failure)."""
+    s = ctx.s
+    if not s.MTLS_ENABLED:
+        return
+    if not os.path.isfile(s.GATEWAY_CA_CERT_PATH):
+        logger.warning("mTLS enabled but gateway CA cert not found — using standard TLS")
+        return
+    try:
+        logger.info("Upgrading to mTLS…")
+        ctx.ssl_ctx = create_mtls_server_ssl_context(
+            s.TLS_CERT_PATH, s.TLS_KEY_PATH, s.GATEWAY_CA_CERT_PATH,
+        )
+        # Rebind server with mTLS context
+        if ctx.server:
+            ctx.server.close()
+            # Re-create inline (can't await in sync function)
+    except Exception:
+        logger.warning("mTLS upgrade failed — continuing with standard TLS", exc_info=True)
+
+
+async def _rebind_server_mtls(ctx: _NodeContext) -> None:
+    """Close and rebind server with the (possibly upgraded) SSL context."""
+    s = ctx.s
+    if ctx.server:
+        ctx.server.close()
+        await ctx.server.wait_closed()
+    handler = functools.partial(handle_client, settings=s)
+    ctx.server = await asyncio.start_server(
+        handler, host=s.BIND_ADDRESS, port=s.NODE_PORT, ssl=ctx.ssl_ctx,
+        reuse_address=True,
+    )
+
+
+async def _health_loop(
+    ctx: _NodeContext,
+    sm: NodeStateMachine,
+    stop_event: asyncio.Event,
+) -> None:
+    """Periodic health checks while RUNNING."""
+    consecutive_failures = 0
+    last_cert_check = 0.0
+
+    import time
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(), timeout=_HEARTBEAT_INTERVAL,
+            )
+            break  # stop_event was set
+        except asyncio.TimeoutError:
+            pass  # interval elapsed, run checks
+
+        # Heartbeat: check if node is still registered
+        try:
+            status = await check_node_status(
+                ctx.http, ctx.s, ctx.node_id, identity_key=ctx.identity_key,
+            )
+            if status in ("online", "active"):
+                consecutive_failures = 0
+            else:
+                logger.warning("Health check: node status is '%s'", status)
+                consecutive_failures += 1
+        except Exception as exc:
+            consecutive_failures += 1
+            logger.warning("Health check failed (%d/%d): %s",
+                           consecutive_failures, _HEARTBEAT_FAIL_THRESHOLD, exc)
+
+        if consecutive_failures >= _HEARTBEAT_FAIL_THRESHOLD:
+            logger.warning("Health check threshold reached — triggering reconnection")
+            sm.transition(NodeState.RECONNECTING, "Lost connection to coordination server")
+            return  # exit health loop; orchestrator handles reconnection
+
+        # Certificate expiry check
+        now = time.time()
+        if now - last_cert_check > _CERT_CHECK_INTERVAL:
+            last_cert_check = now
+            expiry = check_certificate_expiry(ctx.s.TLS_CERT_PATH)
+            if expiry:
+                days_left = (expiry - datetime.datetime.now(datetime.timezone.utc)).days
+                if days_left < 30:
+                    sm.set_cert_warning(True)
+                    logger.warning("TLS certificate expires in %d days", days_left)
+                    if days_left < 7:
+                        logger.info("Auto-renewing TLS certificate…")
+                        try:
+                            os.remove(ctx.s.TLS_CERT_PATH)
+                            os.remove(ctx.s.TLS_KEY_PATH)
+                            ensure_certificates(ctx.s.TLS_CERT_PATH, ctx.s.TLS_KEY_PATH)
+                            ctx.ssl_ctx = create_server_ssl_context(ctx.s.TLS_CERT_PATH, ctx.s.TLS_KEY_PATH)
+                            await _rebind_server_mtls(ctx)
+                            sm.set_cert_warning(False)
+                            logger.info("TLS certificate renewed")
+                        except Exception:
+                            logger.warning("Certificate renewal failed", exc_info=True)
+                else:
+                    sm.set_cert_warning(False)
+
+        # Periodic probe request (every 30 min, non-critical)
+        try:
+            await request_probe(ctx.http, ctx.s, ctx.node_id, identity_key=ctx.identity_key)
+        except Exception:
+            pass  # non-critical
+
+
+# ── Orchestrator ─────────────────────────────────────────────────────────────
+
+async def _run(
+    settings_override=None,  # noqa: ANN001
+    stop_event: asyncio.Event | None = None,
+    on_phase=None,  # noqa: ANN001
+    state_machine: NodeStateMachine | None = None,
+) -> None:
+    """Main orchestrator loop. Drives phases and handles retries."""
+    s = settings_override or load_settings()
+
+    # Configure logging from settings
+    log_level = getattr(logging, s.LOG_LEVEL.upper(), logging.INFO)
+    logging.getLogger().setLevel(log_level)
+
+    own_stop_event = stop_event is None
     if stop_event is None:
         stop_event = asyncio.Event()
 
-    # Only install signal handlers when running as the main daemon (not from
-    # the GUI, which passes its own stop_event and runs _run() in a background
-    # thread where signal APIs are unavailable).
-    if stop_event_arg is None:
+    sm = state_machine or NodeStateMachine()
+
+    def _report(state: NodeState, detail: str = "") -> None:
+        sm.transition(state, detail)
+        if on_phase:
+            on_phase(state.value)
+
+    # Signal handlers (standalone mode only)
+    if own_stop_event:
         if sys.platform != "win32":
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.add_signal_handler(sig, stop_event.set)
         else:
-            # Windows: loop.add_signal_handler() is not supported.
-            # Use signal.signal() and schedule the event via call_soon_threadsafe
-            # since signal handlers can interrupt the event loop.
             loop = asyncio.get_running_loop()
 
             def _handle_signal(signum, frame):  # noqa: ANN001
@@ -199,180 +472,166 @@ async def _run(settings_override=None, stop_event=None) -> None:  # noqa: ANN001
             signal.signal(signal.SIGTERM, _handle_signal)
 
     async with httpx.AsyncClient() as http_client:
-        # 1. Try UPnP/NAT-PMP port mapping (if enabled)
-        upnp_endpoint = None
-        if s.UPNP_ENABLED:
-            from app.upnp import setup_upnp_mapping
-
-            upnp_endpoint = await setup_upnp_mapping(
-                s.NODE_PORT, lease_duration=s.UPNP_LEASE_DURATION,
-            )
-            if upnp_endpoint:
-                logger.info(
-                    "UPnP mapping active: %s:%d",
-                    upnp_endpoint[0], upnp_endpoint[1],
-                )
-            else:
-                logger.warning(
-                    "UPnP enabled but mapping failed — "
-                    "falling back to direct public IP mode"
-                )
-
-        # 2. Detect public IP (needed for registration endpoint_url)
-        if s.PUBLIC_IP:
-            public_ip = s.PUBLIC_IP
-            logger.info("Using configured public IP: %s", public_ip)
-        else:
-            try:
-                public_ip = await detect_public_ip(http_client)
-            except RuntimeError:
-                logger.error("Cannot detect public IP — aborting")
-                sys.exit(1)
-        s.PUBLIC_IP = public_ip
-
-        # 3. Load or create node identity keypair
-        try:
-            identity_key, node_address = load_or_create_identity(
-                s.IDENTITY_KEY_PATH, s.IDENTITY_PASSPHRASE,
-            )
-        except KeystorePassphraseRequired:
-            if stop_event_arg is not None:
-                raise  # GUI path — NodeManager surfaces this to the frontend
-            # CLI path: prompt interactively
-            passphrase = getpass.getpass("Identity keystore passphrase: ")
-            identity_key, node_address = load_or_create_identity(
-                s.IDENTITY_KEY_PATH, passphrase,
-            )
-
-        logger.info("Node identity: %s", node_address)
-
-        # Staking address falls back to identity address if not configured
-        staking_address = s.STAKING_ADDRESS or node_address
-        logger.info("Staking address: %s", staking_address)
-
-        # 4. Start TLS server (must be running before registration so the
-        #    Coordination API challenge probe can reach us)
-        ensure_certificates(s.TLS_CERT_PATH, s.TLS_KEY_PATH)
-        ssl_ctx = create_server_ssl_context(s.TLS_CERT_PATH, s.TLS_KEY_PATH)
-
-        handler = functools.partial(handle_client, settings=s)
-        server = await asyncio.start_server(
-            handler, host=s.BIND_ADDRESS, port=s.NODE_PORT, ssl=ssl_ctx,
-        )
-        logger.info("Home Node listening on port %d (pre-registration)", s.NODE_PORT)
-
-        # 5. Register with Coordination API (triggers challenge probe)
-        #    Retry with exponential back-off so transient failures
-        #    (e.g. Coordination API rollout) don't kill the node.
-        max_retries = int(os.environ.get("SR_REGISTER_MAX_RETRIES", "5"))
-        backoff = 5  # seconds, doubles each retry
-        for attempt in range(1, max_retries + 1):
-            try:
-                node_id, gateway_ca_cert = await register_node(
-                    http_client, s, public_ip,
-                    identity_key=identity_key,
-                    node_address=node_address,
-                    upnp_endpoint=upnp_endpoint,
-                    wallet_address=staking_address,
-                )
-                break  # success
-            except Exception:
-                if attempt == max_retries:
-                    logger.exception(
-                        "Failed to register after %d attempts — aborting",
-                        max_retries,
-                    )
-                    server.close()
-                    await server.wait_closed()
-                    sys.exit(1)
-                logger.warning(
-                    "Registration attempt %d/%d failed, retrying in %ds…",
-                    attempt, max_retries, backoff,
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
-
-        # 5b. Save gateway CA cert if provided
-        if gateway_ca_cert:
-            save_gateway_ca_cert(gateway_ca_cert, s.GATEWAY_CA_CERT_PATH)
-
-        # 6. Upgrade to mTLS if enabled and CA cert is available
-        if s.MTLS_ENABLED:
-            if not os.path.isfile(s.GATEWAY_CA_CERT_PATH):
-                logger.warning(
-                    "mTLS enabled but gateway CA cert not found at %s "
-                    "— falling back to standard TLS (gateway may not have CA configured yet)",
-                    s.GATEWAY_CA_CERT_PATH,
-                )
-            else:
-                try:
-                    logger.info("Upgrading to mTLS…")
-                    ssl_ctx = create_mtls_server_ssl_context(
-                        s.TLS_CERT_PATH, s.TLS_KEY_PATH, s.GATEWAY_CA_CERT_PATH,
-                    )
-                    # Close and immediately rebind to minimise the port-unavailable
-                    # window.  We cannot use reuse_port because the initial server
-                    # was created without it (Linux requires all sockets sharing a
-                    # port to set SO_REUSEPORT), and Windows lacks SO_REUSEPORT.
-                    server.close()
-                    await server.wait_closed()
-                    server = await asyncio.start_server(
-                        handler, host=s.BIND_ADDRESS, port=s.NODE_PORT, ssl=ssl_ctx,
-                    )
-                except Exception:
-                    logger.warning(
-                        "mTLS upgrade failed — continuing with standard TLS",
-                        exc_info=True,
-                    )
-
-        logger.info(
-            "Home Node ready (node_id=%s, staking=%s, upnp=%s)",
-            node_id, staking_address,
-            f"{upnp_endpoint[0]}:{upnp_endpoint[1]}" if upnp_endpoint else "disabled",
-        )
-
-        # Start UPnP lease renewal if applicable
+        ctx = _NodeContext(s, http_client)
         renewal_task = None
-        if upnp_endpoint and s.UPNP_LEASE_DURATION > 0:
-            from app.upnp import renew_upnp_mapping
-
-            async def _renew_loop() -> None:
-                interval = max(s.UPNP_LEASE_DURATION // 2, 60)
-                while True:
-                    await asyncio.sleep(interval)
-                    ok = await renew_upnp_mapping(
-                        s.NODE_PORT, upnp_endpoint[1], s.UPNP_LEASE_DURATION,
-                    )
-                    if ok:
-                        logger.debug("UPnP lease renewed")
-                    else:
-                        logger.warning("UPnP lease renewal failed")
-
-            renewal_task = asyncio.create_task(_renew_loop())
+        health_task = None
 
         try:
-            await stop_event.wait()
+            # ── Phase: INITIALIZING ──
+            _report(NodeState.INITIALIZING, "Loading identity and certificates")
+            try:
+                await _phase_init(ctx)
+            except KeystorePassphraseRequired:
+                raise  # Let NodeManager surface this to the frontend
+            except NodeError:
+                raise
+            except Exception as exc:
+                raise classify_error(exc)
+
+            if stop_event.is_set():
+                return
+
+            # ── Phase: BINDING ──
+            _report(NodeState.BINDING, f"Binding to port {s.NODE_PORT}")
+            try:
+                await _phase_bind(ctx)
+            except NodeError:
+                raise
+            except Exception as exc:
+                raise classify_error(exc)
+
+            if stop_event.is_set():
+                return
+
+            # ── Phase: REGISTERING ──
+            _report(NodeState.REGISTERING, "Registering with coordination server")
+            try:
+                await _phase_register(ctx)
+            except NodeError:
+                raise
+            except Exception as exc:
+                raise classify_error(exc)
+
+            # mTLS rebind if upgrade happened
+            if ctx.s.MTLS_ENABLED and os.path.isfile(ctx.s.GATEWAY_CA_CERT_PATH):
+                try:
+                    await _rebind_server_mtls(ctx)
+                except Exception:
+                    logger.warning("mTLS server rebind failed", exc_info=True)
+
+            sm.set_node_id(ctx.node_id)
+
+            # ── Phase: RUNNING ──
+            _report(NodeState.RUNNING, f"Node ID: {ctx.node_id[:12]}...")
+
+            display_wallet = ctx.staking_address or ctx.wallet_address
+            logger.info(
+                "Home Node ready (node_id=%s, wallet=%s, upnp=%s)",
+                ctx.node_id, display_wallet,
+                f"{ctx.upnp_endpoint[0]}:{ctx.upnp_endpoint[1]}" if ctx.upnp_endpoint else "disabled",
+            )
+
+            # Start UPnP renewal
+            if ctx.upnp_endpoint and s.UPNP_LEASE_DURATION > 0:
+                from app.upnp import renew_upnp_mapping
+
+                async def _renew_loop() -> None:
+                    interval = max(s.UPNP_LEASE_DURATION // 2, 60)
+                    while True:
+                        await asyncio.sleep(interval)
+                        ok = await renew_upnp_mapping(
+                            s.NODE_PORT, ctx.upnp_endpoint[1], s.UPNP_LEASE_DURATION,
+                        )
+                        if ok:
+                            logger.debug("UPnP lease renewed")
+                        else:
+                            logger.warning("UPnP lease renewal failed")
+
+                renewal_task = asyncio.create_task(_renew_loop())
+
+            # Start health monitoring
+            health_task = asyncio.create_task(_health_loop(ctx, sm, stop_event))
+
+            # Wait for stop or health loop exit (reconnection trigger)
+            done, pending = await asyncio.wait(
+                [asyncio.create_task(stop_event.wait()), health_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+
+            # If health loop exited (RECONNECTING), handle reconnection
+            if sm.state == NodeState.RECONNECTING:
+                # Cancel health task if still running
+                if health_task and not health_task.done():
+                    health_task.cancel()
+
+                # Retry registration while server stays up
+                while not stop_event.is_set() and sm.state == NodeState.RECONNECTING:
+                    try:
+                        await _phase_register(ctx)
+                        sm.set_node_id(ctx.node_id)
+                        # Rebind server with mTLS if applicable
+                        if ctx.s.MTLS_ENABLED and os.path.isfile(ctx.s.GATEWAY_CA_CERT_PATH):
+                            try:
+                                await _rebind_server_mtls(ctx)
+                            except Exception:
+                                logger.warning("mTLS server rebind failed", exc_info=True)
+                        _report(NodeState.RUNNING, f"Reconnected (Node ID: {ctx.node_id[:12]}...)")
+                        logger.info("Reconnected successfully")
+                        # Restart health loop
+                        health_task = asyncio.create_task(_health_loop(ctx, sm, stop_event))
+                        done, pending = await asyncio.wait(
+                            [asyncio.create_task(stop_event.wait()), health_task],
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        for task in pending:
+                            task.cancel()
+                    except Exception as exc:
+                        error = classify_error(exc) if not isinstance(exc, NodeError) else exc
+                        delay = sm.handle_error(error, NodeState.RECONNECTING)
+                        if on_phase:
+                            on_phase(sm.state.value)
+                        if delay is None:
+                            break  # permanent error
+                        try:
+                            await asyncio.wait_for(stop_event.wait(), timeout=delay)
+                            break  # stop requested during wait
+                        except asyncio.TimeoutError:
+                            sm.transition(NodeState.RECONNECTING, "Retrying registration")
+                            if on_phase:
+                                on_phase(sm.state.value)
+
+        except NodeError as exc:
+            # Let the caller (NodeManager) handle the error
+            raise
+        except Exception as exc:
+            raise classify_error(exc)
         finally:
             logger.info("Shutting down…")
 
-            # 7. Stop accepting new connections
-            server.close()
-            await server.wait_closed()
+            # Stop accepting new connections
+            if ctx.server:
+                ctx.server.close()
+                await ctx.server.wait_closed()
 
-            # 8. Cancel UPnP renewal + remove mapping
-            if renewal_task is not None:
-                renewal_task.cancel()
-                try:
-                    await renewal_task
-                except asyncio.CancelledError:
-                    pass
+            # Cancel background tasks
+            for task in (renewal_task, health_task):
+                if task is not None and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
-            if upnp_endpoint:
+            # Remove UPnP mapping
+            if ctx.upnp_endpoint:
                 from app.upnp import remove_upnp_mapping
-                await remove_upnp_mapping(upnp_endpoint[1])
+                await remove_upnp_mapping(ctx.upnp_endpoint[1])
 
-            # 9. Deregister (best-effort, signed)
-            await deregister_node(http_client, s, node_id, identity_key=identity_key)
+            # Deregister (best-effort)
+            if ctx.node_id:
+                await deregister_node(ctx.http, s, ctx.node_id, identity_key=ctx.identity_key)
 
     logger.info("Home Node shut down cleanly")
 
@@ -384,14 +643,12 @@ def main() -> None:
 
     # First-run wizard: trigger when identity key file doesn't exist yet,
     # but only in interactive (TTY) sessions — skip silently in CI/piped mode.
-    if not os.path.isfile(settings.IDENTITY_KEY_PATH) and sys.stdin.isatty():
+    s = load_settings()
+    if not os.path.isfile(s.IDENTITY_KEY_PATH) and sys.stdin.isatty():
         if not _first_run_setup():
             sys.exit(0)
         # Reload settings so _run() picks up values written to .env
-        from importlib import reload
-        import app.config as config_mod
-        reload(config_mod)
-        from app.config import settings as reloaded_settings
+        reloaded_settings = load_settings()
         try:
             asyncio.run(_run(settings_override=reloaded_settings))
         finally:
@@ -402,10 +659,10 @@ def main() -> None:
 
     try:
         asyncio.run(_run())
+    except NodeError as exc:
+        logger.error("Node failed: %s", exc.user_message)
+        sys.exit(1)
     finally:
-        # Restore default signal handlers on Windows to avoid calling
-        # loop.call_soon_threadsafe() on the now-closed event loop if a
-        # late signal arrives between asyncio.run() returning and process exit.
         if sys.platform == "win32":
             signal.signal(signal.SIGINT, signal.SIG_DFL)
             signal.signal(signal.SIGTERM, signal.SIG_DFL)

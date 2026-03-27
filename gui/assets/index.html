@@ -45,9 +45,14 @@
         </div>
       </div>
 
+      <div class="input-group">
+        <label for="env-select">Environment</label>
+        <select id="env-select"></select>
+      </div>
+
       <!-- Advanced Settings (collapsible) -->
       <div class="advanced-toggle" id="advanced-toggle">
-        <span id="advanced-arrow">▸</span>
+        <span id="advanced-arrow">&#9656;</span>
         <span>Advanced Settings</span>
       </div>
       <div class="advanced-section" id="advanced-section" style="display: none;">
@@ -74,31 +79,52 @@
     </div>
   </div>
 
+  <!-- Test Build Banner (shown only in test variant) -->
+  <div id="test-banner" class="test-banner" style="display: none;">
+    TEST BUILD <span id="test-env-label"></span>
+  </div>
+
   <!-- Status Dashboard -->
   <div id="screen-status" class="screen" style="display: none;">
     <div class="container">
-      <div class="logo">
-        <svg width="48" height="48" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="32" cy="32" r="30" stroke="#6C5CE7" stroke-width="3" fill="none"/>
-          <circle cx="32" cy="32" r="8" fill="#6C5CE7"/>
-          <path d="M32 4 L32 24" stroke="#6C5CE7" stroke-width="2" stroke-linecap="round"/>
-          <path d="M32 40 L32 60" stroke="#6C5CE7" stroke-width="2" stroke-linecap="round"/>
-          <path d="M4 32 L24 32" stroke="#6C5CE7" stroke-width="2" stroke-linecap="round"/>
-          <path d="M40 32 L60 32" stroke="#6C5CE7" stroke-width="2" stroke-linecap="round"/>
-        </svg>
+      <div class="status-header">
+        <div class="logo">
+          <svg width="48" height="48" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="32" cy="32" r="30" stroke="#6C5CE7" stroke-width="3" fill="none"/>
+            <circle cx="32" cy="32" r="8" fill="#6C5CE7"/>
+            <path d="M32 4 L32 24" stroke="#6C5CE7" stroke-width="2" stroke-linecap="round"/>
+            <path d="M32 40 L32 60" stroke="#6C5CE7" stroke-width="2" stroke-linecap="round"/>
+            <path d="M4 32 L24 32" stroke="#6C5CE7" stroke-width="2" stroke-linecap="round"/>
+            <path d="M40 32 L60 32" stroke="#6C5CE7" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h2>SpaceRouter</h2>
+        <!-- Settings gear (test builds only) -->
+        <button id="btn-settings" class="btn-settings" style="display: none;" title="Settings">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M10 12.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5z" stroke="#8080a0" stroke-width="1.5"/>
+            <path d="M16.18 12.32a1.25 1.25 0 00.25 1.38l.04.05a1.52 1.52 0 11-2.15 2.15l-.05-.05a1.25 1.25 0 00-1.38-.25 1.25 1.25 0 00-.76 1.15v.13a1.52 1.52 0 01-3.04 0v-.07a1.25 1.25 0 00-.82-1.14 1.25 1.25 0 00-1.38.25l-.05.04a1.52 1.52 0 11-2.15-2.15l.05-.05a1.25 1.25 0 00.25-1.38 1.25 1.25 0 00-1.15-.76h-.13a1.52 1.52 0 010-3.04h.07a1.25 1.25 0 001.14-.82 1.25 1.25 0 00-.25-1.38l-.04-.05a1.52 1.52 0 112.15-2.15l.05.05a1.25 1.25 0 001.38.25h.06a1.25 1.25 0 00.76-1.15v-.13a1.52 1.52 0 013.04 0v.07a1.25 1.25 0 00.76 1.14 1.25 1.25 0 001.38-.25l.05-.04a1.52 1.52 0 112.15 2.15l-.05.05a1.25 1.25 0 00-.25 1.38v.06a1.25 1.25 0 001.15.76h.13a1.52 1.52 0 010 3.04h-.07a1.25 1.25 0 00-1.14.76z" stroke="#8080a0" stroke-width="1.5"/>
+          </svg>
+        </button>
       </div>
-      <h2>SpaceRouter</h2>
 
       <div id="status-card" class="status-card">
         <div class="status-indicator">
           <span id="status-dot" class="dot dot-stopped"></span>
           <span id="status-text">Starting...</span>
         </div>
+        <div id="status-detail" class="status-detail"></div>
+        <div id="env-badge" class="env-badge"></div>
       </div>
 
-      <div class="wallet-display" id="staking-display" style="display: none;">
+      <div class="wallet-display">
         <span class="wallet-label">Staking Address</span>
         <span id="staking-address" class="wallet-value">-</span>
+      </div>
+
+      <div class="wallet-display">
+        <span class="wallet-label">Collection Address</span>
+        <span id="collection-address" class="wallet-value">-</span>
       </div>
 
       <div class="info-box">
@@ -106,9 +132,112 @@
         <p>Stake your Spacecoin to earn yield. You must both <strong>stake</strong> AND <strong>run a SpaceRouter node</strong> to earn yield.</p>
       </div>
 
+      <div id="cert-warning" class="cert-warning" style="display: none;">
+        TLS certificate expires soon. It will be auto-renewed.
+      </div>
+
       <div id="error-banner" class="error-banner" style="display: none;">
         <span id="error-text"></span>
       </div>
+
+      <div id="action-buttons" class="action-buttons">
+        <button id="btn-retry" class="btn-primary" style="display: none;">Retry</button>
+        <button id="btn-stop" class="btn-secondary" style="display: none;">Stop</button>
+        <button id="btn-fresh-restart" class="btn-danger">Fresh Restart</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Fresh Restart Confirmation Dialog -->
+  <div id="screen-fresh-restart" class="screen" style="display: none;">
+    <div class="container">
+      <h2>Fresh Restart</h2>
+      <p class="description">This will stop the node and reset all settings to defaults.</p>
+      <p class="description">Would you like to keep your wallet addresses?</p>
+      <div class="restart-actions">
+        <button id="btn-restart-keep" class="btn-primary">Keep Addresses</button>
+        <button id="btn-restart-clear" class="btn-secondary">Clear Everything</button>
+        <button id="btn-restart-cancel" class="btn-back">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Network Setup Screen (shown during onboarding) -->
+  <div id="screen-network" class="screen" style="display: none;">
+    <div class="container">
+      <h2>Network Setup</h2>
+      <p class="description">How is your node reachable from the internet?</p>
+
+      <div class="network-options">
+        <label class="radio-card" id="card-upnp">
+          <input type="radio" name="network-mode" value="upnp" checked>
+          <div class="radio-card-content">
+            <span class="radio-card-title">UPnP (Automatic)</span>
+            <span class="radio-card-desc">Your router supports UPnP and can automatically open ports. Works for most home networks.</span>
+          </div>
+        </label>
+        <label class="radio-card" id="card-tunnel">
+          <input type="radio" name="network-mode" value="tunnel">
+          <div class="radio-card-content">
+            <span class="radio-card-title">Tunnel / Manual</span>
+            <span class="radio-card-desc">You're behind CGNAT or using a tunnel (bore, ngrok, etc). Enter your public hostname or IP.</span>
+          </div>
+        </label>
+      </div>
+
+      <div id="tunnel-config" style="display: none;">
+        <div class="input-group">
+          <label for="tunnel-host">Public Hostname or IP</label>
+          <input type="text" id="tunnel-host" placeholder="e.g. bore.pub" spellcheck="false" autocomplete="off">
+          <span class="hint">The hostname or IP that the coordination API can reach your node at.</span>
+        </div>
+        <div class="input-group">
+          <label for="tunnel-port">Remote Port <span class="optional">(optional &mdash; defaults to 9090)</span></label>
+          <input type="text" id="tunnel-port" placeholder="9090" spellcheck="false" autocomplete="off">
+          <span class="hint">The port assigned by your tunnel provider (e.g. bore assigns a random port).</span>
+        </div>
+      </div>
+
+      <button id="btn-network-continue" class="btn-primary">Continue</button>
+    </div>
+  </div>
+
+  <!-- Settings Panel (test builds only) -->
+  <div id="screen-settings" class="screen" style="display: none;">
+    <div class="container">
+      <div class="settings-header">
+        <button id="btn-back" class="btn-back">&larr; Back</button>
+        <h2>Settings</h2>
+      </div>
+
+      <div class="input-group">
+        <label for="settings-env">Coordination API</label>
+        <select id="settings-env" class="select-input">
+          <option value="https://spacerouter-coordination-api.fly.dev">Production</option>
+          <option value="https://spacerouter-coordination-api-test.fly.dev">Test</option>
+          <option value="custom">Custom URL</option>
+        </select>
+        <input type="text" id="settings-custom-url" class="custom-url-input" placeholder="https://..." style="display: none;" spellcheck="false" autocomplete="off">
+      </div>
+
+      <div class="input-group">
+        <label>mTLS (Mutual TLS)</label>
+        <div class="toggle-row">
+          <span class="toggle-label" id="mtls-label">Enabled</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="settings-mtls" checked>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div id="mtls-warning" class="mtls-warning" style="display: none;">
+          WARNING: Disabling mTLS removes gateway authentication. Your node will accept
+          connections from any proxy gateway, not just authorized ones. Only disable this
+          for testing with environments that do not require mTLS.
+        </div>
+      </div>
+
+      <button id="btn-save-settings" class="btn-primary">Save &amp; Restart Node</button>
+      <div id="settings-status" class="settings-status"></div>
     </div>
   </div>
 
