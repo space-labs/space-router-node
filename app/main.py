@@ -382,8 +382,9 @@ def main() -> None:
         print(f"space-router-node {__version__}")
         sys.exit(0)
 
-    # First-run wizard: trigger when identity key file doesn't exist yet
-    if not os.path.isfile(settings.IDENTITY_KEY_PATH):
+    # First-run wizard: trigger when identity key file doesn't exist yet,
+    # but only in interactive (TTY) sessions — skip silently in CI/piped mode.
+    if not os.path.isfile(settings.IDENTITY_KEY_PATH) and sys.stdin.isatty():
         if not _first_run_setup():
             sys.exit(0)
         # Reload settings so _run() picks up values written to .env
