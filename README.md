@@ -34,7 +34,7 @@ On first run in an interactive terminal the wizard will prompt for:
 3. **Staking address** (optional) — EVM wallet that earns staking rewards; defaults to identity address
 4. **Collection address** (optional) — where traffic fees accumulate; defaults to staking address
 
-In non-interactive / headless environments (CI, service startup) the wizard is skipped and the identity key is auto-generated with no passphrase.
+In non-interactive / headless environments (CI, service startup) the wizard is skipped and the identity key is auto-generated using `SR_IDENTITY_PASSPHRASE` (no passphrase by default).
 
 ## Configuration
 
@@ -43,6 +43,8 @@ In non-interactive / headless environments (CI, service startup) the wizard is s
 | `SR_COORDINATION_API_URL` | `http://localhost:8000` | Coordination API URL |
 | `SR_NODE_PORT` | `9090` | Port for incoming proxy connections |
 | `SR_NODE_LABEL` | `""` | Human-readable label for this node |
+| `SR_BIND_ADDRESS` | `0.0.0.0` | Interface address to bind the proxy listener |
+| `SR_MAX_CONNECTIONS` | `256` | Maximum concurrent proxy connections (DoS limit) |
 | `SR_STAKING_ADDRESS` | identity address | EVM wallet that earns staking rewards |
 | `SR_COLLECTION_ADDRESS` | staking address | EVM wallet that collects traffic fees |
 | `SR_IDENTITY_KEY_PATH` | `certs/node-identity.key` | Path to identity private key file |
@@ -52,6 +54,8 @@ In non-interactive / headless environments (CI, service startup) the wizard is s
 | `SR_UPNP_LEASE_DURATION` | `3600` | UPnP lease duration in seconds |
 | `SR_TLS_CERT_PATH` | `certs/node.crt` | TLS certificate path (auto-generated) |
 | `SR_TLS_KEY_PATH` | `certs/node.key` | TLS key path (auto-generated) |
+| `SR_MTLS_ENABLED` | `true` | Require mutual TLS authentication from the Gateway |
+| `SR_GATEWAY_CA_CERT_PATH` | `certs/gateway-ca.crt` | Path to Gateway CA certificate for mTLS verification |
 | `SR_REGISTRATION_MODE` | `v1` | Registration protocol: `v1`, `v2`, or `auto` |
 | `SR_BUFFER_SIZE` | `65536` | TCP relay buffer size |
 | `SR_REQUEST_TIMEOUT` | `30.0` | Connection timeout in seconds |
