@@ -24,6 +24,9 @@ The Home Node:
 # Install dependencies
 pip install -r requirements.txt
 
+# Configure the Coordination API URL (required for production)
+export SR_COORDINATION_API_URL=https://spacerouter-coordination-api.fly.dev
+
 # Run — first-time setup wizard starts automatically in a terminal
 python -m app.main
 ```
@@ -34,7 +37,7 @@ On first run in an interactive terminal the wizard will prompt for:
 3. **Staking address** (optional) — EVM wallet that earns staking rewards; defaults to identity address
 4. **Collection address** (optional) — where traffic fees accumulate; defaults to staking address
 
-In non-interactive / headless environments (CI, service startup) the wizard is skipped and the identity key is auto-generated using `SR_IDENTITY_PASSPHRASE` (no passphrase by default).
+In non-interactive / headless environments (CI, service startup) the wizard is skipped and the identity key is auto-generated (cryptographically random) and encrypted at rest with `SR_IDENTITY_PASSPHRASE` if set (plaintext by default).
 
 ## Configuration
 
@@ -72,6 +75,8 @@ The identity key is stored at `SR_IDENTITY_KEY_PATH` in one of two formats:
 - **Keystore JSON** (passphrase set): Web3 standard encrypted keystore — requires `SR_IDENTITY_PASSPHRASE` to be set, or will prompt on startup
 
 If a plaintext key file exists and `SR_IDENTITY_PASSPHRASE` is later configured, the file is **automatically migrated** to keystore JSON on next startup.
+
+> **Note:** When the wizard saves a passphrase, it is written in plaintext to `.env` as `SR_IDENTITY_PASSPHRASE`. This means the encrypted key and its passphrase are co-located on the filesystem; passphrase encryption primarily protects against accidental key file exposure, not against an adversary with full filesystem access.
 
 ## macOS launchd service
 
