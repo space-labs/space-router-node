@@ -15,6 +15,7 @@ app/_build_variant.py
 
 # Virtual environments
 .venv/
+.venv*/
 venv/
 env/
 
