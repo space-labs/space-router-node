@@ -11,7 +11,7 @@
   <div id="screen-onboarding" class="screen" style="display: none;">
     <div class="container">
       <div class="logo">
-        <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <svg width="48" height="48" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
           <circle cx="32" cy="32" r="30" stroke="#6C5CE7" stroke-width="3" fill="none"/>
           <circle cx="32" cy="32" r="8" fill="#6C5CE7"/>
           <path d="M32 4 L32 24" stroke="#6C5CE7" stroke-width="2" stroke-linecap="round"/>
@@ -20,15 +20,11 @@
           <path d="M40 32 L60 32" stroke="#6C5CE7" stroke-width="2" stroke-linecap="round"/>
         </svg>
       </div>
-      <h1>Welcome to SpaceRouter</h1>
-      <p class="description">
-        Run a node and earn <strong>Spacecoin</strong>. A signing identity key will be
-        created for this node automatically.
-      </p>
+      <h1>SpaceRouter</h1>
+      <p class="subtitle">Set up your node in seconds.</p>
 
       <!-- Identity Key -->
       <div class="input-group">
-        <label>Identity Key</label>
         <div class="radio-group">
           <label class="radio-option">
             <input type="radio" name="key-mode" id="radio-generate" value="generate" checked>
@@ -40,7 +36,7 @@
           </label>
         </div>
         <div id="import-key-section" style="display: none; margin-top: 10px;">
-          <input type="password" id="identity-key-input" placeholder="0x… (64 hex chars)" spellcheck="false" autocomplete="off">
+          <input type="password" id="identity-key-input" placeholder="Private key (64 hex chars)" spellcheck="false" autocomplete="off">
           <span id="identity-key-error" class="error"></span>
         </div>
       </div>
@@ -53,29 +49,49 @@
       <!-- Advanced Settings (collapsible) -->
       <div class="advanced-toggle" id="advanced-toggle">
         <span id="advanced-arrow">&#9656;</span>
-        <span>Advanced Settings</span>
+        <span>Advanced</span>
       </div>
       <div class="advanced-section" id="advanced-section" style="display: none;">
         <div class="input-group" style="margin-top: 0;">
-          <label for="passphrase-input">Identity Passphrase</label>
-          <input type="password" id="passphrase-input" placeholder="Optional — encrypts the identity key" autocomplete="new-password">
-          <span class="help-text">If set, the identity key is stored encrypted on disk.</span>
+          <label for="passphrase-input">Passphrase</label>
+          <input type="password" id="passphrase-input" placeholder="Optional — encrypts key on disk" autocomplete="new-password">
         </div>
         <div class="input-group">
-          <label for="staking-input">Staking Address</label>
-          <input type="text" id="staking-input" placeholder="0x… defaults to identity address" spellcheck="false" autocomplete="off">
+          <label for="staking-input">Staking address</label>
+          <input type="text" id="staking-input" placeholder="Defaults to identity address" spellcheck="false" autocomplete="off">
           <span id="staking-error" class="error"></span>
-          <span class="help-text">The wallet that earns staking rewards. Leave blank to use the identity address.</span>
         </div>
         <div class="input-group">
-          <label for="collection-input">Collection Address</label>
-          <input type="text" id="collection-input" placeholder="0x… defaults to staking address" spellcheck="false" autocomplete="off">
+          <label for="collection-input">Collection address</label>
+          <input type="text" id="collection-input" placeholder="Defaults to staking address" spellcheck="false" autocomplete="off">
           <span id="collection-error" class="error"></span>
-          <span class="help-text">Where traffic fees accumulate. Leave blank to use the staking address.</span>
+        </div>
+        <div class="input-group">
+          <label>Network</label>
+          <div class="radio-group">
+            <label class="radio-option">
+              <input type="radio" name="onboard-network-mode" id="onboard-upnp" value="upnp" checked>
+              <span>Automatic (UPnP) <span class="badge">Recommended</span></span>
+            </label>
+            <label class="radio-option">
+              <input type="radio" name="onboard-network-mode" id="onboard-tunnel" value="tunnel">
+              <span>Manual / Tunnel</span>
+            </label>
+          </div>
+          <div id="onboard-tunnel-config" style="display: none; margin-top: 8px;">
+            <div class="input-group" style="margin-top: 0;">
+              <label for="onboard-tunnel-host">Public hostname</label>
+              <input type="text" id="onboard-tunnel-host" placeholder="e.g. bore.pub" spellcheck="false" autocomplete="off">
+            </div>
+            <div class="input-group">
+              <label for="onboard-tunnel-port">Port</label>
+              <input type="text" id="onboard-tunnel-port" placeholder="9090" spellcheck="false" autocomplete="off">
+            </div>
+          </div>
         </div>
       </div>
 
-      <button id="btn-start" class="btn-primary">Start SpaceRouter</button>
+      <button id="btn-start" class="btn-primary">Start Node</button>
     </div>
   </div>
 
@@ -88,16 +104,6 @@
   <div id="screen-status" class="screen" style="display: none;">
     <div class="container">
       <div class="status-header">
-        <div class="logo">
-          <svg width="48" height="48" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="32" cy="32" r="30" stroke="#6C5CE7" stroke-width="3" fill="none"/>
-            <circle cx="32" cy="32" r="8" fill="#6C5CE7"/>
-            <path d="M32 4 L32 24" stroke="#6C5CE7" stroke-width="2" stroke-linecap="round"/>
-            <path d="M32 40 L32 60" stroke="#6C5CE7" stroke-width="2" stroke-linecap="round"/>
-            <path d="M4 32 L24 32" stroke="#6C5CE7" stroke-width="2" stroke-linecap="round"/>
-            <path d="M40 32 L60 32" stroke="#6C5CE7" stroke-width="2" stroke-linecap="round"/>
-          </svg>
-        </div>
         <h2>SpaceRouter</h2>
         <!-- Settings gear (test builds only) -->
         <button id="btn-settings" class="btn-settings" style="display: none;" title="Settings">
@@ -118,22 +124,21 @@
       </div>
 
       <div class="wallet-display">
-        <span class="wallet-label">Staking Address</span>
+        <span class="wallet-label">Staking</span>
         <span id="staking-address" class="wallet-value">-</span>
       </div>
 
       <div class="wallet-display">
-        <span class="wallet-label">Collection Address</span>
+        <span class="wallet-label">Collection</span>
         <span id="collection-address" class="wallet-value">-</span>
       </div>
 
       <div class="info-box">
-        <p>You earn <strong>Spacecoin</strong> while this node is running.</p>
-        <p>Stake your Spacecoin to earn yield. You must both <strong>stake</strong> AND <strong>run a SpaceRouter node</strong> to earn yield.</p>
+        <p>Earn <strong>Spacecoin</strong> by running this node. <strong>Stake</strong> to earn yield.</p>
       </div>
 
       <div id="cert-warning" class="cert-warning" style="display: none;">
-        TLS certificate expires soon. It will be auto-renewed.
+        TLS certificate expires soon — auto-renewing.
       </div>
 
       <div id="error-banner" class="error-banner" style="display: none;">
@@ -143,17 +148,17 @@
       <div id="action-buttons" class="action-buttons">
         <button id="btn-retry" class="btn-primary" style="display: none;">Retry</button>
         <button id="btn-stop" class="btn-secondary" style="display: none;">Stop</button>
-        <button id="btn-fresh-restart" class="btn-danger">Fresh Restart</button>
       </div>
+
+      <button id="btn-fresh-restart" class="btn-text-subtle">Reset Node</button>
     </div>
   </div>
 
   <!-- Fresh Restart Confirmation Dialog -->
   <div id="screen-fresh-restart" class="screen" style="display: none;">
     <div class="container">
-      <h2>Fresh Restart</h2>
-      <p class="description">This will stop the node and reset all settings to defaults.</p>
-      <p class="description">Would you like to keep your wallet addresses?</p>
+      <h2>Reset Node</h2>
+      <p class="subtitle">Keep your identity and addresses, or start fresh.</p>
       <div class="restart-actions">
         <button id="btn-restart-keep" class="btn-primary">Keep Addresses</button>
         <button id="btn-restart-clear" class="btn-secondary">Clear Everything</button>

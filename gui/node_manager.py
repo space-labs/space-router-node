@@ -5,6 +5,7 @@ import logging
 import threading
 
 from app.errors import NodeError, classify_error
+from app.identity import KeystorePassphraseRequired
 from app.state import NodeState, NodeStateMachine, NodeStatus
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,10 @@ class NodeManager:
                     state_machine=self._sm,
                 )
             )
+        except KeystorePassphraseRequired:
+            # State machine already transitioned to PASSPHRASE_REQUIRED in _run()
+            logger.info("Passphrase required — waiting for user input")
+            return
         except NodeError as exc:
             logger.warning("Node error: %s", exc)
             # State machine already has the error info if handle_error was called,
@@ -118,7 +123,10 @@ class NodeManager:
                     self._schedule_retry(delay)
                     return
         finally:
-            if self._sm.state not in (NodeState.ERROR_PERMANENT, NodeState.ERROR_TRANSIENT, NodeState.IDLE):
+            if self._sm.state not in (
+                NodeState.ERROR_PERMANENT, NodeState.ERROR_TRANSIENT,
+                NodeState.PASSPHRASE_REQUIRED, NodeState.IDLE,
+            ):
                 try:
                     self._sm.transition(NodeState.IDLE)
                 except ValueError:

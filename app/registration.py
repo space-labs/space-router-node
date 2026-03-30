@@ -3,9 +3,9 @@
 Supports two protocol versions selected via ``SR_REGISTRATION_MODE``:
 
 - **v1** (v0.1.2): Single ``wallet_address`` + ``identity_signature``.
-- **v2** (v0.2.0): Multi-wallet model with ``identity_address``,
-  ``staking_address``, ``collection_address``, and ``vouching_signature``.
-- **auto**: Try v2 first; fall back to v1 on HTTP 400/422.
+- **v2** (v0.2.0): Multi-wallet with ``staking_address``,
+  ``collection_address``, and ``staking_vouching_signature``.
+- **auto** (default): v0.2.0 when staking_address is set, v0.1.2 otherwise.
 
 Lifecycle:
   1. detect_public_ip()   — determine the machine's public IP
@@ -65,7 +65,7 @@ async def detect_public_ip(http_client: httpx.AsyncClient) -> str:
 # v0.1.2 registration (legacy)
 # ---------------------------------------------------------------------------
 
-async def _register_v1(
+async def _do_register(
     http_client: httpx.AsyncClient,
     settings: Settings,
     public_ip: str,
@@ -171,80 +171,6 @@ async def _register_v1(
 
 
 # ---------------------------------------------------------------------------
-# v0.2.0 registration (multi-wallet)
-# ---------------------------------------------------------------------------
-
-async def _register_v2(
-    http_client: httpx.AsyncClient,
-    settings: Settings,
-    public_ip: str,
-    *,
-    identity_key: str,
-    identity_address: str,
-    wallet_address: str,
-    upnp_endpoint: tuple | None = None,
-) -> tuple[str, str | None]:
-    """v0.2.0 registration: multi-wallet with vouching signature."""
-    if upnp_endpoint:
-        upnp_ip, upnp_port = upnp_endpoint
-        endpoint_url = f"https://{upnp_ip}:{upnp_port}"
-    else:
-        advertised_port = settings.PUBLIC_PORT if settings.PUBLIC_PORT else settings.NODE_PORT
-        endpoint_url = f"https://{public_ip}:{advertised_port}"
-
-    # Resolve staking/collection addresses (wallet collapsing)
-    staking_address = wallet_address.lower()
-    collection_address = (settings.COLLECTION_ADDRESS or wallet_address).lower()
-
-    # Sign: space-router:register:{identity_address}:{timestamp}
-    identity_signature, timestamp = sign_request(
-        identity_key, "register", identity_address,
-    )
-
-    # Vouch: space-router:vouch:{staking}:{collection}:{timestamp}
-    vouching_sig, _ = sign_vouch(
-        identity_key, staking_address, collection_address, timestamp=timestamp,
-    )
-
-    payload = {
-        "identity_address": identity_address,
-        "staking_address": staking_address,
-        "collection_address": collection_address,
-        "staking_vouching_signature": vouching_sig,
-        "identity_signature": identity_signature,
-        "endpoint_url": endpoint_url,
-        "timestamp": timestamp,
-    }
-    if settings.NODE_LABEL:
-        payload["label"] = settings.NODE_LABEL
-
-    url = f"{settings.COORDINATION_API_URL}/nodes/register"
-    logger.info(
-        "Registering node (v2) at %s → endpoint=%s identity=%s staking=%s collection=%s",
-        url, endpoint_url, identity_address, staking_address, collection_address,
-    )
-
-    resp = await http_client.post(url, json=payload, timeout=15.0)
-    resp.raise_for_status()
-    data = resp.json()
-
-    node_id = data["node_id"]
-    gateway_ca_cert = data.get("gateway_ca_cert")
-    reg_status = data.get("status", "registered")
-
-    logger.info(
-        "Registered as node %s (v2, status=%s, identity=%s, staking=%s, mtls_ca=%s)",
-        node_id, reg_status, identity_address, staking_address,
-        "provided" if gateway_ca_cert else "not provided",
-    )
-
-    # Request a health probe so the Coordination API can verify us
-    await request_probe(http_client, settings, node_id, identity_key=identity_key)
-
-    return node_id, gateway_ca_cert
-
-
-# ---------------------------------------------------------------------------
 # Public dispatcher
 # ---------------------------------------------------------------------------
 
@@ -254,7 +180,6 @@ async def register_node(
     public_ip: str,
     *,
     identity_key: str,
-    identity_address: str = "",
     wallet_address: str,
     staking_address: str = "",
     collection_address: str = "",
@@ -262,15 +187,36 @@ async def register_node(
 ) -> tuple[str, str | None]:
     """Register this node with the Coordination API.
 
-    Dispatches to v1 or v2 based on ``settings.REGISTRATION_MODE``.
+    Uses ``settings.REGISTRATION_MODE`` to decide protocol version:
+
+    - **auto** (default): sends v0.2.0 multi-wallet payload when
+      staking_address is provided, otherwise v0.1.2 single-wallet.
+    - **v1**: forces v0.1.2 single-wallet (ignores staking_address).
+    - **v2**: forces v0.2.0 multi-wallet (requires staking_address).
+
     Returns ``(node_id, gateway_ca_cert_pem_or_None)``.
-    Raises on failure — the caller should abort startup.
     """
     global _active_mode  # noqa: PLW0603
     mode = settings.REGISTRATION_MODE
 
     if mode == "v1":
-        result = await _register_v1(
+        # Force v0.1.2: ignore staking/collection, use wallet_address only
+        result = await _do_register(
+            http_client, settings, public_ip,
+            identity_key=identity_key,
+            wallet_address=wallet_address,
+            upnp_endpoint=upnp_endpoint,
+        )
+        _active_mode = "v1"
+        return result
+
+    if mode == "v2":
+        # Force v0.2.0: require staking_address
+        if not staking_address:
+            raise ValueError(
+                "REGISTRATION_MODE=v2 requires SR_STAKING_ADDRESS to be set"
+            )
+        result = await _do_register(
             http_client, settings, public_ip,
             identity_key=identity_key,
             wallet_address=wallet_address,
@@ -278,47 +224,21 @@ async def register_node(
             collection_address=collection_address,
             upnp_endpoint=upnp_endpoint,
         )
-        _active_mode = "v1"
-        return result
-
-    if mode == "v2":
-        result = await _register_v2(
-            http_client, settings, public_ip,
-            identity_key=identity_key,
-            identity_address=identity_address,
-            wallet_address=wallet_address,
-            upnp_endpoint=upnp_endpoint,
-        )
         _active_mode = "v2"
         return result
 
-    # auto: try v2 first, fall back to v1 on 400/422
+    # auto: use v0.2.0 when staking_address is set, v0.1.2 otherwise
     assert mode == "auto"
-    try:
-        result = await _register_v2(
-            http_client, settings, public_ip,
-            identity_key=identity_key,
-            identity_address=identity_address,
-            wallet_address=wallet_address,
-            upnp_endpoint=upnp_endpoint,
-        )
-        _active_mode = "v2"
-        return result
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (400, 422):
-            logger.info(
-                "v0.2.0 registration rejected (%s), falling back to v0.1.2",
-                exc.response.status_code,
-            )
-            result = await _register_v1(
-                http_client, settings, public_ip,
-                identity_key=identity_key,
-                wallet_address=wallet_address,
-                upnp_endpoint=upnp_endpoint,
-            )
-            _active_mode = "v1"
-            return result
-        raise
+    result = await _do_register(
+        http_client, settings, public_ip,
+        identity_key=identity_key,
+        wallet_address=wallet_address,
+        staking_address=staking_address,
+        collection_address=collection_address,
+        upnp_endpoint=upnp_endpoint,
+    )
+    _active_mode = "v2" if staking_address else "v1"
+    return result
 
 
 def save_gateway_ca_cert(pem_data: str, path: str) -> None:

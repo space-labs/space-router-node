@@ -182,7 +182,14 @@ function initOnboarding() {
   const advancedSection = $("#advanced-section");
   const advancedArrow = $("#advanced-arrow");
 
-  populateEnvSelector();
+  // Environment selector: test builds only
+  const envGroup = $("#env-select").parentElement;
+  if (isTestBuild) {
+    populateEnvSelector();
+    envGroup.style.display = "";
+  } else {
+    envGroup.style.display = "none";
+  }
 
   // ── Identity key mode toggle ──
   function updateKeyMode() {
@@ -221,6 +228,15 @@ function initOnboarding() {
     advancedSection.style.display = open ? "none" : "block";
     advancedArrow.textContent = open ? "▸" : "▾";
   });
+
+  // ── Network mode toggle (in advanced section) ──
+  const onboardNetworkRadios = document.querySelectorAll('input[name="onboard-network-mode"]');
+  const onboardTunnelConfig = $("#onboard-tunnel-config");
+  for (const radio of onboardNetworkRadios) {
+    radio.addEventListener("change", function () {
+      onboardTunnelConfig.style.display = this.value === "tunnel" ? "block" : "none";
+    });
+  }
 
   // ── Optional address validation ──
   function validateAddress(input, errorEl) {
@@ -271,7 +287,14 @@ function initOnboarding() {
     const collection = collectionInput.value.trim();
     const identityKeyHex = radioImport.checked ? identityKeyInput.value.trim() : "";
 
+    // Save network mode from advanced section
+    const networkMode = document.querySelector('input[name="onboard-network-mode"]:checked');
+    const mode = networkMode ? networkMode.value : "upnp";
+    const tunnelHost = mode === "tunnel" ? ($("#onboard-tunnel-host").value.trim() || "") : "";
+    const tunnelPort = mode === "tunnel" ? ($("#onboard-tunnel-port").value.trim() || "") : "";
+
     try {
+      await window.pywebview.api.save_network_mode(mode, tunnelHost, tunnelPort);
       const result = await window.pywebview.api.save_onboarding_and_start(
         passphrase, staking, collection, identityKeyHex,
       );
@@ -279,18 +302,19 @@ function initOnboarding() {
         hideAll();
         showStatus();
       } else {
-        // Show error inline
+        // Show error inline (remove any previous error first)
+        btn.parentNode.querySelectorAll("p.error").forEach(el => el.remove());
         const errEl = document.createElement("p");
         errEl.className = "error";
         errEl.style.marginTop = "12px";
         errEl.textContent = result.error || "Unknown error";
         btn.parentNode.insertBefore(errEl, btn.nextSibling);
         btn.disabled = false;
-        btn.textContent = "Start SpaceRouter";
+        btn.textContent = "Start Node";
       }
     } catch (e) {
       btn.disabled = false;
-      btn.textContent = "Start SpaceRouter";
+      btn.textContent = "Start Node";
     }
   });
 }
@@ -326,12 +350,19 @@ async function updateStatus() {
     const btnRetry = $("#btn-retry");
     const btnStop = $("#btn-stop");
 
-    // Wallet addresses
-    stakingEl.textContent = status.staking_address || status.wallet || "-";
-    collectionEl.textContent = status.collection_address || "-";
+    // Wallet addresses (truncated, full on hover)
+    const fullStaking = status.staking_address || status.wallet || "";
+    const fullCollection = status.collection_address || "";
+    stakingEl.textContent = truncateAddress(fullStaking) || "-";
+    stakingEl.title = fullStaking;
+    collectionEl.textContent = truncateAddress(fullCollection) || "-";
+    collectionEl.title = fullCollection;
 
-    // Check for passphrase-required error
-    if (status.error && status.error.includes("KeystorePassphraseRequired")) {
+    // State-based display
+    const state = status.state || "idle";
+
+    // Passphrase required — show unlock dialog immediately
+    if (state === "passphrase_required") {
       showUnlockDialog();
       return;
     }
@@ -343,9 +374,6 @@ async function updateStatus() {
     } else {
       envBadge.style.display = "none";
     }
-
-    // State-based display
-    const state = status.state || "idle";
 
     switch (state) {
       case "idle":
@@ -394,7 +422,23 @@ async function updateStatus() {
       case "error_permanent":
         dot.className = "dot dot-stopped";
         text.textContent = "Error";
-        detail.textContent = "";
+        // Use error_code for user-friendly messages
+        if (status.error_code === "identity_key_locked") {
+          showUnlockDialog();
+          return;
+        } else if (status.error_code === "registration_rejected") {
+          detail.textContent = "Registration rejected. Check your staking balance and wallet address.";
+        } else if (status.error_code === "network_unreachable") {
+          detail.textContent = "Cannot reach coordination server. Check your internet connection.";
+        } else if (status.error_code === "invalid_wallet") {
+          detail.textContent = "Invalid wallet address. Use Fresh Restart to reconfigure.";
+        } else if (status.error_code === "port_permission") {
+          detail.textContent = "Port permission denied. Use a port above 1024.";
+        } else if (status.error_code === "port_in_use") {
+          detail.textContent = "Port is already in use by another application.";
+        } else {
+          detail.textContent = status.error_message || status.error || "";
+        }
         break;
       case "stopping":
         dot.className = "dot dot-starting";
@@ -408,7 +452,7 @@ async function updateStatus() {
     }
 
     // Error display
-    if (status.error && state !== "error_transient" && !status.error.includes("KeystorePassphraseRequired")) {
+    if (status.error && state !== "error_transient" && state !== "passphrase_required") {
       errorText.textContent = status.error;
       errorBanner.style.display = "block";
     } else {
@@ -474,18 +518,14 @@ async function doFreshRestart(keepAddresses) {
       return;
     }
 
-    // Go to network setup, then onboarding
-    showNetworkSetup(function () {
-      // Pre-fill addresses if kept
-      hideAll();
-      show("screen-onboarding");
-      initOnboarding();
+    // Go directly to onboarding
+    hideAll();
+    show("screen-onboarding");
+    initOnboarding();
 
-      if (keepAddresses) {
-        // Reload addresses from config
-        loadSavedAddresses();
-      }
-    });
+    if (keepAddresses) {
+      loadSavedAddresses();
+    }
   } catch (e) {
     btn.disabled = false;
     btn.textContent = keepAddresses ? "Keep Addresses" : "Clear Everything";
@@ -737,18 +777,15 @@ async function init() {
   try {
     const needsOnboarding = await window.pywebview.api.needs_onboarding();
 
-    // Variant setup is non-blocking
-    initTestVariant();
+    // Determine build variant before showing any screens
+    await initTestVariant();
 
     // Action buttons
     initFreshRestart();
     initActionButtons();
 
     if (needsOnboarding) {
-      // First time: show network setup, then onboarding
-      showNetworkSetup(function () {
-        showOnboarding();
-      });
+      showOnboarding();
     } else {
       // Already configured — start node and show status
       await window.pywebview.api.start_node();

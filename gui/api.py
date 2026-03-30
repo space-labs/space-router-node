@@ -201,7 +201,10 @@ class Api:
             logger.warning("Node stop timed out during fresh restart — proceeding anyway")
 
         try:
-            self._config.reset(keep_addresses=keep_addresses)
+            self._config.reset(
+                keep_addresses=keep_addresses,
+                keep_identity=keep_addresses,  # "Clear Everything" also removes identity key
+            )
             # Clear env vars so next start picks up fresh config
             for key in list(os.environ.keys()):
                 if key.startswith("SR_"):

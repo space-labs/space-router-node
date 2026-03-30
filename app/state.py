@@ -22,6 +22,7 @@ class NodeState(enum.Enum):
     REGISTERING = "registering"
     RUNNING = "running"
     RECONNECTING = "reconnecting"
+    PASSPHRASE_REQUIRED = "passphrase_required"
     ERROR_TRANSIENT = "error_transient"
     ERROR_PERMANENT = "error_permanent"
     STOPPING = "stopping"
@@ -32,6 +33,7 @@ _TRANSITIONS: dict[NodeState, set[NodeState]] = {
     NodeState.IDLE: {NodeState.INITIALIZING, NodeState.STOPPING},
     NodeState.INITIALIZING: {
         NodeState.BINDING,
+        NodeState.PASSPHRASE_REQUIRED,
         NodeState.ERROR_PERMANENT,
         NodeState.ERROR_TRANSIENT,
         NodeState.STOPPING,
@@ -56,6 +58,10 @@ _TRANSITIONS: dict[NodeState, set[NodeState]] = {
         NodeState.RUNNING,
         NodeState.ERROR_TRANSIENT,
         NodeState.ERROR_PERMANENT,
+        NodeState.STOPPING,
+    },
+    NodeState.PASSPHRASE_REQUIRED: {
+        NodeState.INITIALIZING,
         NodeState.STOPPING,
     },
     NodeState.ERROR_TRANSIENT: {
@@ -152,7 +158,7 @@ class NodeStateMachine:
             self._status.is_transient = False
 
         # Reset retry state when entering non-error/non-retry states
-        if to in (NodeState.IDLE, NodeState.RUNNING):
+        if to in (NodeState.IDLE, NodeState.RUNNING, NodeState.PASSPHRASE_REQUIRED):
             self._status.retry_count = 0
             self._status.next_retry_at = None
             self._retry_phase = None

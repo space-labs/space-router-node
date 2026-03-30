@@ -81,14 +81,17 @@ class SpaceRouterTray:
 
     def _setup_on_main_thread(self) -> None:
         """Build the NSStatusItem — called on the main thread."""
+        from app.variant import BUILD_VARIANT
+
         status_bar = AppKit.NSStatusBar.systemStatusBar()
         self._status_item = status_bar.statusItemWithLength_(
             AppKit.NSVariableStatusItemLength
         )
 
+        tooltip = "SpaceRouter [TEST]" if BUILD_VARIANT == "test" else "SpaceRouter"
         button = self._status_item.button()
         button.setTitle_("\u25CF")
-        button.setToolTip_("SpaceRouter")
+        button.setToolTip_(tooltip)
         self._set_color(_COLOR_STARTING)
 
         menu = AppKit.NSMenu.alloc().init()

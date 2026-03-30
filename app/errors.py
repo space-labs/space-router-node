@@ -18,6 +18,7 @@ class NodeErrorCode(enum.Enum):
     INVALID_WALLET = "invalid_wallet"
     MISSING_WALLET = "missing_wallet"
     IDENTITY_KEY_ERROR = "identity_key_error"
+    IDENTITY_KEY_LOCKED = "identity_key_locked"
     TLS_CERT_ERROR = "tls_cert_error"
 
     # ── Network / binding errors ──
@@ -39,6 +40,7 @@ _USER_MESSAGES: dict[NodeErrorCode, str] = {
     NodeErrorCode.INVALID_WALLET: "Wallet address is invalid. Check Settings.",
     NodeErrorCode.MISSING_WALLET: "No wallet address configured.",
     NodeErrorCode.IDENTITY_KEY_ERROR: "Cannot load node identity key. Try Fresh Restart.",
+    NodeErrorCode.IDENTITY_KEY_LOCKED: "Identity key is encrypted. Passphrase required to unlock.",
     NodeErrorCode.TLS_CERT_ERROR: "Cannot create TLS certificates. Check disk permissions.",
     NodeErrorCode.PORT_IN_USE: "Port is already in use. Retrying...",
     NodeErrorCode.PORT_PERMISSION: "Permission denied for port. Try a port above 1024.",

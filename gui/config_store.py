@@ -43,22 +43,14 @@ _DEFAULTS = {
     "SR_UPNP_ENABLED": "true",
     "SR_MTLS_ENABLED": "true",
     "SR_LOG_LEVEL": "INFO",
-    "SR_REGISTRATION_MODE": "v1",
+    "SR_REGISTRATION_MODE": "auto",
     "SR_IDENTITY_PASSPHRASE": "",
 }
 
 
 def _config_dir() -> Path:
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "SpaceRouter"
-    elif sys.platform == "win32":
-        local = os.environ.get("LOCALAPPDATA", "")
-        if local:
-            return Path(local) / "SpaceRouter"
-        return Path.home() / "AppData" / "Local" / "SpaceRouter"
-    else:
-        # Linux / fallback
-        return Path.home() / ".config" / "spacerouter"
+    from app.paths import config_dir
+    return config_dir()
 
 
 class ConfigStore:
@@ -203,12 +195,25 @@ class ConfigStore:
         else:
             return {"mode": "tunnel", "public_host": public_ip, "port": public_port}
 
-    def reset(self, keep_addresses: bool = False) -> None:
-        """Reset config to defaults. Optionally keep wallet addresses."""
+    def reset(self, keep_addresses: bool = False, keep_identity: bool = True) -> None:
+        """Reset config to defaults.
+
+        Args:
+            keep_addresses: Preserve staking/collection addresses.
+            keep_identity: If False, also delete the identity key file.
+        """
         saved = {}
         if keep_addresses:
             saved["SR_STAKING_ADDRESS"] = self.get("SR_STAKING_ADDRESS")
             saved["SR_COLLECTION_ADDRESS"] = self.get("SR_COLLECTION_ADDRESS")
+
+        # Optionally delete identity key file
+        if not keep_identity:
+            key_path = self.get("SR_IDENTITY_KEY_PATH") or str(
+                self._dir / "certs" / "node-identity.key"
+            )
+            if os.path.isfile(key_path):
+                os.remove(key_path)
 
         # Rewrite with defaults
         lines = [f"{k}={v}" for k, v in _DEFAULTS.items()]

@@ -27,19 +27,25 @@ body {
 .container {
   width: 100%;
   max-width: 380px;
-  padding: 40px 24px;
+  padding: 32px 20px;
   text-align: center;
 }
 
 .logo {
-  margin-bottom: 24px;
+  margin-bottom: 16px;
 }
 
 h1 {
   font-size: 22px;
   font-weight: 600;
   color: #ffffff;
-  margin-bottom: 16px;
+  margin-bottom: 8px;
+}
+
+.subtitle {
+  font-size: 14px;
+  color: #8080a0;
+  margin-bottom: 20px;
 }
 
 h2 {
@@ -73,12 +79,10 @@ h2 {
 
 .input-group label {
   display: block;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   color: #8080a0;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .input-group label .optional {
@@ -165,7 +169,7 @@ h2 {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 14px;
+  padding: 8px 12px;
   background: #1a1a2e;
   border: 1px solid #2a2a40;
   border-radius: 8px;
@@ -223,10 +227,8 @@ h2 {
 }
 
 .advanced-section {
-  background: #14142a;
-  border: 1px solid #2a2a40;
-  border-radius: 10px;
-  padding: 16px;
+  border-top: 1px solid #2a2a40;
+  padding: 12px 0 0 0;
   text-align: left;
 }
 
@@ -362,11 +364,9 @@ h2 {
 }
 
 .wallet-label {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: #8080a0;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
 .wallet-value {
@@ -433,24 +433,21 @@ h2 {
   color: #f39c12;
 }
 
-/* Fresh Restart / Danger button */
-.btn-danger {
-  width: 100%;
-  padding: 12px 24px;
-  background: transparent;
-  color: #e74c3c;
-  border: 1px solid rgba(231, 76, 60, 0.3);
-  border-radius: 8px;
-  font-size: 14px;
-  font-weight: 500;
+/* Subtle text button (e.g. Reset Node) */
+.btn-text-subtle {
+  background: none;
+  border: none;
+  color: #606078;
+  font-size: 13px;
+  font-weight: 400;
   cursor: pointer;
-  transition: background 0.2s, border-color 0.2s;
-  margin-top: 24px;
+  padding: 12px;
+  margin-top: 16px;
+  transition: color 0.2s;
 }
 
-.btn-danger:hover {
-  background: rgba(231, 76, 60, 0.1);
-  border-color: rgba(231, 76, 60, 0.5);
+.btn-text-subtle:hover {
+  color: #e74c3c;
 }
 
 /* Secondary button */

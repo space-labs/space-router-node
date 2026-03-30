@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     COLLECTION_ADDRESS: str = ""    # Collection wallet; if empty, falls back to staking address
 
     # v0.2.0 registration mode
-    REGISTRATION_MODE: str = "v1"   # "v1" (v0.1.2) | "v2" (v0.2.0) | "auto"
+    REGISTRATION_MODE: str = "auto"  # "v1" (v0.1.2) | "v2" (v0.2.0) | "auto"
 
     # UPnP / NAT-PMP automatic port forwarding
     UPNP_ENABLED: bool = True

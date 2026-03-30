@@ -309,7 +309,6 @@ async def _phase_register(ctx: _NodeContext) -> None:
     node_id, gateway_ca_cert = await register_node(
         ctx.http, ctx.s, ctx.public_ip,
         identity_key=ctx.identity_key,
-        identity_address=ctx.identity_address,
         upnp_endpoint=ctx.upnp_endpoint,
         wallet_address=ctx.wallet_address,
         staking_address=ctx.staking_address,
@@ -483,7 +482,12 @@ async def _run(
             try:
                 await _phase_init(ctx)
             except KeystorePassphraseRequired:
-                raise  # Let NodeManager surface this to the frontend
+                if state_machine:
+                    state_machine.transition(
+                        NodeState.PASSPHRASE_REQUIRED,
+                        "Identity key is encrypted — passphrase required",
+                    )
+                raise
             except NodeError:
                 raise
             except Exception as exc:
@@ -637,10 +641,73 @@ async def _run(
     logger.info("Home Node shut down cleanly")
 
 
+def _do_reset() -> None:
+    """Handle --reset: delete config and optionally identity key."""
+    from app.paths import config_dir
+
+    keep_identity = "--keep-identity" in sys.argv
+    s = load_settings()
+
+    # Check both well-known config dir and CWD for config files
+    cfg_dir = config_dir()
+    wellknown_env = cfg_dir / "spacerouter.env"
+    cwd_env = os.path.abspath(".env")
+
+    env_file = str(wellknown_env) if wellknown_env.is_file() else cwd_env
+    certs_dir = os.path.dirname(os.path.abspath(s.IDENTITY_KEY_PATH)) or "certs"
+    identity_path = os.path.abspath(s.IDENTITY_KEY_PATH)
+
+    if not keep_identity and sys.stdin.isatty():
+        print("WARNING: This will delete your identity key and all configuration.")
+        confirm = input("Type YES to confirm: ").strip()
+        if confirm != "YES":
+            print("Reset cancelled.")
+            sys.exit(0)
+
+    # Delete .env
+    if os.path.isfile(env_file):
+        os.remove(env_file)
+        print(f"Removed {env_file}")
+
+    # Delete certs (except identity key if --keep-identity)
+    if os.path.isdir(certs_dir):
+        import shutil
+        if keep_identity:
+            for f in os.listdir(certs_dir):
+                fp = os.path.join(certs_dir, f)
+                if os.path.abspath(fp) != identity_path and os.path.isfile(fp):
+                    os.remove(fp)
+                    print(f"Removed {fp}")
+            print(f"Kept identity key: {identity_path}")
+        else:
+            shutil.rmtree(certs_dir)
+            print(f"Removed {certs_dir}/")
+
+    print("Reset complete." + (" Identity key preserved." if keep_identity else ""))
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-V"):
         print(f"space-router-node {__version__}")
         sys.exit(0)
+
+    if "--reset" in sys.argv:
+        _do_reset()
+        sys.exit(0)
+
+    # --password-file: read passphrase from file for automation/systemd
+    if "--password-file" in sys.argv:
+        idx = sys.argv.index("--password-file")
+        if idx + 1 >= len(sys.argv):
+            print("Error: --password-file requires a file path argument", file=sys.stderr)
+            sys.exit(1)
+        pw_path = sys.argv[idx + 1]
+        try:
+            with open(pw_path) as f:
+                os.environ["SR_IDENTITY_PASSPHRASE"] = f.readline().rstrip("\n")
+        except (OSError, IOError) as exc:
+            print(f"Error reading password file: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     # First-run wizard: trigger when identity key file doesn't exist yet,
     # but only in interactive (TTY) sessions — skip silently in CI/piped mode.
@@ -660,6 +727,31 @@ def main() -> None:
 
     try:
         asyncio.run(_run())
+    except KeystorePassphraseRequired:
+        if sys.stdin.isatty():
+            # Prompt for passphrase and retry
+            try:
+                passphrase = getpass.getpass("Identity key passphrase: ")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                sys.exit(1)
+            os.environ["SR_IDENTITY_PASSPHRASE"] = passphrase
+            try:
+                asyncio.run(_run(settings_override=load_settings()))
+            except NodeError as exc:
+                logger.error("Node failed: %s", exc.user_message)
+                sys.exit(1)
+            finally:
+                if sys.platform == "win32":
+                    signal.signal(signal.SIGINT, signal.SIG_DFL)
+                    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        else:
+            print(
+                "Identity key is encrypted. Set SR_IDENTITY_PASSPHRASE "
+                "environment variable or run interactively.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     except NodeError as exc:
         logger.error("Node failed: %s", exc.user_message)
         sys.exit(1)

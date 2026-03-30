@@ -74,8 +74,8 @@ def _run_smoke_tests(window, api: Api) -> None:
     print("\n=== SpaceRouter GUI — Smoke Tests ===\n")
 
     check(
-        "Document title is 'SpaceRouter'",
-        lambda: window.evaluate_js("document.title") == "SpaceRouter",
+        "Document title starts with 'SpaceRouter'",
+        lambda: window.evaluate_js("document.title").startswith("SpaceRouter"),
     )
 
     check(
@@ -99,9 +99,8 @@ def _run_smoke_tests(window, api: Api) -> None:
     )
 
     check(
-        "A screen is visible (network, onboarding, or status)",
+        "A screen is visible (onboarding or status)",
         lambda: window.evaluate_js(
-            "document.getElementById('screen-network').style.display === 'flex' || "
             "document.getElementById('screen-onboarding').style.display === 'flex' || "
             "document.getElementById('screen-status').style.display === 'flex'"
         )
@@ -119,6 +118,8 @@ def _run_smoke_tests(window, api: Api) -> None:
 
 
 def main() -> None:
+    from app.variant import BUILD_VARIANT
+
     smoke_test = "--smoke-test" in sys.argv
 
     config = ConfigStore()
@@ -134,8 +135,9 @@ def main() -> None:
 
         start_health_server(api)
 
+    title = "SpaceRouter [TEST]" if BUILD_VARIANT == "test" else "SpaceRouter"
     window = webview.create_window(
-        title="SpaceRouter",
+        title=title,
         url=_asset_path("index.html"),
         js_api=api,
         width=480,
