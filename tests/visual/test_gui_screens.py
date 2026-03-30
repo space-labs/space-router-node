@@ -11,7 +11,13 @@ import os
 import sys
 import time
 from pathlib import Path
-from playwright.sync_api import sync_playwright
+
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    # Allow this script to be imported by pytest without failing collection.
+    # The actual test functions won't run — this is a standalone script.
+    sync_playwright = None
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 ASSETS = ROOT / "gui" / "assets"
