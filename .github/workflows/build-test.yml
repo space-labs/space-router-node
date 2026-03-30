@@ -186,19 +186,18 @@ jobs:
             fi
           fi
 
-      # Rename Windows artifact
-      # PyInstaller COLLECT mode outputs dist/SpaceRouter/SpaceRouter.exe (subdirectory),
-      # not dist/SpaceRouter.exe. Check both locations.
-      - name: Rename artifact (Windows)
+      # Package Windows GUI as zip.
+      # PyInstaller COLLECT mode outputs a directory (exe + _internal/ with DLLs).
+      # The entire directory is needed — shipping just the .exe fails with
+      # "Failed to load Python DLL".
+      - name: Package Windows artifact
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           if (Test-Path "dist\SpaceRouter\SpaceRouter.exe") {
-            Move-Item "dist\SpaceRouter\SpaceRouter.exe" "dist\${{ matrix.artifact }}.exe"
-          } elseif (Test-Path "dist\SpaceRouter.exe") {
-            Move-Item "dist\SpaceRouter.exe" "dist\${{ matrix.artifact }}.exe"
+            Compress-Archive -Path "dist\SpaceRouter\*" -DestinationPath "dist\${{ matrix.artifact }}.zip"
           } else {
-            Write-Error "SpaceRouter.exe not found in dist\ or dist\SpaceRouter\"
+            Write-Error "SpaceRouter directory not found"
             Get-ChildItem -Recurse dist\ | Select-Object FullName
             exit 1
           }
@@ -207,8 +206,7 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: |
-            dist/${{ matrix.artifact }}
-            dist/${{ matrix.artifact }}.exe
+            dist/${{ matrix.artifact }}.zip
             dist/${{ matrix.artifact }}.dmg
 
   release:
