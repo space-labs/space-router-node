@@ -159,7 +159,7 @@ jobs:
       - name: GUI smoke test (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: .\tests\e2e\gui_smoke_test.ps1 -Binary "dist\SpaceRouter.exe"
+        run: .\tests\e2e\gui_smoke_test.ps1 -Binary "dist\SpaceRouter\SpaceRouter.exe"
         timeout-minutes: 3
 
       # Package macOS DMG (unsigned — test builds skip code signing)
@@ -187,12 +187,20 @@ jobs:
           fi
 
       # Rename Windows artifact
+      # PyInstaller COLLECT mode outputs dist/SpaceRouter/SpaceRouter.exe (subdirectory),
+      # not dist/SpaceRouter.exe. Check both locations.
       - name: Rename artifact (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          if (Test-Path "dist\SpaceRouter.exe") {
+          if (Test-Path "dist\SpaceRouter\SpaceRouter.exe") {
+            Move-Item "dist\SpaceRouter\SpaceRouter.exe" "dist\${{ matrix.artifact }}.exe"
+          } elseif (Test-Path "dist\SpaceRouter.exe") {
             Move-Item "dist\SpaceRouter.exe" "dist\${{ matrix.artifact }}.exe"
+          } else {
+            Write-Error "SpaceRouter.exe not found in dist\ or dist\SpaceRouter\"
+            Get-ChildItem -Recurse dist\ | Select-Object FullName
+            exit 1
           }
 
       - uses: actions/upload-artifact@v4
