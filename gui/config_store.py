@@ -55,6 +55,8 @@ _DEFAULTS = {
     "SR_COLLECTION_ADDRESS": "",
     "SR_NODE_PORT": "9090",
     "SR_UPNP_ENABLED": "true",
+    "SR_PUBLIC_IP": "",
+    "SR_PUBLIC_PORT": "",
     "SR_MTLS_ENABLED": "true",
     "SR_LOG_LEVEL": "INFO",
     "SR_REGISTRATION_MODE": "auto",

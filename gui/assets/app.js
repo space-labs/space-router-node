@@ -573,7 +573,7 @@ function initActionButtons() {
   });
 }
 
-// ── Settings Panel (test builds only) ──
+// ── Settings Panel ──
 
 function initSettings() {
   const envSelect = $("#settings-env");
@@ -583,6 +583,23 @@ function initSettings() {
   const mtlsWarning = $("#mtls-warning");
   const saveBtn = $("#btn-save-settings");
   const statusEl = $("#settings-status");
+  const networkRadios = document.querySelectorAll('input[name="settings-network-mode"]');
+  const tunnelConfig = $("#settings-tunnel-config");
+  const tunnelHost = $("#settings-tunnel-host");
+  const tunnelPort = $("#settings-tunnel-port");
+
+  // Show test-only settings groups
+  if (isTestBuild) {
+    $("#settings-env-group").style.display = "";
+    $("#settings-mtls-group").style.display = "";
+  }
+
+  // Show/hide tunnel config
+  for (const radio of networkRadios) {
+    radio.addEventListener("change", function () {
+      tunnelConfig.style.display = this.value === "tunnel" ? "block" : "none";
+    });
+  }
 
   // Show/hide custom URL input based on dropdown
   envSelect.addEventListener("change", function () {
@@ -603,27 +620,41 @@ function initSettings() {
 
   // Open settings
   $("#btn-settings").addEventListener("click", async function () {
-    // Load current settings
+    // Load current network mode
     try {
-      const settings = await window.pywebview.api.get_settings();
-      const url = settings.coordination_api_url;
+      const net = await window.pywebview.api.get_network_mode();
+      const radio = document.querySelector(
+        'input[name="settings-network-mode"][value="' + net.mode + '"]'
+      );
+      if (radio) radio.checked = true;
+      tunnelConfig.style.display = net.mode === "tunnel" ? "block" : "none";
+      tunnelHost.value = net.public_host || "";
+      tunnelPort.value = net.port || "";
+    } catch (e) {}
 
-      // Set dropdown value
-      if (ENV_URLS[url]) {
-        envSelect.value = url;
-        customUrl.style.display = "none";
-      } else {
-        envSelect.value = "custom";
-        customUrl.value = url;
-        customUrl.style.display = "block";
+    // Load current settings (test builds)
+    if (isTestBuild) {
+      try {
+        const settings = await window.pywebview.api.get_settings();
+        const url = settings.coordination_api_url;
+
+        // Set dropdown value
+        if (ENV_URLS[url]) {
+          envSelect.value = url;
+          customUrl.style.display = "none";
+        } else {
+          envSelect.value = "custom";
+          customUrl.value = url;
+          customUrl.style.display = "block";
+        }
+
+        // Set mTLS toggle
+        mtlsToggle.checked = settings.mtls_enabled;
+        mtlsLabel.textContent = settings.mtls_enabled ? "Enabled" : "Disabled";
+        mtlsWarning.style.display = settings.mtls_enabled ? "none" : "block";
+      } catch (e) {
+        // Use defaults
       }
-
-      // Set mTLS toggle
-      mtlsToggle.checked = settings.mtls_enabled;
-      mtlsLabel.textContent = settings.mtls_enabled ? "Enabled" : "Disabled";
-      mtlsWarning.style.display = settings.mtls_enabled ? "none" : "block";
-    } catch (e) {
-      // Use defaults
     }
 
     statusEl.textContent = "";
@@ -639,30 +670,55 @@ function initSettings() {
 
   // Save settings
   saveBtn.addEventListener("click", async function () {
-    let url = envSelect.value;
-    if (url === "custom") {
-      url = customUrl.value.trim();
-      if (!url) {
-        statusEl.textContent = "Please enter a custom URL";
-        statusEl.style.color = "#e74c3c";
-        return;
-      }
+    // Validate tunnel config
+    const selectedMode = document.querySelector('input[name="settings-network-mode"]:checked');
+    const mode = selectedMode ? selectedMode.value : "upnp";
+    if (mode === "tunnel" && !tunnelHost.value.trim()) {
+      statusEl.textContent = "Please enter a public hostname for tunnel mode";
+      statusEl.style.color = "#e74c3c";
+      tunnelHost.classList.add("invalid");
+      return;
     }
-
-    const mtlsEnabled = mtlsToggle.checked;
+    tunnelHost.classList.remove("invalid");
 
     saveBtn.disabled = true;
     saveBtn.textContent = "Saving...";
     statusEl.textContent = "";
 
     try {
-      const result = await window.pywebview.api.save_settings(url, mtlsEnabled);
-      if (!result.ok) {
-        statusEl.textContent = result.error || "Failed to save";
-        statusEl.style.color = "#e74c3c";
-        saveBtn.disabled = false;
-        saveBtn.textContent = "Save & Restart Node";
-        return;
+      // Save network mode (all builds)
+      await window.pywebview.api.save_network_mode(
+        mode,
+        mode === "tunnel" ? tunnelHost.value.trim() : "",
+        mode === "tunnel" ? tunnelPort.value.trim() : "",
+      );
+
+      // Save API URL and mTLS (test builds only)
+      if (isTestBuild) {
+        let url = envSelect.value;
+        if (url === "custom") {
+          url = customUrl.value.trim();
+          if (!url) {
+            statusEl.textContent = "Please enter a custom URL";
+            statusEl.style.color = "#e74c3c";
+            saveBtn.disabled = false;
+            saveBtn.textContent = "Save & Restart Node";
+            return;
+          }
+        }
+
+        const mtlsEnabled = mtlsToggle.checked;
+        const result = await window.pywebview.api.save_settings(url, mtlsEnabled);
+        if (!result.ok) {
+          statusEl.textContent = result.error || "Failed to save";
+          statusEl.style.color = "#e74c3c";
+          saveBtn.disabled = false;
+          saveBtn.textContent = "Save & Restart Node";
+          return;
+        }
+
+        // Update test banner env label
+        updateTestBannerLabel(url);
       }
 
       // Restart node with new settings
@@ -671,9 +727,6 @@ function initSettings() {
 
       await window.pywebview.api.stop_node();
       await window.pywebview.api.start_node();
-
-      // Update test banner env label
-      updateTestBannerLabel(url);
 
       saveBtn.disabled = false;
       saveBtn.textContent = "Save & Restart Node";
@@ -756,20 +809,18 @@ async function initTestVariant() {
       banner.style.display = "block";
       document.body.classList.add("has-test-banner");
 
-      // Show settings button
-      $("#btn-settings").style.display = "block";
-
       // Load current env for banner label
       try {
         const settings = await window.pywebview.api.get_settings();
         updateTestBannerLabel(settings.coordination_api_url);
       } catch (e) {}
-
-      // Init settings panel
-      initSettings();
     }
+
+    // Init settings panel for all builds (network mode is always editable)
+    initSettings();
   } catch (e) {
-    // Variant check failed — continue as production
+    // Variant check failed — continue as production, still init settings
+    initSettings();
   }
 }
 

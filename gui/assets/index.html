@@ -105,8 +105,8 @@
     <div class="container">
       <div class="status-header">
         <h2>SpaceRouter</h2>
-        <!-- Settings gear (test builds only) -->
-        <button id="btn-settings" class="btn-settings" style="display: none;" title="Settings">
+        <!-- Settings gear -->
+        <button id="btn-settings" class="btn-settings" title="Settings">
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path d="M10 12.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5z" stroke="#8080a0" stroke-width="1.5"/>
             <path d="M16.18 12.32a1.25 1.25 0 00.25 1.38l.04.05a1.52 1.52 0 11-2.15 2.15l-.05-.05a1.25 1.25 0 00-1.38-.25 1.25 1.25 0 00-.76 1.15v.13a1.52 1.52 0 01-3.04 0v-.07a1.25 1.25 0 00-.82-1.14 1.25 1.25 0 00-1.38.25l-.05.04a1.52 1.52 0 11-2.15-2.15l.05-.05a1.25 1.25 0 00.25-1.38 1.25 1.25 0 00-1.15-.76h-.13a1.52 1.52 0 010-3.04h.07a1.25 1.25 0 001.14-.82 1.25 1.25 0 00-.25-1.38l-.04-.05a1.52 1.52 0 112.15-2.15l.05.05a1.25 1.25 0 001.38.25h.06a1.25 1.25 0 00.76-1.15v-.13a1.52 1.52 0 013.04 0v.07a1.25 1.25 0 00.76 1.14 1.25 1.25 0 001.38-.25l.05-.04a1.52 1.52 0 112.15 2.15l-.05.05a1.25 1.25 0 00-.25 1.38v.06a1.25 1.25 0 001.15.76h.13a1.52 1.52 0 010 3.04h-.07a1.25 1.25 0 00-1.14.76z" stroke="#8080a0" stroke-width="1.5"/>
@@ -207,7 +207,7 @@
     </div>
   </div>
 
-  <!-- Settings Panel (test builds only) -->
+  <!-- Settings Panel -->
   <div id="screen-settings" class="screen" style="display: none;">
     <div class="container">
       <div class="settings-header">
@@ -215,7 +215,33 @@
         <h2>Settings</h2>
       </div>
 
+      <!-- Network mode (tunnel hostname/port) — all builds -->
       <div class="input-group">
+        <label>Network</label>
+        <div class="radio-group">
+          <label class="radio-option">
+            <input type="radio" name="settings-network-mode" id="settings-upnp" value="upnp" checked>
+            <span>Automatic (UPnP)</span>
+          </label>
+          <label class="radio-option">
+            <input type="radio" name="settings-network-mode" id="settings-tunnel" value="tunnel">
+            <span>Manual / Tunnel</span>
+          </label>
+        </div>
+        <div id="settings-tunnel-config" style="display: none; margin-top: 8px;">
+          <div class="input-group" style="margin-top: 0;">
+            <label for="settings-tunnel-host">Public hostname</label>
+            <input type="text" id="settings-tunnel-host" placeholder="e.g. bore.pub" spellcheck="false" autocomplete="off">
+          </div>
+          <div class="input-group">
+            <label for="settings-tunnel-port">Port</label>
+            <input type="text" id="settings-tunnel-port" placeholder="9090" spellcheck="false" autocomplete="off">
+          </div>
+        </div>
+      </div>
+
+      <!-- Coordination API — test builds only -->
+      <div id="settings-env-group" class="input-group" style="display: none;">
         <label for="settings-env">Coordination API</label>
         <select id="settings-env" class="select-input">
           <option value="https://spacerouter-coordination-api.fly.dev">Production</option>
@@ -225,7 +251,8 @@
         <input type="text" id="settings-custom-url" class="custom-url-input" placeholder="https://..." style="display: none;" spellcheck="false" autocomplete="off">
       </div>
 
-      <div class="input-group">
+      <!-- mTLS — test builds only -->
+      <div id="settings-mtls-group" class="input-group" style="display: none;">
         <label>mTLS (Mutual TLS)</label>
         <div class="toggle-row">
           <span class="toggle-label" id="mtls-label">Enabled</span>
