@@ -393,7 +393,7 @@ jobs:
       - name: GUI smoke test (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: .\tests\e2e\gui_smoke_test.ps1 -Binary "dist\SpaceRouter\SpaceRouter.exe"
+        run: .\tests\e2e\gui_smoke_test.ps1 -Binary "dist\SpaceRouter.exe"
         timeout-minutes: 3
 
       # ---- macOS code signing & notarization ----
@@ -482,8 +482,21 @@ jobs:
         shell: bash
         run: security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
 
+      # ---- Windows: rename and sign ----
+      # Onefile mode produces dist/SpaceRouter.exe directly
+      - name: Rename artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path "dist\SpaceRouter.exe") {
+            Move-Item "dist\SpaceRouter.exe" "dist\${{ matrix.artifact }}.exe"
+          } else {
+            Write-Error "SpaceRouter.exe not found in dist\"
+            Get-ChildItem dist\ | Select-Object FullName
+            exit 1
+          }
+
       # ---- Windows code signing ----
-      # Sign the exe inside the COLLECT directory before packaging.
       - name: Sign Windows binary
         if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_PFX != ''
         env:
@@ -498,30 +511,14 @@ jobs:
             -Recurse -Filter "signtool.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           & $signtool.FullName sign /f $pfxPath /p $env:WINDOWS_CERTIFICATE_PASSWORD `
             /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
-            "dist\SpaceRouter\SpaceRouter.exe"
+            "dist\${{ matrix.artifact }}.exe"
           Remove-Item $pfxPath -Force
-
-      # Package Windows GUI as zip.
-      # PyInstaller COLLECT mode outputs a directory (exe + _internal/ with DLLs).
-      # The entire directory is needed — shipping just the .exe fails with
-      # "Failed to load Python DLL".
-      - name: Package Windows artifact
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          if (Test-Path "dist\SpaceRouter\SpaceRouter.exe") {
-            Compress-Archive -Path "dist\SpaceRouter\*" -DestinationPath "dist\${{ matrix.artifact }}.zip"
-          } else {
-            Write-Error "SpaceRouter directory not found"
-            Get-ChildItem -Recurse dist\ | Select-Object FullName
-            exit 1
-          }
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: |
-            dist/${{ matrix.artifact }}.zip
+            dist/${{ matrix.artifact }}.exe
             dist/${{ matrix.artifact }}.dmg
 
   staging-e2e:
