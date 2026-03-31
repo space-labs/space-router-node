@@ -354,10 +354,7 @@ def _upgrade_mtls(ctx: _NodeContext) -> None:
         ctx.ssl_ctx = create_mtls_server_ssl_context(
             s.TLS_CERT_PATH, s.TLS_KEY_PATH, s.GATEWAY_CA_CERT_PATH,
         )
-        # Rebind server with mTLS context
-        if ctx.server:
-            ctx.server.close()
-            # Re-create inline (can't await in sync function)
+        logger.info("mTLS context ready — server will rebind on next cycle")
     except Exception:
         logger.warning("mTLS upgrade failed — continuing with standard TLS", exc_info=True)
 
