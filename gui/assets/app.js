@@ -348,6 +348,7 @@ async function updateStatus() {
     const errorText = $("#error-text");
     const certWarning = $("#cert-warning");
     const btnRetry = $("#btn-retry");
+    const btnStartNode = $("#btn-start-node");
     const btnStop = $("#btn-stop");
 
     // Wallet addresses (truncated, full on hover)
@@ -465,12 +466,15 @@ async function updateStatus() {
     // Action buttons
     if (state === "error_permanent") {
       btnRetry.style.display = "block";
+      btnStartNode.style.display = "none";
       btnStop.style.display = "none";
     } else if (state === "idle") {
       btnRetry.style.display = "none";
+      btnStartNode.style.display = "block";
       btnStop.style.display = "none";
     } else {
       btnRetry.style.display = "none";
+      btnStartNode.style.display = "none";
       btnStop.style.display = "block";
     }
   } catch (e) {
@@ -559,6 +563,17 @@ function initActionButtons() {
     } catch (e) {}
     btn.disabled = false;
     btn.textContent = "Retry";
+  });
+
+  $("#btn-start-node").addEventListener("click", async function () {
+    const btn = $("#btn-start-node");
+    btn.disabled = true;
+    btn.textContent = "Starting...";
+    try {
+      await window.pywebview.api.start_node();
+    } catch (e) {}
+    btn.disabled = false;
+    btn.textContent = "Start";
   });
 
   $("#btn-stop").addEventListener("click", async function () {
