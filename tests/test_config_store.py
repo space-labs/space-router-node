@@ -91,14 +91,15 @@ class TestApplyToEnv:
                     "SR_GATEWAY_CA_CERT_PATH", "SR_IDENTITY_KEY_PATH"):
             os.environ.pop(key, None)
 
-    def test_apply_to_env_does_not_override_existing_env_vars(self, store, tmp_path):
-        """Pre-set env vars must not be overwritten."""
+    def test_apply_to_env_overwrites_existing_env_vars(self, store, tmp_path):
+        """apply_to_env always writes from config so settings changes take effect."""
         os.environ["SR_TLS_CERT_PATH"] = "/custom/path/node.crt"
         try:
             store.apply_to_env()
-            assert os.environ["SR_TLS_CERT_PATH"] == "/custom/path/node.crt"
+            certs_dir = tmp_path / "certs"
+            assert os.environ["SR_TLS_CERT_PATH"] == str(certs_dir / "node.crt")
         finally:
-            del os.environ["SR_TLS_CERT_PATH"]
+            os.environ.pop("SR_TLS_CERT_PATH", None)
             os.environ.pop("SR_TLS_KEY_PATH", None)
             os.environ.pop("SR_GATEWAY_CA_CERT_PATH", None)
             os.environ.pop("SR_IDENTITY_KEY_PATH", None)
