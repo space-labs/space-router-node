@@ -1263,7 +1263,7 @@ class TestCheckNodeStatus:
     @respx.mock
     async def test_check_status_returns_status(self, reg_settings):
         """check_node_status should return the status string."""
-        respx.get("http://coordination:8000/nodes/node-abc-123/status").mock(
+        respx.get("http://coordination:8000/nodes/node-abc-123").mock(
             return_value=Response(200, json={"status": "online"})
         )
 
