@@ -378,6 +378,8 @@ async def _health_loop(
     stop_event: asyncio.Event,
 ) -> None:
     """Periodic health checks while RUNNING."""
+    from app.node_logging import activity  # noqa: E402
+
     consecutive_failures = 0
     last_cert_check = 0.0
 
@@ -396,13 +398,16 @@ async def _health_loop(
             status = await check_node_status(
                 ctx.http, ctx.s, ctx.node_id, identity_key=ctx.identity_key,
             )
+            activity.record_health_check(status)
             if status in ("online", "active"):
                 consecutive_failures = 0
+                logger.debug("Health check OK: status=%s", status)
             else:
                 logger.warning("Health check: node status is '%s'", status)
                 consecutive_failures += 1
         except Exception as exc:
             consecutive_failures += 1
+            activity.record_health_check("error")
             logger.warning("Health check failed (%d/%d): %s",
                            consecutive_failures, _HEARTBEAT_FAIL_THRESHOLD, exc)
 
@@ -443,6 +448,33 @@ async def _health_loop(
             pass  # non-critical
 
 
+async def _status_summary_loop(
+    ctx: "_NodeContext",
+    stop_event: asyncio.Event,
+    interval: float,
+) -> None:
+    """Periodically log a node status summary."""
+    from app.node_logging import activity  # noqa: E402
+
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+        logger.info(
+            "--- Status: uptime=%s | connections=%d (active=%d) | "
+            "health_checks=%d (failures=%d) | reconnects=%d ---",
+            activity.uptime_str,
+            activity.connections_served,
+            activity.connections_active,
+            activity.health_check_count,
+            activity.health_check_failures,
+            activity.reconnect_count,
+        )
+
+
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 
 async def _run(
@@ -452,6 +484,9 @@ async def _run(
     state_machine: NodeStateMachine | None = None,
 ) -> None:
     """Main orchestrator loop. Drives phases and handles retries."""
+    from app.node_logging import activity  # noqa: E402
+    from app.node_logging import _STATUS_INTERVAL  # noqa: E402
+
     s = settings_override or load_settings()
 
     # Configure logging from settings
@@ -488,10 +523,12 @@ async def _run(
         ctx = _NodeContext(s, http_client)
         renewal_task = None
         health_task = None
+        status_task = None
 
         try:
             # ── Phase: INITIALIZING ──
             _report(NodeState.INITIALIZING, "Loading identity and certificates")
+            logger.info("Initializing node (version %s)...", __version__)
             try:
                 await _phase_init(ctx)
             except KeystorePassphraseRequired:
@@ -523,6 +560,7 @@ async def _run(
 
             # ── Phase: REGISTERING ──
             _report(NodeState.REGISTERING, "Registering with coordination server")
+            logger.info("Registering with %s ...", s.COORDINATION_API_URL)
             try:
                 await _phase_register(ctx)
             except NodeError:
@@ -530,10 +568,14 @@ async def _run(
             except Exception as exc:
                 raise classify_error(exc)
 
+            logger.info("Registration successful  node_id=%s", ctx.node_id[:16])
+            activity.last_registration_time = asyncio.get_event_loop().time()
+
             # mTLS rebind if upgrade happened
             if ctx.s.MTLS_ENABLED and os.path.isfile(ctx.s.GATEWAY_CA_CERT_PATH):
                 try:
                     await _rebind_server_mtls(ctx)
+                    logger.info("mTLS active -- gateway authentication enabled")
                 except Exception:
                     logger.warning("mTLS server rebind failed", exc_info=True)
 
@@ -547,6 +589,11 @@ async def _run(
                 "Home Node ready (node_id=%s, wallet=%s, upnp=%s)",
                 ctx.node_id, display_wallet,
                 f"{ctx.upnp_endpoint[0]}:{ctx.upnp_endpoint[1]}" if ctx.upnp_endpoint else "disabled",
+            )
+            logger.info(
+                "--- Node is RUNNING --- "
+                "Listening on port %d | IP %s | Ctrl+C to stop",
+                s.NODE_PORT, ctx.public_ip,
             )
 
             # Start UPnP renewal
@@ -570,6 +617,11 @@ async def _run(
             # Start health monitoring
             health_task = asyncio.create_task(_health_loop(ctx, sm, stop_event))
 
+            # Start periodic status summary
+            status_task = asyncio.create_task(
+                _status_summary_loop(ctx, stop_event, _STATUS_INTERVAL)
+            )
+
             # Wait for stop or health loop exit (reconnection trigger)
             done, pending = await asyncio.wait(
                 [asyncio.create_task(stop_event.wait()), health_task],
@@ -580,6 +632,8 @@ async def _run(
 
             # If health loop exited (RECONNECTING), handle reconnection
             if sm.state == NodeState.RECONNECTING:
+                logger.warning("Connection lost -- attempting reconnection...")
+                activity.record_reconnect()
                 # Cancel health task if still running
                 if health_task and not health_task.done():
                     health_task.cancel()
@@ -634,7 +688,7 @@ async def _run(
                 await ctx.server.wait_closed()
 
             # Cancel background tasks
-            for task in (renewal_task, health_task):
+            for task in (renewal_task, health_task, status_task):
                 if task is not None and not task.done():
                     task.cancel()
                     try:
@@ -690,6 +744,11 @@ def _do_reset() -> None:
 
 
 def main() -> None:
+    from app.node_logging import setup_cli_logging, reset_activity  # noqa: E402
+
+    setup_cli_logging()
+    reset_activity()
+
     if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-V"):
         print(f"space-router-node {__version__}")
         sys.exit(0)

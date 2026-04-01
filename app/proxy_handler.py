@@ -674,7 +674,9 @@ async def handle_client(
 
     async with sem:
         _active_connections += 1
-        logger.debug("New connection from %s (active=%d)", peer, _active_connections)
+        from app.node_logging import activity as _activity  # noqa: E402
+        total = _activity.record_connection()
+        logger.info("Connection #%d from %s (active=%d)", total, peer, _active_connections)
         try:
             result = await _read_request_head(reader, settings.REQUEST_TIMEOUT)
             if result is None:
@@ -716,6 +718,8 @@ async def handle_client(
             logger.exception("Unhandled error in client handler")
         finally:
             _active_connections -= 1
+            _activity.record_connection_closed()
+            logger.debug("Connection closed from %s (active=%d)", peer, _active_connections)
             try:
                 writer.close()
                 await writer.wait_closed()

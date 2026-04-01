@@ -20,6 +20,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Set up persistent log file with rotation
+from app.node_logging import setup_gui_file_logging  # noqa: E402
+
+_log_dir = setup_gui_file_logging()
+
 
 def _asset_path(filename: str) -> str:
     """Resolve asset path, handling PyInstaller frozen bundles."""
