@@ -12,6 +12,7 @@ import webview
 from gui.api import Api
 from gui.config_store import ConfigStore
 from gui.node_manager import NodeManager
+from gui.single_instance import SingleInstanceLock
 from gui.tray import SpaceRouterTray
 
 logging.basicConfig(
@@ -127,6 +128,16 @@ def main() -> None:
 
     smoke_test = "--smoke-test" in sys.argv
 
+    # ---- Single-instance guard (skip during smoke tests) ----------------
+    instance_lock = SingleInstanceLock()
+    if not smoke_test:
+        # We don't know the window reference yet, so wire up the
+        # on_show_request callback after the window is created.
+        if not instance_lock.try_acquire():
+            # Another instance is already running and was signalled.
+            logger.info("Another SpaceRouter instance is running — exiting")
+            sys.exit(0)
+
     config = ConfigStore()
     node_manager = NodeManager()
     api = Api(config, node_manager)
@@ -178,6 +189,9 @@ def main() -> None:
         def on_show() -> None:
             window.show()
 
+        # Wire up single-instance "show" callback now that window exists
+        instance_lock._on_show = on_show
+
         def on_quit() -> None:
             nonlocal _quitting
             logger.info("Quit requested — stopping node…")
@@ -188,6 +202,7 @@ def main() -> None:
                     node_manager.stop(timeout=15.0)
                 except Exception:
                     logger.exception("Error stopping node")
+                instance_lock.release()
                 tray.shutdown()
                 logger.info("Shutdown complete — exiting")
                 # Use os._exit to terminate immediately. The node and tray

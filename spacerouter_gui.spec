@@ -68,6 +68,12 @@ elif sys.platform == "win32":
         "webview.platforms.edgechromium",
         "webview.platforms.winforms",
         "clr",
+        # System tray (pystray + Pillow)
+        "pystray",
+        "pystray._win32",
+        "PIL",
+        "PIL.Image",
+        "PIL.ImageDraw",
     ]
 
 # Collect all pydantic submodules to handle dynamic imports
