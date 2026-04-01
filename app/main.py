@@ -8,6 +8,7 @@ Lifecycle phases:
   5. STOPPING — Deregister, close server, remove UPnP mapping
 """
 
+import argparse
 import asyncio
 import datetime
 import functools
@@ -18,28 +19,13 @@ import signal
 import socket
 import sys
 
-import httpx
 from dotenv import set_key
 
-from app.config import Settings, load_settings, _default_coordination_url
-from app.errors import NodeError, NodeErrorCode, classify_error
+# Light imports only — heavy libraries (httpx, cryptography, web3, etc.)
+# are deferred to first use inside _run() / _phase_*() to keep CLI startup fast.
+from app.config import load_settings, _default_coordination_url
 from app.identity import KeystorePassphraseRequired, load_or_create_identity, write_identity_key
-from app.proxy_handler import handle_client
-from app.registration import (
-    check_node_status,
-    deregister_node,
-    detect_public_ip,
-    register_node,
-    request_probe,
-    save_gateway_ca_cert,
-)
 from app.state import NodeState, NodeStateMachine
-from app.tls import (
-    check_certificate_expiry,
-    create_mtls_server_ssl_context,
-    create_server_ssl_context,
-    ensure_certificates,
-)
 from app.version import __version__
 from app.wallet import validate_wallet_address
 
@@ -177,6 +163,32 @@ def _first_run_setup() -> bool:
             except ValueError as exc:
                 print(f"   Invalid address: {exc}")
 
+        # --- Network Configuration ---
+        print()
+        print(f"{step}. Network Configuration")
+        step += 1
+        print("   How should your node be reachable?")
+        print("   [1] Automatic (UPnP) — recommended for home routers")
+        print("   [2] Manual / Tunnel — you provide public hostname and port")
+        while True:
+            choice = _prompt("   Select", default="1")
+            if choice in ("1", "2"):
+                break
+            print("   Please enter 1 or 2.")
+
+        upnp_enabled = True
+        public_ip = ""
+        public_port = ""
+
+        if choice == "2":
+            upnp_enabled = False
+            while True:
+                public_ip = _prompt("   Public hostname or IP").strip()
+                if public_ip:
+                    break
+                print("   Hostname is required for tunnel mode.")
+            public_port = _prompt("   Public port", default="9090")
+
         # --- Persist to .env ---
         if passphrase:
             set_key(_ENV_FILE, "SR_IDENTITY_PASSPHRASE", passphrase)
@@ -184,6 +196,13 @@ def _first_run_setup() -> bool:
             set_key(_ENV_FILE, "SR_STAKING_ADDRESS", staking_address)
         if collection_address:
             set_key(_ENV_FILE, "SR_COLLECTION_ADDRESS", collection_address)
+
+        # Network mode
+        set_key(_ENV_FILE, "SR_UPNP_ENABLED", str(upnp_enabled).lower())
+        if public_ip:
+            set_key(_ENV_FILE, "SR_PUBLIC_IP", public_ip)
+        if public_port and public_port != "9090":
+            set_key(_ENV_FILE, "SR_PUBLIC_PORT", public_port)
 
         print()
         print("─" * 53)
@@ -203,7 +222,7 @@ def _first_run_setup() -> bool:
 class _NodeContext:
     """Mutable context passed between phases to accumulate state."""
 
-    def __init__(self, settings: Settings, http_client: httpx.AsyncClient) -> None:
+    def __init__(self, settings, http_client) -> None:  # noqa: ANN001
         self.s = settings
         self.http = http_client
         self.public_ip: str = ""
@@ -221,6 +240,10 @@ class _NodeContext:
 
 async def _phase_init(ctx: _NodeContext) -> None:
     """INITIALIZING: UPnP, IP detection, wallet validation, identity, TLS."""
+    from app.errors import NodeError, NodeErrorCode
+    from app.registration import detect_public_ip
+    from app.tls import ensure_certificates, create_server_ssl_context
+
     s = ctx.s
 
     # 1. UPnP port mapping
@@ -305,6 +328,8 @@ async def _phase_init(ctx: _NodeContext) -> None:
 
 async def _phase_bind(ctx: _NodeContext) -> None:
     """BINDING: Start the TLS server."""
+    from app.proxy_handler import handle_client
+
     s = ctx.s
     handler = functools.partial(handle_client, settings=s)
 
@@ -322,6 +347,8 @@ async def _phase_bind(ctx: _NodeContext) -> None:
 
 async def _phase_register(ctx: _NodeContext) -> None:
     """REGISTERING: Register with the Coordination API."""
+    from app.registration import register_node, save_gateway_ca_cert
+
     node_id, gateway_ca_cert = await register_node(
         ctx.http, ctx.s, ctx.public_ip,
         identity_key=ctx.identity_key,
@@ -343,6 +370,8 @@ async def _phase_register(ctx: _NodeContext) -> None:
 
 def _upgrade_mtls(ctx: _NodeContext) -> None:
     """Attempt mTLS upgrade (non-fatal on failure)."""
+    from app.tls import create_mtls_server_ssl_context
+
     s = ctx.s
     if not s.MTLS_ENABLED:
         return
@@ -361,6 +390,8 @@ def _upgrade_mtls(ctx: _NodeContext) -> None:
 
 async def _rebind_server_mtls(ctx: _NodeContext) -> None:
     """Close and rebind server with the (possibly upgraded) SSL context."""
+    from app.proxy_handler import handle_client
+
     s = ctx.s
     if ctx.server:
         ctx.server.close()
@@ -379,6 +410,10 @@ async def _health_loop(
 ) -> None:
     """Periodic health checks while RUNNING."""
     from app.node_logging import activity  # noqa: E402
+    from app.registration import check_node_status, request_probe
+    from app.tls import (
+        check_certificate_expiry, ensure_certificates, create_server_ssl_context,
+    )
 
     consecutive_failures = 0
     last_cert_check = 0.0
@@ -485,8 +520,20 @@ async def _run(
     state_machine: NodeStateMachine | None = None,
 ) -> None:
     """Main orchestrator loop. Drives phases and handles retries."""
+    # Deferred heavy imports — keep CLI startup fast
+    import httpx  # noqa: E402
+    from app.errors import NodeError, NodeErrorCode, classify_error  # noqa: E402
     from app.node_logging import activity, setup_cli_logging  # noqa: E402
     from app.node_logging import _STATUS_INTERVAL  # noqa: E402
+    from app.proxy_handler import handle_client  # noqa: E402
+    from app.registration import (  # noqa: E402
+        check_node_status, deregister_node, detect_public_ip,
+        register_node, request_probe, save_gateway_ca_cert,
+    )
+    from app.tls import (  # noqa: E402
+        check_certificate_expiry, create_mtls_server_ssl_context,
+        create_server_ssl_context, ensure_certificates,
+    )
 
     s = settings_override or load_settings()
 
@@ -708,8 +755,11 @@ async def _run(
     logger.info("Home Node shut down cleanly")
 
 
-def _do_reset() -> None:
-    """Handle --reset: delete all config, identity key, and certificates."""
+def _do_reset() -> bool:
+    """Delete all config, identity key, and certificates.
+
+    Returns True if reset was performed, False if cancelled.
+    """
     from app.paths import config_dir
 
     s = load_settings()
@@ -727,7 +777,7 @@ def _do_reset() -> None:
         confirm = input("Type YES to confirm: ").strip()
         if confirm != "YES":
             print("Reset cancelled.")
-            sys.exit(0)
+            return False
 
     # Delete .env
     if os.path.isfile(env_file):
@@ -740,65 +790,116 @@ def _do_reset() -> None:
         shutil.rmtree(certs_dir)
         print(f"Removed {certs_dir}/")
 
-    print("Reset complete.")
+    print("Reset complete.\n")
+    return True
 
 
-def main() -> None:
-    from app.node_logging import setup_cli_logging, reset_activity  # noqa: E402
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser."""
+    parser = argparse.ArgumentParser(
+        prog="space-router-node",
+        description="SpaceRouter Home Node — proxy node daemon",
+    )
+    parser.add_argument(
+        "--version", "-V", action="version",
+        version=f"space-router-node {__version__}",
+    )
+    parser.add_argument(
+        "--reset", action="store_true",
+        help="Clear all config and re-run onboarding wizard",
+    )
+    parser.add_argument(
+        "--setup", action="store_true",
+        help="Re-run onboarding wizard (without clearing)",
+    )
 
-    setup_cli_logging()
-    reset_activity()
+    # Network settings
+    net = parser.add_argument_group("network")
+    net.add_argument(
+        "--port", "-p", type=int, metavar="PORT",
+        help="Node listen port (default: 9090)",
+    )
+    net.add_argument(
+        "--public-url", metavar="HOST",
+        help="Public hostname or IP (tunnel mode)",
+    )
+    net.add_argument(
+        "--public-port", type=int, metavar="PORT",
+        help="Advertised public port (tunnel mode)",
+    )
+    net.add_argument(
+        "--no-upnp", action="store_true",
+        help="Disable UPnP automatic port forwarding",
+    )
 
-    if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-V"):
-        print(f"space-router-node {__version__}")
-        sys.exit(0)
+    # Identity / wallet settings
+    wallet = parser.add_argument_group("wallet")
+    wallet.add_argument(
+        "--staking-address", metavar="ADDR",
+        help="Staking wallet address",
+    )
+    wallet.add_argument(
+        "--collection-address", metavar="ADDR",
+        help="Collection wallet address",
+    )
+    wallet.add_argument(
+        "--password-file", metavar="PATH",
+        help="Read identity passphrase from file",
+    )
 
-    if "--reset" in sys.argv:
-        _do_reset()
-        sys.exit(0)
+    # Misc
+    parser.add_argument(
+        "--log-level", metavar="LEVEL",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Log level (default: INFO)",
+    )
+    parser.add_argument(
+        "--label", metavar="NAME",
+        help="Human-readable node label",
+    )
 
-    # --password-file: read passphrase from file for automation/systemd
-    if "--password-file" in sys.argv:
-        idx = sys.argv.index("--password-file")
-        if idx + 1 >= len(sys.argv):
-            print("Error: --password-file requires a file path argument", file=sys.stderr)
-            sys.exit(1)
-        pw_path = sys.argv[idx + 1]
+    return parser
+
+
+def _apply_cli_args(args: argparse.Namespace) -> None:
+    """Override environment variables from CLI arguments.
+
+    CLI args take precedence over .env values. We set os.environ so that
+    pydantic-settings picks them up when load_settings() is called.
+    """
+    if args.port is not None:
+        os.environ["SR_NODE_PORT"] = str(args.port)
+    if args.public_url is not None:
+        os.environ["SR_PUBLIC_IP"] = args.public_url
+    if args.public_port is not None:
+        os.environ["SR_PUBLIC_PORT"] = str(args.public_port)
+    if args.no_upnp:
+        os.environ["SR_UPNP_ENABLED"] = "false"
+    if args.staking_address is not None:
+        os.environ["SR_STAKING_ADDRESS"] = args.staking_address
+    if args.collection_address is not None:
+        os.environ["SR_COLLECTION_ADDRESS"] = args.collection_address
+    if args.log_level is not None:
+        os.environ["SR_LOG_LEVEL"] = args.log_level
+    if args.label is not None:
+        os.environ["SR_NODE_LABEL"] = args.label
+    if args.password_file is not None:
         try:
-            with open(pw_path) as f:
+            with open(args.password_file) as f:
                 os.environ["SR_IDENTITY_PASSPHRASE"] = f.readline().rstrip("\n")
         except (OSError, IOError) as exc:
             print(f"Error reading password file: {exc}", file=sys.stderr)
             sys.exit(1)
 
-    # Setup wizard: trigger when identity key is missing, when --setup is
-    # passed explicitly, or when config looks unconfigured (no staking address
-    # and default coordination URL). Only in interactive TTY.
-    s = load_settings()
-    explicit_setup = "--setup" in sys.argv
-    needs_setup = (
-        explicit_setup
-        or not os.path.isfile(s.IDENTITY_KEY_PATH)
-        or (not s.STAKING_ADDRESS and s.COORDINATION_API_URL == _default_coordination_url())
-    )
-    if needs_setup and sys.stdin.isatty():
-        if not _first_run_setup():
-            sys.exit(0)
-        # Reload settings so _run() picks up values written to .env
-        reloaded_settings = load_settings()
-        try:
-            asyncio.run(_run(settings_override=reloaded_settings))
-        finally:
-            if sys.platform == "win32":
-                signal.signal(signal.SIGINT, signal.SIG_DFL)
-                signal.signal(signal.SIGTERM, signal.SIG_DFL)
-        return
+
+def _run_node(settings_override=None) -> None:  # noqa: ANN001
+    """Run the node with proper error handling and signal cleanup."""
+    from app.errors import NodeError
 
     try:
-        asyncio.run(_run())
+        asyncio.run(_run(settings_override=settings_override))
     except KeystorePassphraseRequired:
         if sys.stdin.isatty():
-            # Prompt for passphrase and retry
             try:
                 passphrase = getpass.getpass("Identity key passphrase: ")
             except (EOFError, KeyboardInterrupt):
@@ -810,10 +911,6 @@ def main() -> None:
             except NodeError as exc:
                 logger.error("Node failed: %s", exc.user_message)
                 sys.exit(1)
-            finally:
-                if sys.platform == "win32":
-                    signal.signal(signal.SIGINT, signal.SIG_DFL)
-                    signal.signal(signal.SIGTERM, signal.SIG_DFL)
         else:
             print(
                 "Identity key is encrypted. Set SR_IDENTITY_PASSPHRASE "
@@ -828,6 +925,48 @@ def main() -> None:
         if sys.platform == "win32":
             signal.signal(signal.SIGINT, signal.SIG_DFL)
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+
+def main() -> None:
+    from app.node_logging import setup_cli_logging, reset_activity  # noqa: E402
+
+    setup_cli_logging()
+    reset_activity()
+
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    # Apply CLI args as env var overrides before loading settings
+    _apply_cli_args(args)
+
+    # --reset: clear everything, then re-run wizard and start
+    if args.reset:
+        if not _do_reset():
+            sys.exit(0)
+        # Fall through to onboarding wizard
+        if sys.stdin.isatty():
+            if not _first_run_setup():
+                sys.exit(0)
+            _run_node(settings_override=load_settings())
+        else:
+            print("Reset complete. Run again to reconfigure.", file=sys.stderr)
+        return
+
+    # Setup wizard: trigger when --setup is passed, identity key is missing,
+    # or config looks unconfigured. Only in interactive TTY.
+    s = load_settings()
+    needs_setup = (
+        args.setup
+        or not os.path.isfile(s.IDENTITY_KEY_PATH)
+        or (not s.STAKING_ADDRESS and s.COORDINATION_API_URL == _default_coordination_url())
+    )
+    if needs_setup and sys.stdin.isatty():
+        if not _first_run_setup():
+            sys.exit(0)
+        _run_node(settings_override=load_settings())
+        return
+
+    _run_node()
 
 
 if __name__ == "__main__":

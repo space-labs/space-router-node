@@ -25,13 +25,26 @@ import logging
 import os
 import time
 
-from eth_account import Account
-from eth_account.messages import encode_defunct
-from web3 import Web3
-
 logger = logging.getLogger(__name__)
 
-_w3 = Web3()
+# Lazy imports — these are heavy (web3, eth_account) and slow down startup
+# if loaded at module level.  Imported on first use via _lazy_imports().
+Account = None
+encode_defunct = None
+_w3 = None
+
+
+def _lazy_imports():
+    """Import heavy crypto libraries on first use."""
+    global Account, encode_defunct, _w3
+    if Account is None:
+        from eth_account import Account as _Account
+        from eth_account.messages import encode_defunct as _encode_defunct
+        from web3 import Web3
+
+        Account = _Account
+        encode_defunct = _encode_defunct
+        _w3 = Web3()
 
 
 class KeystorePassphraseRequired(Exception):
@@ -53,6 +66,7 @@ def _is_keystore_json(content: str) -> bool:
 
 def _migrate_to_keystore(key_path: str, private_key: str, passphrase: str) -> None:
     """Encrypt *private_key* and atomically replace *key_path* with keystore JSON."""
+    _lazy_imports()
     keystore = Account.encrypt(private_key, passphrase)
     tmp_path = key_path + ".tmp"
     with open(tmp_path, "w") as f:
@@ -82,6 +96,7 @@ def load_or_create_identity(key_path: str, passphrase: str = "") -> tuple[str, s
     - **No file, passphrase provided**: generate new key, write keystore JSON.
     - **No file, no passphrase**: generate new key, write raw hex.
     """
+    _lazy_imports()
     if os.path.isfile(key_path):
         with open(key_path) as f:
             content = f.read().strip()
@@ -140,6 +155,7 @@ def write_identity_key(key_path: str, private_key_hex: str, passphrase: str = ""
 
     Raises ``ValueError`` if *private_key_hex* is not a valid secp256k1 key.
     """
+    _lazy_imports()
     account = Account.from_key(private_key_hex)  # raises ValueError if invalid
     private_key = account.key.hex()
 
@@ -176,6 +192,7 @@ def sign_request(
 
     Returns ``(signature_hex, timestamp)``.
     """
+    _lazy_imports()
     if timestamp is None:
         timestamp = int(time.time())
     message_text = f"space-router:{action}:{target}:{timestamp}"
@@ -197,6 +214,7 @@ def sign_vouch(
 
     Returns ``(signature_hex, timestamp)``.
     """
+    _lazy_imports()
     if timestamp is None:
         timestamp = int(time.time())
     message_text = f"space-router:vouch:{staking_address}:{collection_address}:{timestamp}"

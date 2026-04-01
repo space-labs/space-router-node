@@ -103,7 +103,6 @@ def load_settings() -> Settings:
     return s
 
 
-# Lazy module-level singleton for backward compatibility.
-# Code that imports ``from app.config import settings`` still works, but new
-# code should call ``load_settings()`` for a guaranteed-fresh instance.
-settings = load_settings()
+# Removed eager module-level ``settings = load_settings()`` — it triggered
+# pydantic initialization at import time, adding seconds to CLI startup.
+# All callers should use ``load_settings()`` for a fresh instance.
