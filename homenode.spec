@@ -36,6 +36,14 @@ hiddenimports = [
     "eth_keys",
     "eth_hash",
     "web3",
+    # Rich TUI
+    "rich",
+    "rich.console",
+    "rich.live",
+    "rich.panel",
+    "rich.prompt",
+    "rich.table",
+    "rich.text",
 ]
 
 # Collect all pydantic submodules to handle dynamic imports
@@ -43,6 +51,7 @@ hiddenimports += collect_submodules("pydantic")
 hiddenimports += collect_submodules("pydantic_core")
 hiddenimports += collect_submodules("eth_account")
 hiddenimports += collect_submodules("web3")
+hiddenimports += collect_submodules("rich")
 
 a = Analysis(
     ["app/main.py"],
