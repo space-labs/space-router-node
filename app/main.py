@@ -410,9 +410,10 @@ async def _health_loop(
 
         # Heartbeat: check if node is still registered
         try:
-            status = await check_node_status(
+            node_data = await check_node_status(
                 ctx.http, ctx.s, ctx.node_id, identity_key=ctx.identity_key,
             )
+            status = node_data.get("status", "unknown")
             activity.record_health_check(status)
             if status in ("online", "active"):
                 consecutive_failures = 0
@@ -501,16 +502,23 @@ async def _self_probe_loop(
     stop_event: asyncio.Event,
     dashboard=None,  # noqa: ANN001
 ) -> None:
-    """Periodically request a probe from coordination to verify reachability.
+    """Periodically check node status from coordination's perspective.
 
-    This catches scenarios like bore tunnel disconnects where the local node
-    is still running but coordination can no longer reach it.
+    Runs every 60s (vs 5min for health checks) to catch bore tunnel
+    disconnects and other reachability issues quickly.  Also feeds
+    staking_status, health_score, and probe results to the dashboard.
     """
+    import time as _time
+
     from app.registration import check_node_status, request_probe
 
+    # Run first check almost immediately (5s delay for registration to settle)
+    first_run = True
     while not stop_event.is_set():
+        delay = 5 if first_run else _SELF_PROBE_INTERVAL
+        first_run = False
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=_SELF_PROBE_INTERVAL)
+            await asyncio.wait_for(stop_event.wait(), timeout=delay)
             break
         except asyncio.TimeoutError:
             pass
@@ -519,15 +527,19 @@ async def _self_probe_loop(
             continue
 
         try:
-            # Check current status as coordination sees it
-            status = await check_node_status(
+            node_data = await check_node_status(
                 ctx.http, ctx.s, ctx.node_id, identity_key=ctx.identity_key,
             )
+            status = node_data.get("status", "unknown")
+            health_score = node_data.get("health_score", 0)
+            staking_status = node_data.get("staking_status", "—")
 
             probe_result = status
             if status not in ("online", "active"):
-                # Node is not healthy according to coordination — request a probe
-                logger.warning("Self-probe: coordination reports status '%s' — requesting probe", status)
+                logger.warning(
+                    "Self-probe: coordination reports status='%s' health_score=%.1f — requesting probe",
+                    status, health_score,
+                )
                 try:
                     await request_probe(ctx.http, ctx.s, ctx.node_id, identity_key=ctx.identity_key)
                     probe_result = "probe_requested"
@@ -535,28 +547,20 @@ async def _self_probe_loop(
                     probe_result = "probe_failed"
 
             if dashboard:
-                import time
                 dashboard.update(
                     last_probe_result=probe_result,
-                    last_probe_time=time.time(),
+                    last_probe_time=_time.time(),
                     health_status=status,
-                    staking_status=_get_staking_status(ctx),
+                    health_score=str(health_score),
+                    staking_status=staking_status,
                 )
         except Exception as exc:
             logger.debug("Self-probe check failed: %s", exc)
             if dashboard:
-                import time
                 dashboard.update(
                     last_probe_result="error",
-                    last_probe_time=time.time(),
+                    last_probe_time=_time.time(),
                 )
-
-
-def _get_staking_status(ctx: "_NodeContext") -> str:
-    """Extract staking status from last known node data (best-effort)."""
-    # This will be populated from the check_node_status response
-    # For now return what the state machine knows
-    return getattr(ctx, "_staking_status", "—")
 
 
 async def _dashboard_loop(

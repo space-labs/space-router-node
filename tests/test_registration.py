@@ -1261,18 +1261,25 @@ class TestRequestProbe:
 class TestCheckNodeStatus:
     @pytest.mark.asyncio
     @respx.mock
-    async def test_check_status_returns_status(self, reg_settings):
-        """check_node_status should return the status string."""
+    async def test_check_status_returns_full_data(self, reg_settings):
+        """check_node_status should return the full node data dict."""
+        node_data = {
+            "status": "online",
+            "health_score": 1.0,
+            "staking_status": "earning",
+        }
         respx.get("http://coordination:8000/nodes/node-abc-123").mock(
-            return_value=Response(200, json={"status": "online"})
+            return_value=Response(200, json=node_data)
         )
 
         import httpx
         async with httpx.AsyncClient() as client:
-            status = await check_node_status(
+            result = await check_node_status(
                 client, reg_settings, "node-abc-123", identity_key=TEST_IDENTITY_KEY,
             )
-        assert status == "online"
+        assert result["status"] == "online"
+        assert result["health_score"] == 1.0
+        assert result["staking_status"] == "earning"
 
 
 # ---------------------------------------------------------------------------

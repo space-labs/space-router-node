@@ -219,15 +219,19 @@ class StatusDashboard:
         )
 
     def _health_display(self) -> Text:
-        if self.last_health_check == 0:
-            return Text("waiting...", style="dim")
-        ago = int(time.time() - self.last_health_check)
         status = self.health_status
+        score = self.health_score
+        if status == "—" and self.last_probe_time == 0:
+            return Text("waiting...", style="dim")
+        # Prefer self-probe time (runs every 60s) over health check time (5min)
+        check_time = self.last_probe_time or self.last_health_check
+        ago = int(time.time() - check_time) if check_time else 0
+        label = f"{status} (score: {score})" if score != "—" else status
         if status in ("online", "active"):
-            return Text(f"● {status} ({ago}s ago)", style="green")
-        elif status == "error":
-            return Text(f"● error ({ago}s ago)", style="red")
-        return Text(f"● {status} ({ago}s ago)", style="yellow")
+            return Text(f"● {label}  [{ago}s ago]", style="green")
+        elif status in ("error", "unknown"):
+            return Text(f"● {label}  [{ago}s ago]", style="red")
+        return Text(f"● {label}  [{ago}s ago]", style="yellow")
 
     def _staking_display(self) -> Text:
         s = self.staking_status

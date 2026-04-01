@@ -288,16 +288,16 @@ async def check_node_status(
     node_id: str,
     *,
     identity_key: str,
-) -> str:
-    """Check if the node is still registered and online.
+) -> dict:
+    """Check the node's status as seen by the coordination API.
 
-    Returns the status string ('online', 'offline', etc.) or raises on error.
+    Returns the full node data dict containing at minimum:
+    ``status``, ``health_score``, ``staking_status``.
     """
     url = f"{settings.COORDINATION_API_URL}/nodes/{node_id}"
     resp = await http_client.get(url, timeout=10.0)
     resp.raise_for_status()
-    data = resp.json()
-    return data.get("status", "unknown")
+    return resp.json()
 
 
 async def deregister_node(
