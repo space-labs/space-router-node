@@ -4,6 +4,8 @@ import logging
 import sys
 import threading
 
+from app.state import NodeState
+
 logger = logging.getLogger(__name__)
 
 _MACOS = sys.platform == "darwin"
@@ -162,9 +164,10 @@ class SpaceRouterTray:
         """Refresh the macOS status-bar colour to reflect node state."""
         if not self._node_manager or not self._status_item:
             return
-        if self._node_manager.is_running:
+        state = self._node_manager.status.state
+        if state == NodeState.RUNNING:
             self._set_macos_color(_COLOR_RUNNING)
-        elif self._node_manager.last_error:
+        elif state in (NodeState.IDLE, NodeState.ERROR_PERMANENT):
             self._set_macos_color(_COLOR_STOPPED)
         else:
             self._set_macos_color(_COLOR_STARTING)
@@ -258,9 +261,10 @@ class SpaceRouterTray:
     def _update_win_icon(self) -> None:
         if not self._pystray_icon or not self._node_manager:
             return
-        if self._node_manager.is_running:
+        state = self._node_manager.status.state
+        if state == NodeState.RUNNING:
             color = self._WIN_COLOR_RUNNING
-        elif self._node_manager.last_error:
+        elif state in (NodeState.IDLE, NodeState.ERROR_PERMANENT):
             color = self._WIN_COLOR_STOPPED
         else:
             color = self._WIN_COLOR_STARTING
