@@ -6,6 +6,7 @@ Provides:
 """
 
 import logging
+import logging.handlers
 import time
 
 from rich.console import Console
@@ -16,6 +17,30 @@ from rich.table import Table
 from rich.text import Text
 
 logger = logging.getLogger(__name__)
+
+
+class _RichLiveHandler(logging.Handler):
+    """Logging handler that routes output through Rich Live's console.
+
+    When ``rich.live.Live`` is active, any raw writes to stdout corrupt
+    the Live display's cursor tracking.  This handler replaces the normal
+    ``StreamHandler`` so that log messages go through
+    ``Live.console.print()``, which Live knows how to render without
+    breaking the in-place refresh.
+    """
+
+    def __init__(self, live: Live, formatter: logging.Formatter | None = None):
+        super().__init__()
+        self._live = live
+        if formatter:
+            self.setFormatter(formatter)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            self._live.console.print(msg, highlight=False)
+        except Exception:
+            self.handleError(record)
 
 console = Console()
 
@@ -130,6 +155,7 @@ class StatusDashboard:
 
         self._live: Live | None = None
         self._console = Console()
+        self._original_handlers: list[logging.Handler] = []
 
     def start(self) -> None:
         self._live = Live(
@@ -139,11 +165,45 @@ class StatusDashboard:
             transient=False,
         )
         self._live.start()
+        self._redirect_logging()
 
     def stop(self) -> None:
+        self._restore_logging()
         if self._live:
             self._live.stop()
             self._live = None
+
+    # -- logging redirection -------------------------------------------------
+
+    def _redirect_logging(self) -> None:
+        """Replace stdout StreamHandlers with a Rich Live–aware handler.
+
+        This prevents raw stdout writes from corrupting the Live display's
+        cursor tracking, which was causing the table to stack / scroll.
+        """
+        root = logging.getLogger()
+        live_handler = _RichLiveHandler(self._live)
+
+        for h in root.handlers[:]:
+            if isinstance(h, logging.StreamHandler) and not isinstance(
+                h, (logging.FileHandler, _RichLiveHandler),
+            ):
+                live_handler.setLevel(h.level)
+                live_handler.setFormatter(h.formatter)
+                self._original_handlers.append(h)
+                root.removeHandler(h)
+
+        root.addHandler(live_handler)
+
+    def _restore_logging(self) -> None:
+        """Restore the original StreamHandlers when the dashboard stops."""
+        root = logging.getLogger()
+        for h in root.handlers[:]:
+            if isinstance(h, _RichLiveHandler):
+                root.removeHandler(h)
+        for h in self._original_handlers:
+            root.addHandler(h)
+        self._original_handlers.clear()
 
     def update(self, **kwargs) -> None:
         for k, v in kwargs.items():
