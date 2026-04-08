@@ -26,6 +26,7 @@ class Api:
         staking: str = "",
         collection: str = "",
         identity_key_hex: str = "",
+        referral_code: str = "",
     ) -> dict:
         """Persist onboarding choices and start the node."""
         try:
@@ -37,6 +38,10 @@ class Api:
             )
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
+
+        if referral_code:
+            from dotenv import set_key
+            set_key(str(self._config.path), "SR_REFERRAL_CODE", referral_code)
 
         self._config.apply_to_env()
 

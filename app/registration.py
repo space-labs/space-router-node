@@ -143,6 +143,9 @@ async def _do_register(
     if settings.NODE_LABEL:
         payload["label"] = settings.NODE_LABEL
 
+    if settings.REFERRAL_CODE:
+        payload["referral_code"] = settings.REFERRAL_CODE
+
     url = f"{settings.COORDINATION_API_URL}/nodes/register"
     logger.info(
         "Registering node at %s → endpoint=%s %s (protocol=%s)",

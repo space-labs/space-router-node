@@ -153,6 +153,26 @@ def _first_run_setup() -> bool:
             except ValueError as exc:
                 wizard_error(f"Invalid address: {exc}")
 
+        # --- Referral Code ---
+        wizard_step(step, "Referral Code (optional)")
+        step += 1
+        wizard_info("Partner referral code for acquisition tracking")
+        while True:
+            raw = wizard_input("Referral code")
+            if not raw:
+                referral_code = ""
+                break
+            raw = raw.strip()
+            if len(raw) < 3 or len(raw) > 50:
+                wizard_error("Must be 3-50 characters")
+                continue
+            import re
+            if not re.match(r'^[a-zA-Z0-9_-]+$', raw):
+                wizard_error("Only letters, numbers, hyphens, and underscores allowed")
+                continue
+            referral_code = raw
+            break
+
         # --- Network Configuration ---
         wizard_step(step, "Network Configuration")
         step += 1
@@ -181,6 +201,8 @@ def _first_run_setup() -> bool:
             set_key(_ENV_FILE, "SR_STAKING_ADDRESS", staking_address)
         if collection_address:
             set_key(_ENV_FILE, "SR_COLLECTION_ADDRESS", collection_address)
+        if referral_code:
+            set_key(_ENV_FILE, "SR_REFERRAL_CODE", referral_code)
 
         # Network mode
         set_key(_ENV_FILE, "SR_UPNP_ENABLED", str(upnp_enabled).lower())

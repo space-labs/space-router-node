@@ -287,6 +287,14 @@ function initOnboarding() {
     const collection = collectionInput.value.trim();
     const identityKeyHex = radioImport.checked ? identityKeyInput.value.trim() : "";
 
+    const referral = $("#referral-input").value.trim();
+    if (referral && (referral.length < 3 || referral.length > 50 || !/^[a-zA-Z0-9_-]+$/.test(referral))) {
+        $("#referral-error").textContent = "Must be 3-50 chars: letters, numbers, hyphens, underscores";
+        btn.disabled = false;
+        btn.textContent = "Start Node";
+        return;
+    }
+
     // Save network mode from advanced section
     const networkMode = document.querySelector('input[name="onboard-network-mode"]:checked');
     const mode = networkMode ? networkMode.value : "upnp";
@@ -296,7 +304,7 @@ function initOnboarding() {
     try {
       await window.pywebview.api.save_network_mode(mode, tunnelHost, tunnelPort);
       const result = await window.pywebview.api.save_onboarding_and_start(
-        passphrase, staking, collection, identityKeyHex,
+        passphrase, staking, collection, identityKeyHex, referral,
       );
       if (result.ok) {
         showStakingModal(function () {
