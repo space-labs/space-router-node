@@ -156,22 +156,27 @@ def _first_run_setup() -> bool:
         # --- Referral Code ---
         wizard_step(step, "Referral Code (optional)")
         step += 1
-        wizard_info("Partner referral code for acquisition tracking")
-        while True:
-            raw = wizard_input("Referral code")
-            if not raw:
-                referral_code = ""
+        existing_referral = dotenv.get_key(_ENV_FILE, "SR_REFERRAL_CODE") or ""
+        if existing_referral:
+            wizard_success(f"Referral code already set: {existing_referral}")
+            referral_code = existing_referral
+        else:
+            wizard_info("Partner referral code for acquisition tracking")
+            while True:
+                raw = wizard_input("Referral code")
+                if not raw:
+                    referral_code = ""
+                    break
+                raw = raw.strip()
+                if len(raw) < 3 or len(raw) > 50:
+                    wizard_error("Must be 3-50 characters")
+                    continue
+                import re
+                if not re.match(r'^[a-zA-Z0-9_-]+$', raw):
+                    wizard_error("Only letters, numbers, hyphens, and underscores allowed")
+                    continue
+                referral_code = raw
                 break
-            raw = raw.strip()
-            if len(raw) < 3 or len(raw) > 50:
-                wizard_error("Must be 3-50 characters")
-                continue
-            import re
-            if not re.match(r'^[a-zA-Z0-9_-]+$', raw):
-                wizard_error("Only letters, numbers, hyphens, and underscores allowed")
-                continue
-            referral_code = raw
-            break
 
         # --- Network Configuration ---
         wizard_step(step, "Network Configuration")

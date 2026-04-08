@@ -39,7 +39,7 @@ class Api:
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
 
-        if referral_code:
+        if referral_code and not self._config.get("SR_REFERRAL_CODE"):
             from dotenv import set_key
             set_key(str(self._config.path), "SR_REFERRAL_CODE", referral_code)
 
