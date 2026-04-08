@@ -89,7 +89,7 @@ sudo launchctl load /Library/LaunchDaemons/com.spacerouter.homenode.plist
 
 ## Pre-built binaries
 
-Cross-platform binaries (macOS ARM64/x64, Windows x64, Linux x64) are built automatically and published as [GitHub Releases](https://github.com/gluwa/space-router-node/releases).
+Cross-platform binaries (macOS ARM64/x64, Windows x64, Linux x64) are built automatically and published as [GitHub Releases](https://github.com/space-labs/space-router-node/releases).
 
 ## Running tests
 

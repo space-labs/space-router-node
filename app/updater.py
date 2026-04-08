@@ -4,7 +4,7 @@ from app.version import __version__
 
 logger = logging.getLogger(__name__)
 
-GITHUB_API_URL = "https://api.github.com/repos/gluwa/space-router-node/releases/latest"
+GITHUB_API_URL = "https://api.github.com/repos/space-labs/space-router-node/releases/latest"
 
 def check_for_updates():
     try:

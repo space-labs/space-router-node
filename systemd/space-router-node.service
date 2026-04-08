@@ -1,6 +1,6 @@
 [Unit]
 Description=Space Router Home Node
-Documentation=https://github.com/gluwa/space-router-node
+Documentation=https://github.com/space-labs/space-router-node
 After=network-online.target
 Wants=network-online.target
 

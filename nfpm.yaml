@@ -8,7 +8,7 @@ description: |
   Runs as a proxy exit point for the Space Router network,
   forwarding AI agent requests from a residential IP address.
 vendor: "Gluwa Inc."
-homepage: "https://github.com/gluwa/space-router-node"
+homepage: "https://github.com/space-labs/space-router-node"
 license: "Proprietary"
 
 contents:
