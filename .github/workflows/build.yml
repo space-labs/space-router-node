@@ -36,7 +36,7 @@ jobs:
         include:
           - os: macos-latest
             artifact: space-router-node-macos-arm64
-          - os: macos-13
+          - os: macos-12
             artifact: space-router-node-macos-x64
           - os: windows-latest
             artifact: space-router-node-windows-x64
@@ -107,6 +107,34 @@ jobs:
           SR_NODE_PORT: "19090"
           SR_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
 
+      # ---- Windows code signing via Azure Trusted Signing ----
+      # Sign the binary before building the installer so the installer embeds a signed binary
+      - name: Login to Azure
+        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        uses: azure/login@v2
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Sign Windows binary
+        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        uses: azure/trusted-signing-action@v0.5.0
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
+          files: dist/${{ matrix.artifact }}.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
       # Build Windows NSIS installer with WinSW service wrapper
       - name: Download WinSW
         if: runner.os == 'Windows'
@@ -174,6 +202,22 @@ jobs:
                     "dist\${{ matrix.artifact }}-setup.exe"
           Write-Host "Built installer: dist\${{ matrix.artifact }}-setup.exe"
 
+      - name: Sign Windows installer
+        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        uses: azure/trusted-signing-action@v0.5.0
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
+          files: dist/${{ matrix.artifact }}-setup.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
       # ---- macOS code signing & notarization (skipped if secrets not set) ----
       - name: Import macOS signing certificate
         if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
@@ -235,6 +279,9 @@ jobs:
             --team-id "$APPLE_TEAM_ID" \
             --wait
 
+          # Wait for Apple's CDN to propagate the ticket before stapling
+          sleep 10
+
           # Staple the ticket
           xcrun stapler staple "dist/${{ matrix.artifact }}"
 
@@ -288,34 +335,6 @@ jobs:
         shell: bash
         run: security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
 
-      # ---- Windows code signing via Azure Trusted Signing ----
-      - name: Login to Azure
-        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
-        uses: azure/login@v2
-        env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-
-      - name: Sign Windows binary
-        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
-        uses: azure/trusted-signing-action@v0.5.0
-        env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-        with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
-          files-folder: dist
-          files-folder-filter: exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-
       # Build Linux packages (.deb and .rpm) via nfpm
       - name: Build Linux packages
         if: runner.os == 'Linux'
@@ -358,7 +377,7 @@ jobs:
         include:
           - os: macos-latest
             artifact: spacerouter-gui-macos-arm64
-          - os: macos-13
+          - os: macos-12
             artifact: spacerouter-gui-macos-x64
           - os: windows-latest
             artifact: spacerouter-gui-windows-x64
