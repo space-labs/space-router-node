@@ -33,9 +33,6 @@ jobs:
         include:
           - os: macos-latest
             artifact: space-router-node-test-macos-arm64
-          - os: macos-latest
-            artifact: space-router-node-test-macos-x64
-            arch_prefix: arch -x86_64
           - os: windows-latest
             artifact: space-router-node-test-windows-x64
           - os: ubuntu-latest
@@ -58,12 +55,8 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building test version: ${VERSION}"
 
-      - name: Install Rosetta
-        if: matrix.arch_prefix != ''
-        run: softwareupdate --install-rosetta --agree-to-license
-
       - name: Install dependencies
-        run: ${{ matrix.arch_prefix }} pip install -r requirements.txt pyinstaller
+        run: pip install -r requirements.txt pyinstaller
 
       - name: Freeze version and variant into binary
         shell: bash
@@ -72,7 +65,7 @@ jobs:
           echo "BUILD_VARIANT = \"test\"" > app/_build_variant.py
 
       - name: Build binary
-        run: ${{ matrix.arch_prefix }} pyinstaller homenode.spec
+        run: pyinstaller homenode.spec
 
       - name: Rename artifact
         shell: bash
@@ -93,7 +86,6 @@ jobs:
           SR_UPNP_ENABLED: "false"
           SR_NODE_PORT: "19090"
           SR_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
-          BINARY_PREFIX: ${{ matrix.arch_prefix }}
 
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
@@ -121,9 +113,6 @@ jobs:
         include:
           - os: macos-latest
             artifact: spacerouter-gui-test-macos-arm64
-          - os: macos-latest
-            artifact: spacerouter-gui-test-macos-x64
-            arch_prefix: arch -x86_64
           - os: windows-latest
             artifact: spacerouter-gui-test-windows-x64
     runs-on: ${{ matrix.os }}
@@ -144,12 +133,8 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building GUI test version: ${VERSION}"
 
-      - name: Install Rosetta
-        if: matrix.arch_prefix != ''
-        run: softwareupdate --install-rosetta --agree-to-license
-
       - name: Install dependencies
-        run: ${{ matrix.arch_prefix }} pip install -r requirements.txt pyinstaller pywebview
+        run: pip install -r requirements.txt pyinstaller pywebview
 
       - name: Freeze version and variant into binary
         shell: bash
@@ -158,7 +143,7 @@ jobs:
           echo "BUILD_VARIANT = \"test\"" > app/_build_variant.py
 
       - name: Build GUI app
-        run: ${{ matrix.arch_prefix }} pyinstaller spacerouter_gui.spec
+        run: pyinstaller spacerouter_gui.spec
 
       # ── GUI smoke tests ──
       - name: GUI smoke test (macOS)

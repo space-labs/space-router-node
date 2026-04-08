@@ -36,9 +36,6 @@ jobs:
         include:
           - os: macos-latest
             artifact: space-router-node-macos-arm64
-          - os: macos-latest
-            artifact: space-router-node-macos-x64
-            arch_prefix: arch -x86_64
           - os: windows-latest
             artifact: space-router-node-windows-x64
           - os: ubuntu-latest
@@ -65,12 +62,8 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building version: ${VERSION}"
 
-      - name: Install Rosetta
-        if: matrix.arch_prefix != ''
-        run: softwareupdate --install-rosetta --agree-to-license
-
       - name: Install dependencies
-        run: ${{ matrix.arch_prefix }} pip install -r requirements.txt pyinstaller
+        run: pip install -r requirements.txt pyinstaller
 
       - name: Freeze version into binary
         shell: bash
@@ -79,7 +72,7 @@ jobs:
           echo "BUILD_VARIANT = \"production\"" > app/_build_variant.py
 
       - name: Build binary
-        run: ${{ matrix.arch_prefix }} pyinstaller homenode.spec
+        run: pyinstaller homenode.spec
 
       - name: Rename artifact
         shell: bash
@@ -135,7 +128,7 @@ jobs:
           endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
           trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
-          files: dist/${{ matrix.artifact }}.exe
+          files: ${{ github.workspace }}/dist/${{ matrix.artifact }}.exe
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
@@ -218,7 +211,7 @@ jobs:
           endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
           trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
-          files: dist/${{ matrix.artifact }}-setup.exe
+          files: ${{ github.workspace }}/dist/${{ matrix.artifact }}-setup.exe
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
@@ -390,9 +383,6 @@ jobs:
         include:
           - os: macos-latest
             artifact: spacerouter-gui-macos-arm64
-          - os: macos-latest
-            artifact: spacerouter-gui-macos-x64
-            arch_prefix: arch -x86_64
           - os: windows-latest
             artifact: spacerouter-gui-windows-x64
     runs-on: ${{ matrix.os }}
@@ -417,12 +407,8 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building GUI version: ${VERSION}"
 
-      - name: Install Rosetta
-        if: matrix.arch_prefix != ''
-        run: softwareupdate --install-rosetta --agree-to-license
-
       - name: Install dependencies
-        run: ${{ matrix.arch_prefix }} pip install -r requirements.txt pyinstaller pywebview
+        run: pip install -r requirements.txt pyinstaller pywebview
 
       - name: Freeze version into binary
         shell: bash
@@ -431,7 +417,7 @@ jobs:
           echo "BUILD_VARIANT = \"production\"" > app/_build_variant.py
 
       - name: Build GUI app
-        run: ${{ matrix.arch_prefix }} pyinstaller spacerouter_gui.spec
+        run: pyinstaller spacerouter_gui.spec
 
       # ---- GUI smoke tests (before signing, after build) ----
       - name: GUI smoke test (macOS)
