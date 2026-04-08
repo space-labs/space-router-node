@@ -19,7 +19,7 @@ import signal
 import socket
 import sys
 
-from dotenv import set_key
+from dotenv import get_key, set_key
 
 # Light imports only — heavy libraries (httpx, cryptography, web3, etc.)
 # are deferred to first use inside _run() / _phase_*() to keep CLI startup fast.
@@ -156,7 +156,7 @@ def _first_run_setup() -> bool:
         # --- Referral Code ---
         wizard_step(step, "Referral Code (optional)")
         step += 1
-        existing_referral = dotenv.get_key(_ENV_FILE, "SR_REFERRAL_CODE") or ""
+        existing_referral = get_key(_ENV_FILE, "SR_REFERRAL_CODE") or ""
         if existing_referral:
             wizard_success(f"Referral code already set: {existing_referral}")
             referral_code = existing_referral
