@@ -791,3 +791,92 @@ body.has-test-banner .screen {
   color: #8080a0;
   line-height: 1.5;
 }
+
+/* ── Staking Status Badges ── */
+
+.staking-earning {
+  color: #4caf50;
+  font-weight: 600;
+}
+
+.staking-qualifying {
+  color: #ff9800;
+  font-weight: 600;
+}
+
+.staking-unstaked {
+  color: #f44336;
+  font-weight: 600;
+}
+
+/* ── Staking Modal Overlay ── */
+
+.staking-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.staking-modal {
+  background: #1a1a2e;
+  border: 1px solid #2a2a45;
+  border-radius: 12px;
+  padding: 28px 24px;
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.staking-modal-title {
+  color: #ffffff;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.staking-modal-body {
+  color: #999;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.staking-modal-primary {
+  width: 100%;
+  background: #7c6af7;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 12px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-top: 4px;
+  transition: background 0.15s;
+}
+
+.staking-modal-primary:hover {
+  background: #6a59e0;
+}
+
+.staking-modal-secondary {
+  color: #555;
+  font-size: 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  transition: color 0.15s;
+}
+
+.staking-modal-secondary:hover {
+  color: #999;
+}

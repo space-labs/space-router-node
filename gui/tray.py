@@ -1,6 +1,7 @@
 """System tray icon for SpaceRouter (macOS menu bar + Windows notification area)."""
 
 import logging
+import os
 import sys
 import threading
 
@@ -11,6 +12,16 @@ logger = logging.getLogger(__name__)
 _MACOS = sys.platform == "darwin"
 _WINDOWS = sys.platform == "win32"
 
+
+def _tray_asset_path(filename: str) -> str:
+    """Resolve path to a tray icon asset, handling PyInstaller frozen bundles."""
+    if getattr(sys, "frozen", False):
+        base = os.path.join(sys._MEIPASS, "gui", "assets", "tray")
+    else:
+        base = os.path.join(os.path.dirname(__file__), "assets", "tray")
+    return os.path.join(base, filename)
+
+
 # ---------------------------------------------------------------------------
 # macOS — native AppKit NSStatusItem
 # ---------------------------------------------------------------------------
@@ -19,15 +30,20 @@ if _MACOS:
     import Foundation
     import objc
 
-    _COLOR_RUNNING = AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(
-        0.18, 0.80, 0.44, 1.0
-    )
-    _COLOR_STOPPED = AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(
-        0.91, 0.30, 0.24, 1.0
-    )
-    _COLOR_STARTING = AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(
-        0.95, 0.61, 0.07, 1.0
-    )
+    def _load_macos_tray_image(name: str) -> "AppKit.NSImage":
+        """Load a tray PNG as an NSImage sized for the menu bar (18pt)."""
+        path_2x = _tray_asset_path(f"{name}@2x.png")
+        path_1x = _tray_asset_path(f"{name}.png")
+        # Prefer @2x for retina
+        path = path_2x if os.path.exists(path_2x) else path_1x
+        img = AppKit.NSImage.alloc().initWithContentsOfFile_(path)
+        if img:
+            img.setSize_(Foundation.NSMakeSize(18, 18))
+        return img
+
+    _TRAY_IMG_RUNNING = None
+    _TRAY_IMG_STOPPED = None
+    _TRAY_IMG_STARTING = None
 
     class _TrayDelegate(AppKit.NSObject):
         """Tiny NSObject that receives menu actions and timer callbacks."""
@@ -123,7 +139,13 @@ class SpaceRouterTray:
 
     def _setup_macos(self) -> None:
         """Build the NSStatusItem — called on the main thread."""
+        global _TRAY_IMG_RUNNING, _TRAY_IMG_STOPPED, _TRAY_IMG_STARTING
         from app.variant import BUILD_VARIANT
+
+        # Lazy-load tray images (must happen after PyInstaller extracts assets)
+        _TRAY_IMG_RUNNING = _load_macos_tray_image("tray-green")
+        _TRAY_IMG_STOPPED = _load_macos_tray_image("tray-red")
+        _TRAY_IMG_STARTING = _load_macos_tray_image("tray-yellow")
 
         status_bar = AppKit.NSStatusBar.systemStatusBar()
         self._status_item = status_bar.statusItemWithLength_(
@@ -132,9 +154,8 @@ class SpaceRouterTray:
 
         tooltip = "SpaceRouter [TEST]" if BUILD_VARIANT == "test" else "SpaceRouter"
         button = self._status_item.button()
-        button.setTitle_("\u25CF")
         button.setToolTip_(tooltip)
-        self._set_macos_color(_COLOR_STARTING)
+        self._set_macos_icon(_TRAY_IMG_STARTING)
 
         menu = AppKit.NSMenu.alloc().init()
 
@@ -161,26 +182,25 @@ class SpaceRouterTray:
         )
 
     def _update_icon(self) -> None:
-        """Refresh the macOS status-bar colour to reflect node state."""
+        """Refresh the macOS status-bar icon to reflect node state."""
         if not self._node_manager or not self._status_item:
             return
         state = self._node_manager.status.state
         if state == NodeState.RUNNING:
-            self._set_macos_color(_COLOR_RUNNING)
+            self._set_macos_icon(_TRAY_IMG_RUNNING)
         elif state in (NodeState.IDLE, NodeState.ERROR_PERMANENT):
-            self._set_macos_color(_COLOR_STOPPED)
+            self._set_macos_icon(_TRAY_IMG_STOPPED)
         else:
-            self._set_macos_color(_COLOR_STARTING)
+            self._set_macos_icon(_TRAY_IMG_STARTING)
 
-    def _set_macos_color(self, color) -> None:
+    def _set_macos_icon(self, image) -> None:
         button = self._status_item.button()
-        attrs = Foundation.NSDictionary.dictionaryWithObject_forKey_(
-            color, AppKit.NSForegroundColorAttributeName
-        )
-        title = Foundation.NSAttributedString.alloc().initWithString_attributes_(
-            "\u25CF", attrs
-        )
-        button.setAttributedTitle_(title)
+        if image:
+            button.setImage_(image)
+            button.setTitle_("")
+        else:
+            # Fallback to colored dot if image failed to load
+            button.setTitle_("\u25CF")
 
     def _shutdown_macos_safe(self) -> None:
         """Schedule tray removal on the main thread (required by AppKit)."""
@@ -204,16 +224,37 @@ class SpaceRouterTray:
     # Windows implementation
     # ------------------------------------------------------------------
 
-    _WIN_COLOR_RUNNING = (46, 204, 113)    # green
-    _WIN_COLOR_STOPPED = (232, 76, 61)     # red
-    _WIN_COLOR_STARTING = (242, 156, 18)   # orange
+    _WIN_TRAY_IMAGES: dict[str, "Image.Image"] = {}
+
+    @classmethod
+    def _load_win_tray_images(cls):
+        """Load pre-rendered tray PNGs for Windows."""
+        for name in ("tray-green", "tray-red", "tray-yellow"):
+            path = _tray_asset_path(f"{name}@2x.png")
+            if not os.path.exists(path):
+                path = _tray_asset_path(f"{name}.png")
+            try:
+                img = Image.open(path).resize((64, 64), Image.LANCZOS)
+                cls._WIN_TRAY_IMAGES[name] = img
+            except Exception:
+                cls._WIN_TRAY_IMAGES[name] = cls._create_win_fallback((128, 128, 128))
+
+    @staticmethod
+    def _create_win_fallback(color_rgb: tuple[int, int, int]) -> "Image.Image":
+        """Fallback: generate a 64x64 RGBA image with a filled circle."""
+        size = 64
+        image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        draw.ellipse([4, 4, size - 4, size - 4], fill=(*color_rgb, 255))
+        return image
 
     def _start_windows(self) -> None:
         from app.variant import BUILD_VARIANT
 
+        self._load_win_tray_images()
         tooltip = "SpaceRouter [TEST]" if BUILD_VARIANT == "test" else "SpaceRouter"
 
-        icon_image = self._create_win_icon(self._WIN_COLOR_STARTING)
+        icon_image = self._WIN_TRAY_IMAGES.get("tray-yellow", self._create_win_fallback((242, 156, 18)))
 
         menu = pystray.Menu(
             pystray.MenuItem("Show SpaceRouter", self._win_on_show, default=True),
@@ -238,15 +279,6 @@ class SpaceRouterTray:
         # Periodic status-colour refresh (every 3 s, matching macOS)
         self._schedule_win_update()
 
-    @staticmethod
-    def _create_win_icon(color_rgb: tuple[int, int, int]) -> "Image.Image":
-        """Generate a 64x64 RGBA image with a filled circle."""
-        size = 64
-        image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-        draw.ellipse([4, 4, size - 4, size - 4], fill=(*color_rgb, 255))
-        return image
-
     def _schedule_win_update(self) -> None:
         if not self._win_running:
             return
@@ -263,12 +295,14 @@ class SpaceRouterTray:
             return
         state = self._node_manager.status.state
         if state == NodeState.RUNNING:
-            color = self._WIN_COLOR_RUNNING
+            key = "tray-green"
         elif state in (NodeState.IDLE, NodeState.ERROR_PERMANENT):
-            color = self._WIN_COLOR_STOPPED
+            key = "tray-red"
         else:
-            color = self._WIN_COLOR_STARTING
-        self._pystray_icon.icon = self._create_win_icon(color)
+            key = "tray-yellow"
+        img = self._WIN_TRAY_IMAGES.get(key)
+        if img:
+            self._pystray_icon.icon = img
 
     def _win_on_show(self, icon=None, item=None) -> None:
         if self._on_show:

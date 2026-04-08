@@ -26,6 +26,7 @@ class Api:
         staking: str = "",
         collection: str = "",
         identity_key_hex: str = "",
+        referral_code: str = "",
     ) -> dict:
         """Persist onboarding choices and start the node."""
         try:
@@ -37,6 +38,10 @@ class Api:
             )
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
+
+        if referral_code and not self._config.get("SR_REFERRAL_CODE"):
+            from dotenv import set_key
+            set_key(str(self._config.path), "SR_REFERRAL_CODE", referral_code)
 
         self._config.apply_to_env()
 
@@ -151,6 +156,7 @@ class Api:
             "error": ns.error_message,
             "environment": env,
             "api_url": api_url,
+            "staking_status": ns.staking_status,
         }
 
     def get_build_variant(self) -> str:
@@ -191,6 +197,23 @@ class Api:
         except Exception as exc:
             logger.exception("Failed to save network mode")
             return {"ok": False, "error": str(exc)}
+
+    def open_url(self, url: str):
+        """Open a URL in the user's default browser."""
+        import webbrowser
+        webbrowser.open(url)
+
+    def get_min_staking_amount(self) -> int:
+        """Fetch minimum staking amount from coordination API /config endpoint."""
+        import httpx
+        from gui.config_store import _default_coordination_url
+        api_url = self._config.get("SR_COORDINATION_API_URL") or _default_coordination_url()
+        try:
+            resp = httpx.get(f"{api_url}/config", timeout=5)
+            resp.raise_for_status()
+            return resp.json().get("minimumStakingAmount", 1)
+        except Exception:
+            return 1
 
     def fresh_restart(self) -> dict:
         """Stop node, fully reset config and identity, return to onboarding.

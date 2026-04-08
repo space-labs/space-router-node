@@ -19,7 +19,7 @@ import signal
 import socket
 import sys
 
-from dotenv import set_key
+from dotenv import get_key, set_key
 
 # Light imports only — heavy libraries (httpx, cryptography, web3, etc.)
 # are deferred to first use inside _run() / _phase_*() to keep CLI startup fast.
@@ -153,6 +153,31 @@ def _first_run_setup() -> bool:
             except ValueError as exc:
                 wizard_error(f"Invalid address: {exc}")
 
+        # --- Referral Code ---
+        wizard_step(step, "Referral Code (optional)")
+        step += 1
+        existing_referral = get_key(_ENV_FILE, "SR_REFERRAL_CODE") or ""
+        if existing_referral:
+            wizard_success(f"Referral code already set: {existing_referral}")
+            referral_code = existing_referral
+        else:
+            wizard_info("Partner referral code for acquisition tracking")
+            while True:
+                raw = wizard_input("Referral code")
+                if not raw:
+                    referral_code = ""
+                    break
+                raw = raw.strip()
+                if len(raw) < 3 or len(raw) > 50:
+                    wizard_error("Must be 3-50 characters")
+                    continue
+                import re
+                if not re.match(r'^[a-zA-Z0-9_-]+$', raw):
+                    wizard_error("Only letters, numbers, hyphens, and underscores allowed")
+                    continue
+                referral_code = raw
+                break
+
         # --- Network Configuration ---
         wizard_step(step, "Network Configuration")
         step += 1
@@ -181,6 +206,8 @@ def _first_run_setup() -> bool:
             set_key(_ENV_FILE, "SR_STAKING_ADDRESS", staking_address)
         if collection_address:
             set_key(_ENV_FILE, "SR_COLLECTION_ADDRESS", collection_address)
+        if referral_code:
+            set_key(_ENV_FILE, "SR_REFERRAL_CODE", referral_code)
 
         # Network mode
         set_key(_ENV_FILE, "SR_UPNP_ENABLED", str(upnp_enabled).lower())
@@ -195,6 +222,52 @@ def _first_run_setup() -> bool:
     except (KeyboardInterrupt, EOFError):
         print("\n\nSetup cancelled.")
         return False
+
+
+def _fetch_min_staking_amount() -> int:
+    """Fetch minimum staking amount from coordination API /config endpoint."""
+    try:
+        import httpx
+        s = load_settings()
+        resp = httpx.get(f"{s.COORDINATION_API_URL}/config", timeout=5)
+        resp.raise_for_status()
+        return resp.json().get("minimumStakingAmount", 1)
+    except Exception:
+        return 1
+
+
+def _show_staking_prompt() -> None:
+    """Display a staking requirement notice before starting the node.
+
+    Only shown when stdin is a TTY (interactive mode). In non-interactive
+    mode (piped input, systemd), logs a warning instead.
+    """
+    min_amount = _fetch_min_staking_amount()
+
+    if not sys.stdin.isatty():
+        logger.warning(
+            "Staking required for rewards: stake at least %s $SPACE at "
+            "https://penguinbase.com/dapp/spacestaking",
+            min_amount,
+        )
+        return
+
+    from rich.panel import Panel
+    from rich.console import Console
+
+    console = Console()
+    console.print()
+    console.print(Panel(
+        f"[bold white]To earn $SPACE rewards, you must stake at least\n"
+        f"{min_amount} $SPACE before starting your node.[/bold white]\n\n"
+        "[cyan]Stake here:[/cyan]    https://penguinbase.com/dapp/spacestaking\n"
+        "[cyan]Staking guide:[/cyan] https://docs.spacecoin.org/usdspace-token/staking\n\n"
+        "[dim]Press Enter to continue...[/dim]",
+        title="[yellow]⚠ Staking Required for Rewards[/yellow]",
+        border_style="yellow",
+        padding=(1, 2),
+    ))
+    input()
 
 
 # ── Phase functions ──────────────────────────────────────────────────────────
@@ -545,6 +618,9 @@ async def _self_probe_loop(
                     probe_result = "probe_requested"
                 except Exception:
                     probe_result = "probe_failed"
+
+            # Update state machine so GUI can read staking_status
+            sm.status.staking_status = staking_status
 
             if dashboard:
                 dashboard.update(
@@ -1068,6 +1144,7 @@ def main() -> None:
         if sys.stdin.isatty():
             if not _first_run_setup():
                 sys.exit(0)
+            _show_staking_prompt()
             _run_node(settings_override=load_settings())
         else:
             print("Reset complete. Run again to reconfigure.", file=sys.stderr)
@@ -1084,9 +1161,11 @@ def main() -> None:
     if needs_setup and sys.stdin.isatty():
         if not _first_run_setup():
             sys.exit(0)
+        _show_staking_prompt()
         _run_node(settings_override=load_settings())
         return
 
+    _show_staking_prompt()
     _run_node()
 
 

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     BIND_ADDRESS: str = "0.0.0.0"
 
     NODE_LABEL: str = ""
+    REFERRAL_CODE: str = ""
 
     PUBLIC_IP: str = ""  # Auto-detected if empty
     PUBLIC_PORT: int = 0  # Override advertised port (0 = use NODE_PORT)

@@ -287,6 +287,14 @@ function initOnboarding() {
     const collection = collectionInput.value.trim();
     const identityKeyHex = radioImport.checked ? identityKeyInput.value.trim() : "";
 
+    const referral = $("#referral-input").value.trim();
+    if (referral && (referral.length < 3 || referral.length > 50 || !/^[a-zA-Z0-9_-]+$/.test(referral))) {
+        $("#referral-error").textContent = "Must be 3-50 chars: letters, numbers, hyphens, underscores";
+        btn.disabled = false;
+        btn.textContent = "Start Node";
+        return;
+    }
+
     // Save network mode from advanced section
     const networkMode = document.querySelector('input[name="onboard-network-mode"]:checked');
     const mode = networkMode ? networkMode.value : "upnp";
@@ -296,11 +304,13 @@ function initOnboarding() {
     try {
       await window.pywebview.api.save_network_mode(mode, tunnelHost, tunnelPort);
       const result = await window.pywebview.api.save_onboarding_and_start(
-        passphrase, staking, collection, identityKeyHex,
+        passphrase, staking, collection, identityKeyHex, referral,
       );
       if (result.ok) {
-        hideAll();
-        showStatus();
+        showStakingModal(function () {
+          hideAll();
+          showStatus();
+        });
       } else {
         // Show error inline (remove any previous error first)
         btn.parentNode.querySelectorAll("p.error").forEach(el => el.remove());
@@ -323,6 +333,38 @@ function showOnboarding() {
   hideAll();
   show("screen-onboarding");
   initOnboarding();
+}
+
+// ── Staking Modal (overlay) ──
+
+async function showStakingModal(onContinue) {
+  const overlay = $("#staking-modal-overlay");
+
+  // Fetch min staking amount from coordination API
+  try {
+    const minAmount = await window.pywebview.api.get_min_staking_amount();
+    $("#staking-modal-body").textContent =
+      `Stake at least ${minAmount} $SPACE to start operating your node.`;
+  } catch (_) {}
+
+  overlay.style.display = "flex";
+
+  // Strip old listeners
+  for (const sel of ["#btn-start-staking", "#btn-staking-skip"]) {
+    const el = $(sel);
+    el.replaceWith(el.cloneNode(true));
+  }
+
+  $("#btn-start-staking").addEventListener("click", function () {
+    window.pywebview.api.open_url("https://penguinbase.com/dapp/spacestaking");
+    overlay.style.display = "none";
+    if (onContinue) onContinue();
+  });
+
+  $("#btn-staking-skip").addEventListener("click", function () {
+    overlay.style.display = "none";
+    if (onContinue) onContinue();
+  });
 }
 
 // ── Status Dashboard ──
@@ -358,6 +400,16 @@ async function updateStatus() {
     stakingEl.title = fullStaking;
     collectionEl.textContent = truncateAddress(fullCollection) || "-";
     collectionEl.title = fullCollection;
+
+    // Staking status display
+    const stakingStatusEl = $("#staking-status");
+    const ss = status.staking_status || "—";
+    stakingStatusEl.textContent = ss === "unstaked" ? ss + " — stake required" : ss;
+    stakingStatusEl.className = "wallet-value"
+      + (ss === "earning" ? " staking-earning"
+        : ss === "qualifying" ? " staking-qualifying"
+        : ss === "unstaked" ? " staking-unstaked"
+        : "");
 
     // State-based display
     const state = status.state || "idle";
@@ -832,9 +884,10 @@ async function init() {
     if (needsOnboarding) {
       showOnboarding();
     } else {
-      // Already configured — start node and show status
+      // Already configured — show status, then overlay staking modal
       await window.pywebview.api.start_node();
       showStatus();
+      showStakingModal();
     }
   } catch (e) {
     // pywebview.api not ready — retry

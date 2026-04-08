@@ -126,6 +126,7 @@ if sys.platform == "win32":
         target_arch=None,
         codesign_identity=None,
         entitlements_file=None,
+        icon="packaging/windows/SpaceRouter.ico",
     )
 else:
     # macOS/Linux: COLLECT mode (required for macOS .app bundle)

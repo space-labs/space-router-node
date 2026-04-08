@@ -109,6 +109,7 @@ class NodeStatus:
     next_retry_at: float | None = None  # unix timestamp
     node_id: str | None = None
     cert_expiry_warning: bool = False
+    staking_status: str = "—"
 
     def to_dict(self) -> dict:
         return {
@@ -121,6 +122,7 @@ class NodeStatus:
             "next_retry_at": self.next_retry_at,
             "node_id": self.node_id,
             "cert_expiry_warning": self.cert_expiry_warning,
+            "staking_status": self.staking_status,
         }
 
 
