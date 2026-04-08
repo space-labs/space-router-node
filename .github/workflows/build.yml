@@ -36,8 +36,9 @@ jobs:
         include:
           - os: macos-latest
             artifact: space-router-node-macos-arm64
-          - os: macos-12
+          - os: macos-latest
             artifact: space-router-node-macos-x64
+            arch_prefix: arch -x86_64
           - os: windows-latest
             artifact: space-router-node-windows-x64
           - os: ubuntu-latest
@@ -64,8 +65,12 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building version: ${VERSION}"
 
+      - name: Install Rosetta
+        if: matrix.arch_prefix != ''
+        run: softwareupdate --install-rosetta --agree-to-license
+
       - name: Install dependencies
-        run: pip install -r requirements.txt pyinstaller
+        run: ${{ matrix.arch_prefix }} pip install -r requirements.txt pyinstaller
 
       - name: Freeze version into binary
         shell: bash
@@ -74,7 +79,7 @@ jobs:
           echo "BUILD_VARIANT = \"production\"" > app/_build_variant.py
 
       - name: Build binary
-        run: pyinstaller homenode.spec
+        run: ${{ matrix.arch_prefix }} pyinstaller homenode.spec
 
       - name: Rename artifact
         shell: bash
@@ -279,11 +284,19 @@ jobs:
             --team-id "$APPLE_TEAM_ID" \
             --wait
 
-          # Wait for Apple's CDN to propagate the ticket before stapling
-          sleep 10
-
-          # Staple the ticket
-          xcrun stapler staple "dist/${{ matrix.artifact }}"
+          # Retry stapling — Apple's CDN can take time to propagate after notarytool reports Accepted
+          for attempt in 1 2 3 4 5; do
+            if xcrun stapler staple "dist/${{ matrix.artifact }}"; then
+              break
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              echo "Staple attempt $attempt/5 failed, retrying in 30s..."
+              sleep 30
+            else
+              echo "Stapling failed after 5 attempts"
+              exit 1
+            fi
+          done
 
       # Build .pkg from the signed+notarized binary so the payload passes Gatekeeper
       - name: Build macOS package
@@ -377,8 +390,9 @@ jobs:
         include:
           - os: macos-latest
             artifact: spacerouter-gui-macos-arm64
-          - os: macos-12
+          - os: macos-latest
             artifact: spacerouter-gui-macos-x64
+            arch_prefix: arch -x86_64
           - os: windows-latest
             artifact: spacerouter-gui-windows-x64
     runs-on: ${{ matrix.os }}
@@ -403,8 +417,12 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building GUI version: ${VERSION}"
 
+      - name: Install Rosetta
+        if: matrix.arch_prefix != ''
+        run: softwareupdate --install-rosetta --agree-to-license
+
       - name: Install dependencies
-        run: pip install -r requirements.txt pyinstaller pywebview
+        run: ${{ matrix.arch_prefix }} pip install -r requirements.txt pyinstaller pywebview
 
       - name: Freeze version into binary
         shell: bash
@@ -413,7 +431,7 @@ jobs:
           echo "BUILD_VARIANT = \"production\"" > app/_build_variant.py
 
       - name: Build GUI app
-        run: pyinstaller spacerouter_gui.spec
+        run: ${{ matrix.arch_prefix }} pyinstaller spacerouter_gui.spec
 
       # ---- GUI smoke tests (before signing, after build) ----
       - name: GUI smoke test (macOS)
