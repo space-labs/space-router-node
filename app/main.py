@@ -197,6 +197,52 @@ def _first_run_setup() -> bool:
         return False
 
 
+def _fetch_min_staking_amount() -> int:
+    """Fetch minimum staking amount from coordination API /config endpoint."""
+    try:
+        import httpx
+        s = load_settings()
+        resp = httpx.get(f"{s.COORDINATION_API_URL}/config", timeout=5)
+        resp.raise_for_status()
+        return resp.json().get("minimumStakingAmount", 1)
+    except Exception:
+        return 1
+
+
+def _show_staking_prompt() -> None:
+    """Display a staking requirement notice before starting the node.
+
+    Only shown when stdin is a TTY (interactive mode). In non-interactive
+    mode (piped input, systemd), logs a warning instead.
+    """
+    min_amount = _fetch_min_staking_amount()
+
+    if not sys.stdin.isatty():
+        logger.warning(
+            "Staking required for rewards: stake at least %s $SPACE at "
+            "https://penguinbase.com/dapp/spacestaking",
+            min_amount,
+        )
+        return
+
+    from rich.panel import Panel
+    from rich.console import Console
+
+    console = Console()
+    console.print()
+    console.print(Panel(
+        f"[bold white]To earn $SPACE rewards, you must stake at least\n"
+        f"{min_amount} $SPACE before starting your node.[/bold white]\n\n"
+        "[cyan]Stake here:[/cyan]    https://penguinbase.com/dapp/spacestaking\n"
+        "[cyan]Staking guide:[/cyan] https://docs.spacecoin.org/usdspace-token/staking\n\n"
+        "[dim]Press Enter to continue...[/dim]",
+        title="[yellow]⚠ Staking Required for Rewards[/yellow]",
+        border_style="yellow",
+        padding=(1, 2),
+    ))
+    input()
+
+
 # ── Phase functions ──────────────────────────────────────────────────────────
 
 class _NodeContext:
@@ -1068,6 +1114,7 @@ def main() -> None:
         if sys.stdin.isatty():
             if not _first_run_setup():
                 sys.exit(0)
+            _show_staking_prompt()
             _run_node(settings_override=load_settings())
         else:
             print("Reset complete. Run again to reconfigure.", file=sys.stderr)
@@ -1084,9 +1131,11 @@ def main() -> None:
     if needs_setup and sys.stdin.isatty():
         if not _first_run_setup():
             sys.exit(0)
+        _show_staking_prompt()
         _run_node(settings_override=load_settings())
         return
 
+    _show_staking_prompt()
     _run_node()
 
 

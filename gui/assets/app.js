@@ -299,8 +299,10 @@ function initOnboarding() {
         passphrase, staking, collection, identityKeyHex,
       );
       if (result.ok) {
-        hideAll();
-        showStatus();
+        showStakingModal(function () {
+          hideAll();
+          showStatus();
+        });
       } else {
         // Show error inline (remove any previous error first)
         btn.parentNode.querySelectorAll("p.error").forEach(el => el.remove());
@@ -323,6 +325,38 @@ function showOnboarding() {
   hideAll();
   show("screen-onboarding");
   initOnboarding();
+}
+
+// ── Staking Modal (overlay) ──
+
+async function showStakingModal(onContinue) {
+  const overlay = $("#staking-modal-overlay");
+
+  // Fetch min staking amount from coordination API
+  try {
+    const minAmount = await window.pywebview.api.get_min_staking_amount();
+    $("#staking-modal-body").textContent =
+      `Stake at least ${minAmount} $SPACE to start operating your node.`;
+  } catch (_) {}
+
+  overlay.style.display = "flex";
+
+  // Strip old listeners
+  for (const sel of ["#btn-start-staking", "#btn-staking-skip"]) {
+    const el = $(sel);
+    el.replaceWith(el.cloneNode(true));
+  }
+
+  $("#btn-start-staking").addEventListener("click", function () {
+    window.pywebview.api.open_url("https://penguinbase.com/dapp/spacestaking");
+    overlay.style.display = "none";
+    if (onContinue) onContinue();
+  });
+
+  $("#btn-staking-skip").addEventListener("click", function () {
+    overlay.style.display = "none";
+    if (onContinue) onContinue();
+  });
 }
 
 // ── Status Dashboard ──
@@ -832,9 +866,10 @@ async function init() {
     if (needsOnboarding) {
       showOnboarding();
     } else {
-      // Already configured — start node and show status
+      // Already configured — show status, then overlay staking modal
       await window.pywebview.api.start_node();
       showStatus();
+      showStakingModal();
     }
   } catch (e) {
     // pywebview.api not ready — retry

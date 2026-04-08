@@ -192,6 +192,23 @@ class Api:
             logger.exception("Failed to save network mode")
             return {"ok": False, "error": str(exc)}
 
+    def open_url(self, url: str):
+        """Open a URL in the user's default browser."""
+        import webbrowser
+        webbrowser.open(url)
+
+    def get_min_staking_amount(self) -> int:
+        """Fetch minimum staking amount from coordination API /config endpoint."""
+        import httpx
+        from gui.config_store import _default_coordination_url
+        api_url = self._config.get("SR_COORDINATION_API_URL") or _default_coordination_url()
+        try:
+            resp = httpx.get(f"{api_url}/config", timeout=5)
+            resp.raise_for_status()
+            return resp.json().get("minimumStakingAmount", 1)
+        except Exception:
+            return 1
+
     def fresh_restart(self) -> dict:
         """Stop node, fully reset config and identity, return to onboarding.
 
