@@ -14,6 +14,7 @@
 set -euo pipefail
 
 BINARY="$1"
+BINARY_PREFIX="${BINARY_PREFIX:-}"
 PASS=0
 FAIL=0
 MOCK_API_PID=""
@@ -101,7 +102,7 @@ trap cleanup EXIT
 # ---------- Test 1: --version flag ----------
 test_version_flag() {
     log "Testing --version flag..."
-    VERSION_OUTPUT=$("$BINARY" --version 2>&1) || true
+    VERSION_OUTPUT=$(${BINARY_PREFIX} "$BINARY" --version 2>&1) || true
 
     if echo "$VERSION_OUTPUT" | grep -qF "$EXPECTED_VERSION"; then
         pass "--version reports '$EXPECTED_VERSION'"
@@ -116,7 +117,7 @@ test_port_binding() {
     export SR_NODE_PORT="$PORT_BINDING_PORT"
     log "Testing port binding on port $SR_NODE_PORT..."
 
-    "$BINARY" &
+    ${BINARY_PREFIX} "$BINARY" &
     PID=$!
     log "Started binary with PID $PID"
 
@@ -160,7 +161,7 @@ test_clean_shutdown() {
     export SR_NODE_PORT="$SHUTDOWN_PORT"
     log "Testing clean shutdown via SIGTERM on port $SR_NODE_PORT..."
 
-    "$BINARY" &
+    ${BINARY_PREFIX} "$BINARY" &
     PID=$!
     log "Started binary with PID $PID"
 

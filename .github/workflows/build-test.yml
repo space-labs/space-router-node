@@ -93,6 +93,7 @@ jobs:
           SR_UPNP_ENABLED: "false"
           SR_NODE_PORT: "19090"
           SR_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+          BINARY_PREFIX: ${{ matrix.arch_prefix }}
 
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
