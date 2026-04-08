@@ -156,6 +156,7 @@ class Api:
             "error": ns.error_message,
             "environment": env,
             "api_url": api_url,
+            "staking_status": ns.staking_status,
         }
 
     def get_build_variant(self) -> str:

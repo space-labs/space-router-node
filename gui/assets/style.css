@@ -792,6 +792,23 @@ body.has-test-banner .screen {
   line-height: 1.5;
 }
 
+/* ── Staking Status Badges ── */
+
+.staking-earning {
+  color: #4caf50;
+  font-weight: 600;
+}
+
+.staking-qualifying {
+  color: #ff9800;
+  font-weight: 600;
+}
+
+.staking-unstaked {
+  color: #f44336;
+  font-weight: 600;
+}
+
 /* ── Staking Modal Overlay ── */
 
 .staking-modal-overlay {

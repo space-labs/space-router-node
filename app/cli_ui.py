@@ -299,6 +299,8 @@ class StatusDashboard:
             return Text(f"● {s}", style="green")
         elif s == "qualifying":
             return Text(f"● {s}", style="yellow")
+        elif s == "unstaked":
+            return Text(f"● {s} — stake required", style="red")
         elif s in ("inactive", "—"):
             return Text(f"● {s}", style="dim")
         return Text(f"● {s}", style="white")

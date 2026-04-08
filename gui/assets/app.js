@@ -401,6 +401,16 @@ async function updateStatus() {
     collectionEl.textContent = truncateAddress(fullCollection) || "-";
     collectionEl.title = fullCollection;
 
+    // Staking status display
+    const stakingStatusEl = $("#staking-status");
+    const ss = status.staking_status || "—";
+    stakingStatusEl.textContent = ss === "unstaked" ? ss + " — stake required" : ss;
+    stakingStatusEl.className = "wallet-value"
+      + (ss === "earning" ? " staking-earning"
+        : ss === "qualifying" ? " staking-qualifying"
+        : ss === "unstaked" ? " staking-unstaked"
+        : "");
+
     // State-based display
     const state = status.state || "idle";
 

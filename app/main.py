@@ -619,6 +619,9 @@ async def _self_probe_loop(
                 except Exception:
                     probe_result = "probe_failed"
 
+            # Update state machine so GUI can read staking_status
+            sm.status.staking_status = staking_status
+
             if dashboard:
                 dashboard.update(
                     last_probe_result=probe_result,
