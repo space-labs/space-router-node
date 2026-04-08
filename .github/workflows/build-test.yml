@@ -31,9 +31,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             artifact: space-router-node-test-macos-arm64
-          - os: macos-15-large
+          - os: macos-13
             artifact: space-router-node-test-macos-x64
           - os: windows-latest
             artifact: space-router-node-test-windows-x64
@@ -113,9 +113,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             artifact: spacerouter-gui-test-macos-arm64
-          - os: macos-15-large
+          - os: macos-13
             artifact: spacerouter-gui-test-macos-x64
           - os: windows-latest
             artifact: spacerouter-gui-test-windows-x64
