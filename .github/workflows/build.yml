@@ -26,6 +26,7 @@ jobs:
 
   build:
     needs: test
+    environment: release
     strategy:
       fail-fast: false
       matrix:
@@ -339,6 +340,7 @@ jobs:
 
   build-gui:
     needs: test
+    environment: release
     strategy:
       fail-fast: false
       matrix:
