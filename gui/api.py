@@ -6,6 +6,7 @@ import os
 from dotenv import set_key
 
 from app.variant import BUILD_VARIANT
+from app.version import __version__
 from gui.config_store import ConfigStore
 from gui.node_manager import NodeManager
 
@@ -159,6 +160,10 @@ class Api:
             "api_url": api_url,
             "staking_status": ns.staking_status,
         }
+
+    def get_build_version(self) -> str:
+        """Return the build version string."""
+        return __version__
 
     def get_build_variant(self) -> str:
         """Return 'test' or 'production'."""

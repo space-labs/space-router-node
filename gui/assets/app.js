@@ -488,6 +488,8 @@ async function updateStatus() {
         if (status.error_code === "identity_key_locked") {
           showUnlockDialog();
           return;
+        } else if (status.error_code === "version_too_old") {
+          detail.textContent = "This version is outdated. Please download the latest update.";
         } else if (status.error_code === "ip_conflict") {
           detail.textContent = "Another node is already using this IP address. Only one node per IP is allowed.";
         } else if (status.error_code === "wallet_conflict") {
@@ -885,6 +887,13 @@ async function init() {
 
     // Determine build variant before showing any screens
     await initTestVariant();
+
+    // Display build version
+    try {
+      const version = await window.pywebview.api.get_build_version();
+      const el = document.getElementById("version-label");
+      if (el && version) el.textContent = version;
+    } catch (e) {}
 
     // Action buttons
     initFreshRestart();

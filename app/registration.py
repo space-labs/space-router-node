@@ -23,6 +23,7 @@ import httpx
 
 from app.config import Settings
 from app.identity import sign_request, sign_vouch
+from app.version import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,8 @@ async def _do_register(
 
     if settings.REFERRAL_CODE:
         payload["referral_code"] = settings.REFERRAL_CODE
+
+    payload["node_version"] = __version__
 
     url = f"{settings.COORDINATION_API_URL}/nodes/register"
     logger.info(
