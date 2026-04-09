@@ -83,30 +83,8 @@ jobs:
             mv dist/space-router-node "dist/${{ matrix.artifact }}"
           fi
 
-      - name: Smoke test (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: bash tests/e2e/smoke_test.sh "dist/${{ matrix.artifact }}"
-        env:
-          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
-          SR_PUBLIC_IP: 127.0.0.1
-          SR_UPNP_ENABLED: "false"
-          SR_NODE_PORT: "19090"
-          SR_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
-
-      - name: Smoke test (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: .\tests\e2e\smoke_test.ps1 -Binary "dist\${{ matrix.artifact }}.exe"
-        env:
-          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
-          SR_PUBLIC_IP: 127.0.0.1
-          SR_UPNP_ENABLED: "false"
-          SR_NODE_PORT: "19090"
-          SR_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
-
       # ---- Windows code signing via Azure Trusted Signing ----
-      # Sign the binary before building the installer so the installer embeds a signed binary
+      # Sign the binary before smoke test and installer so both use the signed binary
       - name: Login to Azure
         if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
         uses: azure/login@v2
@@ -132,6 +110,28 @@ jobs:
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
+
+      - name: Smoke test (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash tests/e2e/smoke_test.sh "dist/${{ matrix.artifact }}"
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+          SR_PUBLIC_IP: 127.0.0.1
+          SR_UPNP_ENABLED: "false"
+          SR_NODE_PORT: "19090"
+          SR_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\tests\e2e\smoke_test.ps1 -Binary "dist\${{ matrix.artifact }}.exe"
+        env:
+          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
+          SR_PUBLIC_IP: 127.0.0.1
+          SR_UPNP_ENABLED: "false"
+          SR_NODE_PORT: "19090"
+          SR_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
 
       # Build Windows NSIS installer with WinSW service wrapper
       - name: Download WinSW
@@ -276,20 +276,8 @@ jobs:
             --password "$APPLE_ID_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
             --wait
-
-          # Retry stapling — Apple's CDN can take time to propagate after notarytool reports Accepted
-          for attempt in 1 2 3 4 5; do
-            if xcrun stapler staple "dist/${{ matrix.artifact }}"; then
-              break
-            fi
-            if [ "$attempt" -lt 5 ]; then
-              echo "Staple attempt $attempt/5 failed, retrying in 30s..."
-              sleep 30
-            else
-              echo "Stapling failed after 5 attempts"
-              exit 1
-            fi
-          done
+          # Note: stapling is not supported for raw Mach-O binaries — only .app/.dmg/.pkg
+          # Gatekeeper will perform an online check when the binary is first run
 
       # Build .pkg from the signed+notarized binary so the payload passes Gatekeeper
       - name: Build macOS package
