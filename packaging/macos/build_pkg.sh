@@ -95,7 +95,7 @@ productbuild \
     --distribution "$STAGING/distribution.xml" \
     --resources "$SCRIPT_DIR/resources" \
     --package-path "$STAGING" \
-    "${SIGN_ARGS[@]}" \
+    ${SIGN_ARGS[@]+"${SIGN_ARGS[@]}"} \
     "$OUTPUT"
 
 echo ""
