@@ -32,6 +32,7 @@ class NodeErrorCode(enum.Enum):
     IP_CONFLICT = "ip_conflict"
     WALLET_CONFLICT = "wallet_conflict"
     API_SERVER_ERROR = "api_server_error"
+    VERSION_TOO_OLD = "version_too_old"
 
     # ── Runtime errors ──
     NODE_OFFLINE = "node_offline"
@@ -52,6 +53,7 @@ _USER_MESSAGES: dict[NodeErrorCode, str] = {
     NodeErrorCode.IP_CONFLICT: "Another node is already using this IP address. Only one node per IP is allowed.",
     NodeErrorCode.WALLET_CONFLICT: "Wallet address is already registered to another node.",
     NodeErrorCode.API_SERVER_ERROR: "Coordination server error. Retrying...",
+    NodeErrorCode.VERSION_TOO_OLD: "This version is outdated. Please download the latest update.",
     NodeErrorCode.NODE_OFFLINE: "Node went offline. Reconnecting...",
     NodeErrorCode.UNEXPECTED_ERROR: "An unexpected error occurred.",
 }
@@ -98,6 +100,13 @@ def classify_error(exc: Exception) -> NodeError:
     # ── httpx errors (registration / health check) ──
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
+        # 426 — node version below minimum required
+        if status == 426:
+            return NodeError(
+                NodeErrorCode.VERSION_TOO_OLD,
+                exc.response.text[:200],
+                cause=exc,
+            )
         # 409 — distinguish IP conflict vs wallet conflict
         if status == 409:
             body = exc.response.text[:300].lower()

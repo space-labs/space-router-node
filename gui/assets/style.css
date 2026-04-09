@@ -450,6 +450,15 @@ h2 {
   color: #e74c3c;
 }
 
+/* Version label (bottom of status dashboard) */
+.version-label {
+  color: #444;
+  font-size: 11px;
+  text-align: center;
+  margin-top: 16px;
+  letter-spacing: 0.5px;
+}
+
 /* Secondary button */
 .btn-secondary {
   width: 100%;
