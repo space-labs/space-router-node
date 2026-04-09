@@ -70,7 +70,7 @@ jobs:
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         shell: bash
         run: |
           KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
@@ -90,7 +90,7 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
-          echo "CODESIGN_IDENTITY=Developer ID Application: Gluwa ($APPLE_TEAM_ID)" >> "$GITHUB_ENV"
+          echo "CODESIGN_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
 
       - name: Freeze version into binary
         shell: bash
@@ -204,11 +204,11 @@ jobs:
         if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         shell: bash
         run: |
           codesign --force --options runtime \
-            --sign "Developer ID Application: Gluwa ($APPLE_TEAM_ID)" \
+            --sign "$APPLE_SIGNING_IDENTITY" \
             --timestamp \
             "dist/${{ matrix.artifact }}"
 
@@ -380,7 +380,7 @@ jobs:
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         shell: bash
         run: |
           KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
@@ -397,7 +397,7 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
-          echo "CODESIGN_IDENTITY=Developer ID Application: Gluwa ($APPLE_TEAM_ID)" >> "$GITHUB_ENV"
+          echo "CODESIGN_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
 
       - name: Freeze version into binary
         shell: bash
@@ -426,11 +426,11 @@ jobs:
         if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         shell: bash
         run: |
           codesign --force --deep --options runtime \
-            --sign "Developer ID Application: Gluwa ($APPLE_TEAM_ID)" \
+            --sign "$APPLE_SIGNING_IDENTITY" \
             --timestamp \
             "dist/SpaceRouter.app"
 
