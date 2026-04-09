@@ -66,9 +66,9 @@ jobs:
       # PyInstaller needs the identity to sign embedded frameworks with the
       # same Team ID as the outer binary (macOS Sequoia enforces this).
       - name: Import macOS signing certificate
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
@@ -79,7 +79,7 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security import "$RUNNER_TEMP/cert.p12" \
             -P "$APPLE_CERTIFICATE_PASSWORD" \
             -A -t cert -f pkcs12 \
@@ -201,9 +201,9 @@ jobs:
 
       # ---- macOS code signing & notarization (cert already imported above) ----
       - name: Sign macOS binary
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
         run: |
@@ -213,9 +213,9 @@ jobs:
             "dist/${{ matrix.artifact }}"
 
       - name: Notarize macOS binary
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -246,9 +246,9 @@ jobs:
             --output "dist/${{ matrix.artifact }}.pkg"
 
       - name: Sign macOS package
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
         run: |
@@ -260,9 +260,9 @@ jobs:
           fi
 
       - name: Notarize macOS package
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -376,9 +376,9 @@ jobs:
 
       # ---- macOS: import signing certificate BEFORE build ----
       - name: Import macOS signing certificate
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
@@ -388,7 +388,7 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security import "$RUNNER_TEMP/cert.p12" \
             -P "$APPLE_CERTIFICATE_PASSWORD" \
             -A -t cert -f pkcs12 \
@@ -423,9 +423,9 @@ jobs:
 
       # ---- macOS code signing & notarization (cert already imported above) ----
       - name: Sign macOS app
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
         run: |
@@ -461,9 +461,9 @@ jobs:
           fi
 
       - name: Notarize macOS DMG
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
