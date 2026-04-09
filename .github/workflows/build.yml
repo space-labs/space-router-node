@@ -230,8 +230,8 @@ jobs:
             --team-id "$APPLE_TEAM_ID" \
             --wait
 
-          # Staple the ticket
-          xcrun stapler staple "dist/${{ matrix.artifact }}"
+          # Note: stapling is not supported for raw Mach-O binaries — only .app/.dmg/.pkg
+          # Gatekeeper will perform an online notarization check when the binary is first run
 
       # Build .pkg from the signed+notarized binary so the payload passes Gatekeeper
       - name: Build macOS package
