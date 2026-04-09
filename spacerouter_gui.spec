@@ -6,6 +6,7 @@ import sys
 from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
+_codesign_identity = os.environ.get("CODESIGN_IDENTITY")
 
 # Read build version from app/_build_version.py (written by CI)
 _bundle_version = "0.1.0"
@@ -124,7 +125,7 @@ if sys.platform == "win32":
         disable_windowed_traceback=False,
         argv_emulation=False,
         target_arch=None,
-        codesign_identity=None,
+        codesign_identity=_codesign_identity,
         entitlements_file=None,
         icon="packaging/windows/SpaceRouter.ico",
     )
@@ -146,7 +147,7 @@ else:
         disable_windowed_traceback=False,
         argv_emulation=False,
         target_arch=None,
-        codesign_identity=None,
+        codesign_identity=_codesign_identity,
         entitlements_file=None,
     )
 

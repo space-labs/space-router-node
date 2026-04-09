@@ -1,9 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for SpaceRouter Home Node."""
 
+import os
+
 from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
+_codesign_identity = os.environ.get("CODESIGN_IDENTITY")
 
 hiddenimports = [
     # Conditionally imported at runtime
@@ -91,6 +94,6 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
-    codesign_identity=None,
+    codesign_identity=_codesign_identity,
     entitlements_file=None,
 )
