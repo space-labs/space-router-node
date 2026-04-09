@@ -264,6 +264,15 @@ function initOnboarding() {
     validateAddress(collectionInput, collectionError);
     validateForm();
   });
+  $("#referral-input").addEventListener("input", function () {
+    const v = this.value.trim();
+    const err = $("#referral-error");
+    if (!v || (/^[a-zA-Z0-9_-]+$/.test(v) && v.length >= 3 && v.length <= 50)) {
+      err.textContent = "";
+    } else {
+      err.textContent = "Must be 3-50 chars: letters, numbers, hyphens, underscores";
+    }
+  });
 
   // ── Form-level enable/disable ──
   function validateForm() {
