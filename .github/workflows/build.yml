@@ -254,9 +254,14 @@ jobs:
         run: |
           PKG="dist/${{ matrix.artifact }}.pkg"
           if [ -f "$PKG" ]; then
-            productsign --sign "Developer ID Installer: Gluwa ($APPLE_TEAM_ID)" \
-              "$PKG" "$PKG.signed"
-            mv "$PKG.signed" "$PKG"
+            # productsign requires a "Developer ID Installer" cert which may
+            # not be in the P12.  Fall back to an unsigned .pkg (still installable).
+            if productsign --sign "Developer ID Installer: Gluwa ($APPLE_TEAM_ID)" \
+                "$PKG" "$PKG.signed" 2>/dev/null; then
+              mv "$PKG.signed" "$PKG"
+            else
+              echo "⚠ Installer signing cert not found — .pkg will be unsigned"
+            fi
           fi
 
       - name: Notarize macOS package
