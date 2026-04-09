@@ -245,26 +245,7 @@ jobs:
             --version "${PKG_VERSION}" \
             --output "dist/${{ matrix.artifact }}.pkg"
 
-      - name: Sign macOS package
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        shell: bash
-        run: |
-          PKG="dist/${{ matrix.artifact }}.pkg"
-          if [ -f "$PKG" ]; then
-            # productsign requires a "Developer ID Installer" cert which may
-            # not be in the P12.  Fall back to an unsigned .pkg (still installable).
-            if productsign --sign "Developer ID Installer: Gluwa ($APPLE_TEAM_ID)" \
-                "$PKG" "$PKG.signed" 2>/dev/null; then
-              mv "$PKG.signed" "$PKG"
-            else
-              echo "⚠ Installer signing cert not found — .pkg will be unsigned"
-            fi
-          fi
-
-      - name: Notarize macOS package
+      - name: Sign and notarize macOS package
         if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -274,13 +255,22 @@ jobs:
         shell: bash
         run: |
           PKG="dist/${{ matrix.artifact }}.pkg"
-          if [ -f "$PKG" ]; then
+          [ -f "$PKG" ] || exit 0
+
+          # productsign requires a "Developer ID Installer" cert which may
+          # not be in the P12.  Skip notarization if signing fails.
+          if productsign --sign "Developer ID Installer: Gluwa ($APPLE_TEAM_ID)" \
+              "$PKG" "$PKG.signed" 2>/dev/null; then
+            mv "$PKG.signed" "$PKG"
+            echo "Signed .pkg — submitting for notarization..."
             xcrun notarytool submit "$PKG" \
               --apple-id "$APPLE_ID" \
               --password "$APPLE_ID_PASSWORD" \
               --team-id "$APPLE_TEAM_ID" \
               --wait
             xcrun stapler staple "$PKG"
+          else
+            echo "⚠ Installer signing cert not found — .pkg will be unsigned (skipping notarization)"
           fi
 
       - name: Clean up macOS keychain
