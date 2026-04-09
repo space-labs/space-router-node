@@ -470,9 +470,11 @@ async def _health_loop(
 
     consecutive_failures = 0
     last_cert_check = 0.0
-    last_probe_request = 0.0
 
     import time
+    # Start at current time so the first 30-min probe waits a full interval
+    # (registration already requested a probe during _phase_register).
+    last_probe_request = time.time()
     while not stop_event.is_set():
         try:
             await asyncio.wait_for(
@@ -592,7 +594,9 @@ async def _self_probe_loop(
 
     # Run first check almost immediately (5s delay for registration to settle)
     first_run = True
-    last_probe_request_time = 0.0
+    # Start at current time so first cooldown respects the registration probe
+    # (which already fired during _phase_register).
+    last_probe_request_time = _time.time()
     while not stop_event.is_set():
         delay = 5 if first_run else _SELF_PROBE_INTERVAL
         first_run = False

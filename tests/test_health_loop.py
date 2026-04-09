@@ -193,14 +193,16 @@ class TestHealthLoopProbeInterval:
                 stop_event.set()
             raise asyncio.TimeoutError()
 
-        # Time returns value large enough that interval has elapsed (>= 1800 since epoch 0.0)
-        current_time = 2000.0  # 2000 - 0.0 = 2000 >= 1800
+        # last_probe_request is initialized to time.time() (first call),
+        # so subsequent calls must be >= init + 1800 for the probe to fire.
+        init_time = 100.0
+        time_seq = iter([init_time, init_time + 1800, init_time + 1800])
 
         mock_activity = MagicMock()
         mock_activity.record_health_check = MagicMock()
 
         with patch("asyncio.wait_for", side_effect=_fake_wait_for), \
-             patch("time.time", return_value=current_time), \
+             patch("time.time", side_effect=time_seq), \
              patch("app.registration.check_node_status", new_callable=AsyncMock,
                    return_value={"status": "online", "health_score": 1.0}), \
              patch("app.registration.request_probe", new_callable=AsyncMock) as mock_probe, \
@@ -240,13 +242,16 @@ class TestSelfProbeLoopCooldown:
                 stop_event.set()
             raise asyncio.TimeoutError()
 
-        # Time > cooldown from epoch 0.0 so probe should fire
-        # last_probe_request_time starts at 0.0, time returns 500.0
-        # 500.0 - 0.0 = 500 >= 300 => probe SHOULD be called
-        current_time = 500.0
+        # last_probe_request_time is initialized to time.time() (first call),
+        # so subsequent calls must be >= init + 300 for the probe to fire.
+        init_time = 100.0
+        _time_call = [0]
+        def _fake_time():
+            _time_call[0] += 1
+            return init_time if _time_call[0] == 1 else init_time + 300
 
         with patch("asyncio.wait_for", side_effect=_fake_wait_for), \
-             patch("time.time", return_value=current_time), \
+             patch("time.time", side_effect=_fake_time), \
              patch("app.registration.check_node_status", new_callable=AsyncMock,
                    return_value={"status": "offline", "health_score": 0.1, "staking_status": "qualifying"}), \
              patch("app.registration.request_probe", new_callable=AsyncMock) as mock_probe:
