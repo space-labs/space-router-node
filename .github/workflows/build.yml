@@ -32,8 +32,6 @@ jobs:
         include:
           - os: macos-14
             artifact: space-router-node-macos-arm64
-          - os: macos-15-large
-            artifact: space-router-node-macos-x64
           - os: windows-latest
             artifact: space-router-node-windows-x64
           - os: ubuntu-latest
@@ -345,8 +343,6 @@ jobs:
         include:
           - os: macos-14
             artifact: spacerouter-gui-macos-arm64
-          - os: macos-15-large
-            artifact: spacerouter-gui-macos-x64
           - os: windows-latest
             artifact: spacerouter-gui-windows-x64
     runs-on: ${{ matrix.os }}
