@@ -26,14 +26,16 @@ jobs:
 
   build:
     needs: test
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             artifact: space-router-node-macos-arm64
-          - os: macos-15-large
-            artifact: space-router-node-macos-x64
           - os: windows-latest
             artifact: space-router-node-windows-x64
           - os: ubuntu-latest
@@ -80,6 +82,34 @@ jobs:
           else
             mv dist/space-router-node "dist/${{ matrix.artifact }}"
           fi
+
+      # ---- Windows code signing via Azure Trusted Signing ----
+      # Sign the binary before smoke test and installer so both use the signed binary
+      - name: Login to Azure
+        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        uses: azure/login@v2
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Sign Windows binary
+        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        uses: azure/trusted-signing-action@v0.5.0
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
+          files: ${{ github.workspace }}/dist/${{ matrix.artifact }}.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       - name: Smoke test (Unix)
         if: runner.os != 'Windows'
@@ -170,11 +200,27 @@ jobs:
                     "dist\${{ matrix.artifact }}-setup.exe"
           Write-Host "Built installer: dist\${{ matrix.artifact }}-setup.exe"
 
+      - name: Sign Windows installer
+        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        uses: azure/trusted-signing-action@v0.5.0
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
+          files: ${{ github.workspace }}/dist/${{ matrix.artifact }}-setup.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
       # ---- macOS code signing & notarization (skipped if secrets not set) ----
       - name: Import macOS signing certificate
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         shell: bash
         run: |
@@ -186,35 +232,37 @@ jobs:
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
           # Import certificate
-          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" \
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          echo "$APPLE_CERTIFICATE" | base64 --decode -o "$CERT_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
             -P "$APPLE_CERTIFICATE_PASSWORD" \
-            -A -t cert -f pkcs12 \
-            -k "$KEYCHAIN_PATH"
-          rm -f "$RUNNER_TEMP/cert.p12"
+            -T /usr/bin/codesign
+          rm -f "$CERT_PATH"
 
           # Add keychain to search list
-          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
       - name: Sign macOS binary
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         shell: bash
         run: |
           codesign --force --options runtime \
-            --sign "Developer ID Application: Gluwa ($APPLE_TEAM_ID)" \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            --identifier "com.gluwa.starmesh-spacerouter" \
             --timestamp \
             "dist/${{ matrix.artifact }}"
 
       - name: Notarize macOS binary
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -228,9 +276,8 @@ jobs:
             --password "$APPLE_ID_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
             --wait
-
-          # Staple the ticket
-          xcrun stapler staple "dist/${{ matrix.artifact }}"
+          # Note: stapling is not supported for raw Mach-O binaries — only .app/.dmg/.pkg
+          # Gatekeeper will perform an online check when the binary is first run
 
       # Build .pkg from the signed+notarized binary so the payload passes Gatekeeper
       - name: Build macOS package
@@ -245,9 +292,9 @@ jobs:
             --output "dist/${{ matrix.artifact }}.pkg"
 
       - name: Sign macOS package
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
         run: |
@@ -259,9 +306,9 @@ jobs:
           fi
 
       - name: Notarize macOS package
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -281,31 +328,6 @@ jobs:
         if: always() && runner.os == 'macOS' && env.KEYCHAIN_PATH != ''
         shell: bash
         run: security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
-
-      # ---- Windows code signing (skipped if secrets not set) ----
-      - name: Sign Windows binary
-        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_PFX != ''
-        env:
-          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        shell: pwsh
-        run: |
-          # Decode PFX from secret
-          $pfxBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX)
-          $pfxPath = Join-Path $env:RUNNER_TEMP "cert.pfx"
-          [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
-
-          # Find signtool
-          $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits" `
-            -Recurse -Filter "signtool.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-
-          # Sign the binary
-          & $signtool.FullName sign /f $pfxPath /p $env:WINDOWS_CERTIFICATE_PASSWORD `
-            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
-            "dist\${{ matrix.artifact }}.exe"
-
-          # Clean up
-          Remove-Item $pfxPath -Force
 
       # Build Linux packages (.deb and .rpm) via nfpm
       - name: Build Linux packages
@@ -339,14 +361,16 @@ jobs:
 
   build-gui:
     needs: test
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             artifact: spacerouter-gui-macos-arm64
-          - os: macos-15-large
-            artifact: spacerouter-gui-macos-x64
           - os: windows-latest
             artifact: spacerouter-gui-windows-x64
     runs-on: ${{ matrix.os }}
@@ -399,9 +423,9 @@ jobs:
       # ---- macOS code signing & notarization ----
       # Sign the .app BEFORE creating the .dmg so the .dmg contains the signed app.
       - name: Import macOS signing certificate
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         shell: bash
         run: |
@@ -410,25 +434,27 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" \
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          echo "$APPLE_CERTIFICATE" | base64 --decode -o "$CERT_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
             -P "$APPLE_CERTIFICATE_PASSWORD" \
-            -A -t cert -f pkcs12 \
-            -k "$KEYCHAIN_PATH"
-          rm -f "$RUNNER_TEMP/cert.p12"
-          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+            -T /usr/bin/codesign
+          rm -f "$CERT_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
       - name: Sign macOS app
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         shell: bash
         run: |
           codesign --force --deep --options runtime \
-            --sign "Developer ID Application: Gluwa ($APPLE_TEAM_ID)" \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            --identifier "com.gluwa.starmesh-spacerouter" \
             --timestamp \
             "dist/SpaceRouter.app"
 
@@ -459,9 +485,9 @@ jobs:
           fi
 
       - name: Notarize macOS DMG
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -496,23 +522,33 @@ jobs:
             exit 1
           }
 
-      # ---- Windows code signing ----
-      - name: Sign Windows binary
-        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_PFX != ''
+      # ---- Windows code signing via Azure Trusted Signing ----
+      - name: Login to Azure
+        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        uses: azure/login@v2
         env:
-          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        shell: pwsh
-        run: |
-          $pfxBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX)
-          $pfxPath = Join-Path $env:RUNNER_TEMP "cert.pfx"
-          [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
-          $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits" `
-            -Recurse -Filter "signtool.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          & $signtool.FullName sign /f $pfxPath /p $env:WINDOWS_CERTIFICATE_PASSWORD `
-            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
-            "dist\${{ matrix.artifact }}.exe"
-          Remove-Item $pfxPath -Force
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Sign Windows binary
+        if: runner.os == 'Windows' && env.AZURE_CLIENT_ID != ''
+        uses: azure/trusted-signing-action@v0.5.0
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
+          files-folder: dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       - uses: actions/upload-artifact@v4
         with:
