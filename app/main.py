@@ -470,6 +470,7 @@ async def _health_loop(
 
     consecutive_failures = 0
     last_cert_check = 0.0
+    last_probe_request = 0.0
 
     import time
     while not stop_event.is_set():
@@ -531,10 +532,13 @@ async def _health_loop(
                     sm.set_cert_warning(False)
 
         # Periodic probe request (every 30 min, non-critical)
-        try:
-            await request_probe(ctx.http, ctx.s, ctx.node_id, identity_key=ctx.identity_key)
-        except Exception:
-            pass  # non-critical
+        now = time.time()
+        if now - last_probe_request >= _PROBE_REQUEST_INTERVAL:
+            last_probe_request = now
+            try:
+                await request_probe(ctx.http, ctx.s, ctx.node_id, identity_key=ctx.identity_key)
+            except Exception:
+                pass  # non-critical
 
 
 async def _status_summary_loop(
@@ -567,6 +571,7 @@ async def _status_summary_loop(
 
 # Self-probe interval — more frequent than health checks to catch bore disconnects fast
 _SELF_PROBE_INTERVAL = 60  # 1 minute
+_SELF_PROBE_REQUEST_COOLDOWN = 300  # 5 min — matches server rate limit
 
 
 async def _self_probe_loop(
@@ -587,6 +592,7 @@ async def _self_probe_loop(
 
     # Run first check almost immediately (5s delay for registration to settle)
     first_run = True
+    last_probe_request_time = 0.0
     while not stop_event.is_set():
         delay = 5 if first_run else _SELF_PROBE_INTERVAL
         first_run = False
@@ -613,11 +619,16 @@ async def _self_probe_loop(
                     "Self-probe: coordination reports status='%s' health_score=%.1f — requesting probe",
                     status, health_score,
                 )
-                try:
-                    await request_probe(ctx.http, ctx.s, ctx.node_id, identity_key=ctx.identity_key)
-                    probe_result = "probe_requested"
-                except Exception:
-                    probe_result = "probe_failed"
+                now = _time.time()
+                if now - last_probe_request_time >= _SELF_PROBE_REQUEST_COOLDOWN:
+                    last_probe_request_time = now
+                    try:
+                        await request_probe(ctx.http, ctx.s, ctx.node_id, identity_key=ctx.identity_key)
+                        probe_result = "probe_requested"
+                    except Exception:
+                        probe_result = "probe_failed"
+                else:
+                    probe_result = "cooldown"
 
             # Update state machine so GUI can read staking_status
             sm.status.staking_status = staking_status

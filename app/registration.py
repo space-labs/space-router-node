@@ -264,8 +264,13 @@ async def request_probe(
     node_id: str,
     *,
     identity_key: str,
-) -> None:
-    """Request a health probe from the Coordination API (signed)."""
+) -> bool:
+    """Request a health probe from the Coordination API (signed).
+
+    Returns ``True`` when the probe was accepted (200) or the node is
+    already online (400).  Returns ``False`` on rate-limit (429), server
+    error, or network failure — callers can use this to back off.
+    """
     signature, timestamp = sign_request(identity_key, "request_probe", node_id)
 
     url = f"{settings.COORDINATION_API_URL}/nodes/{node_id}/request-probe"
@@ -277,12 +282,18 @@ async def request_probe(
         }, timeout=10.0)
         if resp.status_code == 200:
             logger.info("Health probe requested for node %s — waiting for verification", node_id)
-        elif resp.status_code == 400:
+            return True
+        if resp.status_code == 400:
             logger.info("Probe request returned 400 (node may already be online): %s", resp.text)
-        else:
-            logger.warning("Probe request failed: %s %s", resp.status_code, resp.text)
+            return True
+        if resp.status_code == 429:
+            logger.warning("Probe request rate-limited (429) for node %s", node_id)
+            return False
+        logger.warning("Probe request failed: %s %s", resp.status_code, resp.text)
+        return False
     except Exception as exc:
         logger.warning("Failed to request probe for node %s: %s", node_id, exc)
+        return False
 
 
 async def check_node_status(
