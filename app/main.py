@@ -369,6 +369,7 @@ async def _phase_init(ctx: _NodeContext) -> None:
     if not ctx.staking_address:
         ctx.staking_address = ctx.identity_address
         ctx.wallet_address = ctx.identity_address
+        s.STAKING_ADDRESS = ctx.identity_address   # sync for proxy_handler challenge response
         logger.info("Staking address (identity fallback): %s", ctx.staking_address)
 
     # 5. TLS certificates
