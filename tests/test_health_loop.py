@@ -114,6 +114,9 @@ def _make_ctx(settings):
     ctx.node_id = TEST_NODE_ID
     ctx.identity_key = TEST_IDENTITY_KEY
     ctx.ssl_ctx = None
+    # Probe coordination timestamp (shared between _health_loop and _self_probe_loop).
+    # Use a real attribute so getattr() with a default works as expected.
+    ctx._last_probe_request_time = 0
     return ctx
 
 
@@ -321,4 +324,107 @@ class TestSelfProbeLoopCooldown:
 
             await _self_probe_loop(ctx, sm, stop_event)
 
+            assert mock_probe.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# _self_probe_loop backoff on 429
+# ---------------------------------------------------------------------------
+
+
+class TestSelfProbeLoopBackoff:
+    """Verify _self_probe_loop applies exponential backoff on rate-limited responses."""
+
+    @pytest.mark.asyncio
+    async def test_backoff_on_rejected_probe(self, probe_settings):
+        """When request_probe returns False (429), probe_result should be 'rate_limited'."""
+        from app.main import _self_probe_loop
+
+        ctx = _make_ctx(probe_settings)
+        sm = _make_sm()
+        stop_event = asyncio.Event()
+        dashboard = MagicMock()
+
+        call_count = 0
+
+        async def _fake_wait_for(coro, *, timeout):
+            nonlocal call_count
+            call_count += 1
+            coro.close()
+            # Stop after first real iteration (first_run delay + one check)
+            if call_count >= 2:
+                stop_event.set()
+            raise asyncio.TimeoutError()
+
+        init_time = 100.0
+        _time_call = [0]
+        def _fake_time():
+            _time_call[0] += 1
+            return init_time if _time_call[0] == 1 else init_time + 300
+
+        with patch("asyncio.wait_for", side_effect=_fake_wait_for), \
+             patch("time.time", side_effect=_fake_time), \
+             patch("app.registration.check_node_status", new_callable=AsyncMock,
+                   return_value={"status": "offline", "health_score": 0.1, "staking_status": "qualifying"}), \
+             patch("app.registration.request_probe", new_callable=AsyncMock, return_value=False):
+
+            await _self_probe_loop(ctx, sm, stop_event, dashboard)
+
+            # The first iteration's dashboard update should show "rate_limited"
+            # (second iteration sees doubled cooldown and reports "cooldown")
+            probe_results = [
+                call.kwargs["last_probe_result"]
+                for call in dashboard.update.call_args_list
+                if "last_probe_result" in call.kwargs
+            ]
+            assert "rate_limited" in probe_results
+
+
+# ---------------------------------------------------------------------------
+# _health_loop probe coordination
+# ---------------------------------------------------------------------------
+
+
+class TestHealthLoopProbeCoordination:
+    """Verify _health_loop skips probe if _self_probe_loop recently requested one."""
+
+    @pytest.mark.asyncio
+    async def test_health_loop_skips_probe_when_self_probe_recent(self, probe_settings):
+        """request_probe should NOT be called if ctx._last_probe_request_time is recent."""
+        from app.main import _health_loop, _PROBE_REQUEST_INTERVAL
+
+        ctx = _make_ctx(probe_settings)
+        sm = _make_sm()
+        stop_event = asyncio.Event()
+
+        call_count = 0
+
+        async def _fake_wait_for(coro, *, timeout):
+            nonlocal call_count
+            call_count += 1
+            coro.close()
+            if call_count >= 1:
+                stop_event.set()
+            raise asyncio.TimeoutError()
+
+        # Set up time so _PROBE_REQUEST_INTERVAL has elapsed...
+        init_time = 100.0
+        check_time = init_time + _PROBE_REQUEST_INTERVAL
+        # ...but self-probe loop recently requested a probe
+        ctx._last_probe_request_time = check_time - 60  # 60s ago (within cooldown)
+
+        mock_activity = MagicMock()
+        mock_activity.record_health_check = MagicMock()
+
+        with patch("asyncio.wait_for", side_effect=_fake_wait_for), \
+             patch("time.time", side_effect=iter([init_time, check_time, check_time])), \
+             patch("app.registration.check_node_status", new_callable=AsyncMock,
+                   return_value={"status": "online", "health_score": 1.0}), \
+             patch("app.registration.request_probe", new_callable=AsyncMock) as mock_probe, \
+             patch("app.tls.check_certificate_expiry", return_value=None), \
+             patch("app.node_logging.activity", mock_activity):
+
+            await _health_loop(ctx, sm, stop_event)
+
+            # Probe should NOT be called because self-probe is recent
             assert mock_probe.call_count == 0

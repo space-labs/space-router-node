@@ -75,7 +75,91 @@ def _do_upnp_mapping(
         )
         return external_ip, external_port
     except Exception as exc:
+        exc_str = str(exc).lower()
+        if "conflictinmappingentry" in exc_str or "718" in exc_str:
+            logger.info(
+                "UPnP port %d already mapped — checking existing mapping",
+                external_port,
+            )
+            return _handle_upnp_conflict(
+                u, external_ip, external_port,
+                internal_ip, internal_port,
+                description, lease_duration,
+            )
         logger.warning("UPnP addportmapping failed: %s", exc)
+        return None
+
+
+def _handle_upnp_conflict(
+    u,  # miniupnpc.UPnP instance
+    external_ip: str,
+    external_port: int,
+    internal_ip: str,
+    internal_port: int,
+    description: str,
+    lease_duration: int,
+) -> tuple[str, int] | None:
+    """Handle a UPnP ConflictInMappingEntry by reusing or replacing the mapping."""
+    try:
+        existing = u.getspecificportmapping(external_port, "TCP")
+    except Exception as exc:
+        logger.warning("UPnP getspecificportmapping failed: %s", exc)
+        return None
+
+    if existing is None:
+        # Mapping vanished between addportmapping and getspecificportmapping —
+        # retry the add once.
+        logger.info("Existing UPnP mapping disappeared — retrying addportmapping")
+        try:
+            u.addportmapping(
+                external_port, "TCP",
+                internal_ip, internal_port,
+                description, "", lease_duration,
+            )
+            logger.info(
+                "UPnP port mapping created on retry: %s:%d -> %s:%d",
+                external_ip, external_port, internal_ip, internal_port,
+            )
+            return external_ip, external_port
+        except Exception as exc2:
+            logger.warning("UPnP addportmapping retry failed: %s", exc2)
+            return None
+
+    # miniupnpc returns (internalClient, internalPort, desc, enabled, leaseDuration)
+    existing_ip = existing[0] if isinstance(existing, (tuple, list)) and existing else None
+
+    if existing_ip == internal_ip:
+        # Mapping already points to us — reuse it (common dual-launch scenario)
+        logger.info(
+            "UPnP port %d already mapped to this host (%s) — reusing",
+            external_port, internal_ip,
+        )
+        return external_ip, external_port
+
+    # Mapping belongs to a different internal IP — delete and re-create
+    logger.info(
+        "UPnP port %d mapped to different host (%s != %s) — replacing",
+        external_port, existing_ip, internal_ip,
+    )
+    try:
+        u.deleteportmapping(external_port, "TCP")
+    except Exception as exc:
+        logger.warning("UPnP deleteportmapping failed: %s", exc)
+        return None
+
+    try:
+        u.addportmapping(
+            external_port, "TCP",
+            internal_ip, internal_port,
+            description, "", lease_duration,
+        )
+        logger.info(
+            "UPnP port mapping replaced: %s:%d -> %s:%d (lease=%ds)",
+            external_ip, external_port, internal_ip, internal_port, lease_duration,
+        )
+        return external_ip, external_port
+    except Exception as exc:
+        logger.warning("UPnP addportmapping after delete failed: %s", exc)
         return None
 
 

@@ -534,12 +534,20 @@ async def _health_loop(
                 else:
                     sm.set_cert_warning(False)
 
-        # Periodic probe request (every 30 min, non-critical)
+        # Periodic probe request (every 30 min, non-critical).
+        # Skip if _self_probe_loop recently requested one.
         now = time.time()
-        if now - last_probe_request >= _PROBE_REQUEST_INTERVAL:
+        last_global = getattr(ctx, "_last_probe_request_time", 0)
+        if (now - last_probe_request >= _PROBE_REQUEST_INTERVAL
+                and now - last_global >= _SELF_PROBE_REQUEST_COOLDOWN):
             last_probe_request = now
             try:
-                await request_probe(ctx.http, ctx.s, ctx.node_id, identity_key=ctx.identity_key)
+                accepted = await request_probe(
+                    ctx.http, ctx.s, ctx.node_id,
+                    identity_key=ctx.identity_key,
+                )
+                if accepted:
+                    ctx._last_probe_request_time = now
             except Exception:
                 pass  # non-critical
 
@@ -575,6 +583,7 @@ async def _status_summary_loop(
 # Self-probe interval — more frequent than health checks to catch bore disconnects fast
 _SELF_PROBE_INTERVAL = 60  # 1 minute
 _SELF_PROBE_REQUEST_COOLDOWN = 300  # 5 min — matches server rate limit
+_SELF_PROBE_BACKOFF_CAP = 1800  # 30 min max backoff on consecutive 429s
 
 
 async def _self_probe_loop(
@@ -598,6 +607,7 @@ async def _self_probe_loop(
     # Start at current time so first cooldown respects the registration probe
     # (which already fired during _phase_register).
     last_probe_request_time = _time.time()
+    current_cooldown = _SELF_PROBE_REQUEST_COOLDOWN
     while not stop_event.is_set():
         delay = 5 if first_run else _SELF_PROBE_INTERVAL
         first_run = False
@@ -625,11 +635,28 @@ async def _self_probe_loop(
                     status, health_score,
                 )
                 now = _time.time()
-                if now - last_probe_request_time >= _SELF_PROBE_REQUEST_COOLDOWN:
-                    last_probe_request_time = now
+                if now - last_probe_request_time >= current_cooldown:
                     try:
-                        await request_probe(ctx.http, ctx.s, ctx.node_id, identity_key=ctx.identity_key)
-                        probe_result = "probe_requested"
+                        accepted = await request_probe(
+                            ctx.http, ctx.s, ctx.node_id,
+                            identity_key=ctx.identity_key,
+                        )
+                        if accepted:
+                            last_probe_request_time = now
+                            probe_result = "probe_requested"
+                            current_cooldown = _SELF_PROBE_REQUEST_COOLDOWN
+                            ctx._last_probe_request_time = now
+                        else:
+                            # 429 or server error — exponential backoff
+                            probe_result = "rate_limited"
+                            current_cooldown = min(
+                                current_cooldown * 2,
+                                _SELF_PROBE_BACKOFF_CAP,
+                            )
+                            logger.info(
+                                "Probe request not accepted — backing off to %ds",
+                                current_cooldown,
+                            )
                     except Exception:
                         probe_result = "probe_failed"
                 else:
@@ -890,23 +917,104 @@ async def _run(
             if sm.state == NodeState.RECONNECTING:
                 logger.warning("Connection lost -- attempting reconnection...")
                 activity.record_reconnect()
-                # Cancel health task if still running
-                if health_task and not health_task.done():
-                    health_task.cancel()
+
+                # Cancel ALL background tasks during reconnection
+                for _tname, _task in [
+                    ("health", health_task), ("probe", probe_task),
+                    ("status", status_task), ("renewal", renewal_task),
+                ]:
+                    if _task is not None and not _task.done():
+                        _task.cancel()
+                        try:
+                            await _task
+                        except asyncio.CancelledError:
+                            pass
+
+                from app.registration import check_node_status
 
                 # Retry registration while server stays up
                 while not stop_event.is_set() and sm.state == NodeState.RECONNECTING:
                     try:
-                        await _phase_register(ctx)
-                        sm.set_node_id(ctx.node_id)
-                        # Rebind server with mTLS if applicable
-                        if ctx.s.MTLS_ENABLED and os.path.isfile(ctx.s.GATEWAY_CA_CERT_PATH):
+                        # Check if the coordination API already considers
+                        # us healthy (e.g. transient network blip resolved).
+                        skip_registration = False
+                        if ctx.node_id:
                             try:
-                                await _rebind_server_mtls(ctx)
+                                node_data = await check_node_status(
+                                    ctx.http, ctx.s, ctx.node_id,
+                                    identity_key=ctx.identity_key,
+                                )
+                                api_status = node_data.get("status", "unknown")
+                                api_health = node_data.get("health_score", 0)
+                                if api_status in ("online", "active") and api_health >= 0.5:
+                                    logger.info(
+                                        "Node already healthy on coordination API "
+                                        "(status=%s, health=%.1f) — skipping re-registration",
+                                        api_status, api_health,
+                                    )
+                                    skip_registration = True
                             except Exception:
-                                logger.warning("mTLS server rebind failed", exc_info=True)
+                                pass  # fall through to re-registration
+
+                        if not skip_registration:
+                            # Retry UPnP if it failed at startup
+                            if ctx.s.UPNP_ENABLED and ctx.upnp_endpoint is None:
+                                from app.upnp import setup_upnp_mapping
+                                upnp_result = await setup_upnp_mapping(
+                                    ctx.s.NODE_PORT,
+                                    lease_duration=ctx.s.UPNP_LEASE_DURATION,
+                                )
+                                if upnp_result:
+                                    ctx.upnp_endpoint = upnp_result
+                                    logger.info(
+                                        "UPnP mapping recovered: %s:%d",
+                                        upnp_result[0], upnp_result[1],
+                                    )
+
+                            await _phase_register(ctx)
+                            sm.set_node_id(ctx.node_id)
+                            if ctx.s.MTLS_ENABLED and os.path.isfile(ctx.s.GATEWAY_CA_CERT_PATH):
+                                try:
+                                    await _rebind_server_mtls(ctx)
+                                except Exception:
+                                    logger.warning("mTLS server rebind failed", exc_info=True)
+
                         _report(NodeState.RUNNING, f"Reconnected (Node ID: {ctx.node_id[:12]}...)")
                         logger.info("Reconnected successfully")
+
+                        # Recreate background tasks
+                        if ctx.upnp_endpoint and s.UPNP_LEASE_DURATION > 0:
+                            from app.upnp import renew_upnp_mapping
+
+                            async def _renew_loop() -> None:
+                                interval = max(s.UPNP_LEASE_DURATION // 2, 60)
+                                while True:
+                                    await asyncio.sleep(interval)
+                                    ok = await renew_upnp_mapping(
+                                        s.NODE_PORT, ctx.upnp_endpoint[1],
+                                        s.UPNP_LEASE_DURATION,
+                                    )
+                                    if ok:
+                                        logger.debug("UPnP lease renewed")
+                                    else:
+                                        logger.warning("UPnP lease renewal failed")
+
+                            renewal_task = asyncio.create_task(_renew_loop())
+                        else:
+                            renewal_task = None
+
+                        if dashboard:
+                            status_task = asyncio.create_task(
+                                _dashboard_loop(ctx, sm, stop_event, dashboard)
+                            )
+                        else:
+                            status_task = asyncio.create_task(
+                                _status_summary_loop(ctx, stop_event, _STATUS_INTERVAL)
+                            )
+                        probe_task = asyncio.create_task(
+                            _self_probe_loop(ctx, sm, stop_event, dashboard)
+                        )
+
                         # Restart health loop
                         health_task = asyncio.create_task(_health_loop(ctx, sm, stop_event))
                         done, pending = await asyncio.wait(
@@ -915,6 +1023,21 @@ async def _run(
                         )
                         for task in pending:
                             task.cancel()
+
+                        # If health loop exits again, cancel tasks for next
+                        # reconnection attempt.
+                        if sm.state == NodeState.RECONNECTING:
+                            for _tname, _task in [
+                                ("probe", probe_task), ("status", status_task),
+                                ("renewal", renewal_task),
+                            ]:
+                                if _task is not None and not _task.done():
+                                    _task.cancel()
+                                    try:
+                                        await _task
+                                    except asyncio.CancelledError:
+                                        pass
+
                     except Exception as exc:
                         error = classify_error(exc) if not isinstance(exc, NodeError) else exc
                         delay = sm.handle_error(error, NodeState.RECONNECTING)
