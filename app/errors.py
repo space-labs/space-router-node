@@ -143,11 +143,19 @@ def classify_error(exc: Exception) -> NodeError:
                 cause=exc,
             )
         if status in (400, 401, 403):
-            return NodeError(
+            server_detail = ""
+            try:
+                server_detail = exc.response.json().get("detail", "")
+            except Exception:
+                pass
+            err = NodeError(
                 NodeErrorCode.REGISTRATION_REJECTED,
-                f"HTTP {status}: {exc.response.text[:200]}",
+                f"HTTP {status}: {server_detail or exc.response.text[:200]}",
                 cause=exc,
             )
+            if server_detail:
+                err.user_message = server_detail
+            return err
         if status >= 500:
             return NodeError(
                 NodeErrorCode.API_SERVER_ERROR,
