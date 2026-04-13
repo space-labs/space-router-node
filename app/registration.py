@@ -57,8 +57,9 @@ async def detect_public_ip(http_client: httpx.AsyncClient) -> str:
                 logger.info("Detected public IP: %s (via %s)", ip, url)
                 return ip
         except Exception as exc:
-            logger.debug("IP detection failed via %s: %s", url, exc)
+            logger.warning("IP detection failed via %s: %s", url, exc)
 
+    logger.error("Public IP detection failed: all %d services unreachable", len(_IP_SERVICES))
     raise RuntimeError("Failed to detect public IP from all services")
 
 
@@ -171,7 +172,13 @@ async def _do_register(
     )
 
     # Request a health probe so the Coordination API can verify us
-    await request_probe(http_client, settings, node_id, identity_key=identity_key)
+    probe_ok = await request_probe(http_client, settings, node_id, identity_key=identity_key)
+    if not probe_ok:
+        logger.warning(
+            "Initial health probe request failed for node %s — "
+            "node is registered but may take longer to come online",
+            node_id,
+        )
 
     return node_id, gateway_ca_cert
 
