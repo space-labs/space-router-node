@@ -41,6 +41,8 @@ class NodeErrorCode(enum.Enum):
     STAKING_LOCKED = "staking_locked"
     ANONYMOUS_IP = "anonymous_ip"
     ENDPOINT_UNREACHABLE = "endpoint_unreachable"
+    RATE_LIMITED = "rate_limited"
+    CONNECTION_LOST = "connection_lost"
 
     # ── Runtime errors ──
     NODE_OFFLINE = "node_offline"
@@ -56,7 +58,7 @@ _USER_MESSAGES: dict[NodeErrorCode, str] = {
     NodeErrorCode.PORT_IN_USE: "Port is already in use. Retrying...",
     NodeErrorCode.PORT_PERMISSION: "Permission denied for port. Try a port above 1024.",
     NodeErrorCode.BIND_ERROR: "Cannot start server.",
-    NodeErrorCode.NETWORK_UNREACHABLE: "Cannot reach coordination server. Retrying...",
+    NodeErrorCode.NETWORK_UNREACHABLE: "Cannot reach coordination server. Check your internet connection.",
     NodeErrorCode.REGISTRATION_REJECTED: "Registration rejected by server. Check wallet and environment.",
     NodeErrorCode.IP_CONFLICT: "Another node is already using this IP address. Only one node per IP is allowed.",
     NodeErrorCode.WALLET_CONFLICT: "Wallet address is already registered to another node.",
@@ -68,6 +70,8 @@ _USER_MESSAGES: dict[NodeErrorCode, str] = {
     NodeErrorCode.STAKING_LOCKED: "Staking account is locked. Unlock your stake on-chain.",
     NodeErrorCode.ANONYMOUS_IP: "Anonymous IP detected. VPN, proxy, and Tor connections are not allowed.",
     NodeErrorCode.ENDPOINT_UNREACHABLE: "Coordination server cannot reach this node. Retrying...",
+    NodeErrorCode.RATE_LIMITED: "Too many requests. Waiting before retry...",
+    NodeErrorCode.CONNECTION_LOST: "Connection to coordination server interrupted. Retrying...",
     NodeErrorCode.NODE_OFFLINE: "Node went offline. Reconnecting...",
     NodeErrorCode.UNEXPECTED_ERROR: "An unexpected error occurred.",
 }
@@ -80,6 +84,8 @@ _TRANSIENT_CODES = frozenset({
     NodeErrorCode.IP_CLASSIFICATION_UNAVAILABLE,
     NodeErrorCode.TIMESTAMP_EXPIRED,
     NodeErrorCode.ENDPOINT_UNREACHABLE,
+    NodeErrorCode.RATE_LIMITED,
+    NodeErrorCode.CONNECTION_LOST,
 })
 
 
@@ -110,6 +116,17 @@ def _extract_server_detail(exc: httpx.HTTPStatusError) -> str:
 
 def classify_error(exc: Exception) -> NodeError:
     """Map a raw exception to a classified NodeError."""
+
+    # ── ConnectionRefusedError / ConnectionResetError ──
+    # Check BEFORE OSError since these are OSError subclasses but indicate
+    # coordination API issues, not local port binding problems.
+    if isinstance(exc, ConnectionRefusedError):
+        logger.warning("Error classified: API_SERVER_ERROR (connection refused): %s", exc)
+        return NodeError(NodeErrorCode.API_SERVER_ERROR, str(exc), cause=exc)
+
+    if isinstance(exc, ConnectionResetError):
+        logger.warning("Error classified: CONNECTION_LOST (connection reset): %s", exc)
+        return NodeError(NodeErrorCode.CONNECTION_LOST, str(exc), cause=exc)
 
     # ── OSError (port binding) ──
     if isinstance(exc, OSError):
@@ -261,12 +278,21 @@ def classify_error(exc: Exception) -> NodeError:
                 err.user_message = server_detail
             return err
 
-        # 429, 408 — transient rate-limit or timeout
-        if status in (429, 408):
-            logger.warning("Error classified: NETWORK_UNREACHABLE (HTTP %d transient)", status)
+        # 429 — rate limited (server IS reachable, just throttling)
+        if status == 429:
+            logger.warning("Error classified: RATE_LIMITED (HTTP 429)")
             return NodeError(
-                NodeErrorCode.NETWORK_UNREACHABLE,
-                f"HTTP {status}: transient",
+                NodeErrorCode.RATE_LIMITED,
+                "HTTP 429: rate limited",
+                cause=exc,
+            )
+
+        # 408 — server-side request timeout
+        if status == 408:
+            logger.warning("Error classified: API_SERVER_ERROR (HTTP 408 timeout)")
+            return NodeError(
+                NodeErrorCode.API_SERVER_ERROR,
+                "HTTP 408: server request timeout",
                 cause=exc,
             )
 
@@ -287,17 +313,18 @@ def classify_error(exc: Exception) -> NodeError:
             cause=exc,
         )
 
+    # ── Connection-level errors ──
+    # ConnectError / ConnectTimeout: cannot establish connection at all
+    # (DNS failure, no internet, firewall blocking)
     if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
         logger.warning("Error classified: NETWORK_UNREACHABLE (connect error): %s", exc)
         return NodeError(NodeErrorCode.NETWORK_UNREACHABLE, str(exc), cause=exc)
 
+    # TimeoutException (non-connect) / NetworkError (non-connect): connected
+    # but communication failed (read timeout, write error, pool timeout)
     if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
-        logger.warning("Error classified: NETWORK_UNREACHABLE (timeout/network): %s", exc)
-        return NodeError(NodeErrorCode.NETWORK_UNREACHABLE, str(exc), cause=exc)
-
-    if isinstance(exc, (ConnectionRefusedError, ConnectionResetError)):
-        logger.warning("Error classified: NETWORK_UNREACHABLE (connection refused/reset): %s", exc)
-        return NodeError(NodeErrorCode.NETWORK_UNREACHABLE, str(exc), cause=exc)
+        logger.warning("Error classified: CONNECTION_LOST (timeout/network): %s", exc)
+        return NodeError(NodeErrorCode.CONNECTION_LOST, str(exc), cause=exc)
 
     # ── ValueError (wallet validation, key parsing) ──
     if isinstance(exc, ValueError):
