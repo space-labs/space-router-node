@@ -484,18 +484,32 @@ async function updateStatus() {
       case "error_permanent":
         dot.className = "dot dot-stopped";
         text.textContent = "Error";
-        // Use error_code for user-friendly messages
+        // Use error_code for user-friendly messages.
+        // For codes where the server provides a specific detail (e.g. exact stake
+        // amounts), prefer status.error_message over canned text.
         if (status.error_code === "identity_key_locked") {
           showUnlockDialog();
           return;
         } else if (status.error_code === "version_too_old") {
-          detail.textContent = "This version is outdated. Please download the latest update.";
+          detail.textContent = status.error_message || "This version is outdated. Please download the latest update.";
         } else if (status.error_code === "ip_conflict") {
-          detail.textContent = "Another node is already using this IP address. Only one node per IP is allowed.";
+          detail.textContent = status.error_message || "Another node is already using this IP address. Only one node per IP is allowed.";
         } else if (status.error_code === "wallet_conflict") {
-          detail.textContent = "Wallet address is already registered to another node.";
+          detail.textContent = status.error_message || "Wallet address is already registered to another node.";
         } else if (status.error_code === "registration_rejected") {
-          detail.textContent = "Registration rejected. Check your staking balance and wallet address.";
+          detail.textContent = status.error_message || "Registration rejected. Check your staking balance and wallet address.";
+        } else if (status.error_code === "staking_insufficient") {
+          detail.textContent = status.error_message || "Insufficient SPACE staked. Check your staking balance.";
+        } else if (status.error_code === "staking_locked") {
+          detail.textContent = status.error_message || "Staking account is locked. Unlock your stake on-chain.";
+        } else if (status.error_code === "anonymous_ip") {
+          detail.textContent = status.error_message || "Anonymous IP detected. VPN, proxy, and Tor connections are not allowed.";
+        } else if (status.error_code === "ip_classification_unavailable") {
+          detail.textContent = status.error_message || "IP classification service temporarily unavailable.";
+        } else if (status.error_code === "timestamp_expired") {
+          detail.textContent = status.error_message || "Request timestamp expired. Check your system clock.";
+        } else if (status.error_code === "endpoint_unreachable") {
+          detail.textContent = status.error_message || "Coordination server cannot reach this node.";
         } else if (status.error_code === "network_unreachable") {
           detail.textContent = "Cannot reach coordination server. Check your internet connection.";
         } else if (status.error_code === "invalid_wallet") {

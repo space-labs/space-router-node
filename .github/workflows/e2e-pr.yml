@@ -1,21 +1,11 @@
-name: "Staging E2E Health Check (PR)"
+name: "PR Check"
 
 on:
   pull_request:
     branches: [main]
 
-concurrency:
-  group: staging-deploy
-  cancel-in-progress: false
-
 env:
   PYTHON_VERSION: "3.12"
-  STAGING_NODE_IP: "159.223.44.4"
-  STAGING_NODE_PORT: "9090"
-  COORDINATION_API_URL: "https://coordination.spacerouter.org"
-  GATEWAY_HOST: "gateway.spacerouter.org"
-  GATEWAY_HTTP_PORT: "8080"
-  GATEWAY_SOCKS5_PORT: "1080"
 
 jobs:
   unit-tests:
@@ -30,15 +20,53 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: pytest tests/ -v
 
+  # Lightweight build check — single platform (Linux), no signing, no
+  # installers. Catches PyInstaller/import breakage without burning macOS
+  # or Windows runner minutes. Full multi-platform build runs on merge.
+  build-check:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Freeze version into binary
+        run: |
+          echo 'BUILD_VERSION = "v0.0.0-pr.${{ github.event.number }}"' > app/_build_version.py
+          echo 'BUILD_VARIANT = "test"' > app/_build_variant.py
+
+      - name: Build binary
+        run: pyinstaller homenode.spec
+
+      - name: Smoke test
+        run: bash tests/e2e/smoke_test.sh dist/space-router-node
+        env:
+          EXPECTED_VERSION: "v0.0.0-pr.${{ github.event.number }}"
+          SR_PUBLIC_IP: 127.0.0.1
+          SR_UPNP_ENABLED: "false"
+          SR_NODE_PORT: "19090"
+          SR_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
+
   e2e-tests:
-    # NOTE: This job tests the *currently deployed* staging node, not the PR
-    # code. It gates PRs on staging health so that merges don't land while
-    # the environment is broken. PR-specific code is validated by unit-tests.
+    # Tests the *currently deployed* staging node, not the PR code.
+    # Gates PRs on staging health so merges don't land while the
+    # environment is broken. PR code is validated by unit-tests + build-check.
     needs: unit-tests
     # Skip for fork PRs — secrets are unavailable and gateway tests would
     # produce confusing auth warnings.
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    concurrency:
+      group: staging-e2e
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
@@ -54,10 +82,10 @@ jobs:
         run: python tests/e2e/staging_e2e_test.py
         timeout-minutes: 5
         env:
-          STAGING_NODE_IP: ${{ env.STAGING_NODE_IP }}
-          STAGING_NODE_PORT: ${{ env.STAGING_NODE_PORT }}
-          COORDINATION_API_URL: ${{ env.COORDINATION_API_URL }}
-          GATEWAY_HOST: ${{ env.GATEWAY_HOST }}
-          GATEWAY_HTTP_PORT: ${{ env.GATEWAY_HTTP_PORT }}
-          GATEWAY_SOCKS5_PORT: ${{ env.GATEWAY_SOCKS5_PORT }}
+          STAGING_NODE_IP: "159.223.44.4"
+          STAGING_NODE_PORT: "9090"
+          COORDINATION_API_URL: "https://coordination.spacerouter.org"
+          GATEWAY_HOST: "gateway.spacerouter.org"
+          GATEWAY_HTTP_PORT: "8080"
+          GATEWAY_SOCKS5_PORT: "1080"
           SR_API_KEY: ${{ secrets.SR_STAGING_API_KEY }}
