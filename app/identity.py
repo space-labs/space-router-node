@@ -20,6 +20,8 @@ If a plaintext file exists and a passphrase is supplied on a subsequent run,
 the file is automatically migrated to keystore JSON via an atomic rename.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os

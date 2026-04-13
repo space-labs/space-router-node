@@ -376,6 +376,60 @@ async function showStakingModal(onContinue) {
   });
 }
 
+// ── Error Report Modal ──
+
+let errorReportShownForKey = null;  // track to show only once per error
+
+function showErrorReportModal() {
+  const overlay = $("#error-report-overlay");
+  // Reset to initial state
+  $("#error-report-title").textContent = "Send Error Report?";
+  $("#error-report-body").textContent =
+    "Help improve Space Router by sharing this error with the team. " +
+    "The report includes error details, node state, and network config. " +
+    "No private keys or personal data are sent.";
+  overlay.style.display = "flex";
+
+  // Strip old listeners
+  for (const sel of ["#btn-send-report", "#btn-skip-report"]) {
+    const el = $(sel);
+    el.replaceWith(el.cloneNode(true));
+  }
+
+  const sendBtn = $("#btn-send-report");
+  sendBtn.textContent = "Send Report";
+  sendBtn.disabled = false;
+  sendBtn.style.display = "";
+
+  $("#btn-skip-report").textContent = "Dismiss";
+
+  sendBtn.addEventListener("click", async function () {
+    sendBtn.disabled = true;
+    sendBtn.textContent = "Sending...";
+    try {
+      const result = await window.pywebview.api.send_error_report();
+      if (result.ok) {
+        $("#error-report-title").textContent = "Report Sent";
+        $("#error-report-body").textContent = "Thank you! The report has been sent successfully.";
+        sendBtn.style.display = "none";
+        $("#btn-skip-report").textContent = "Close";
+      } else {
+        $("#error-report-body").textContent = "Failed to send report: " + (result.error || "Unknown error");
+        sendBtn.textContent = "Retry";
+        sendBtn.disabled = false;
+      }
+    } catch (e) {
+      $("#error-report-body").textContent = "Failed to send report.";
+      sendBtn.textContent = "Retry";
+      sendBtn.disabled = false;
+    }
+  });
+
+  $("#btn-skip-report").addEventListener("click", function () {
+    overlay.style.display = "none";
+  });
+}
+
 // ── Status Dashboard ──
 
 function showStatus() {
@@ -442,31 +496,37 @@ async function updateStatus() {
         dot.className = "dot dot-idle";
         text.textContent = "Node is stopped";
         detail.textContent = "";
+        errorReportShownForKey = null;
         break;
       case "initializing":
         dot.className = "dot dot-starting";
         text.textContent = "Initializing...";
         detail.textContent = status.detail || "Loading certificates";
+        errorReportShownForKey = null;
         break;
       case "binding":
         dot.className = "dot dot-starting";
         text.textContent = "Starting server...";
         detail.textContent = status.detail || "";
+        errorReportShownForKey = null;
         break;
       case "registering":
         dot.className = "dot dot-starting";
         text.textContent = "Registering...";
         detail.textContent = status.detail || "";
+        errorReportShownForKey = null;
         break;
       case "running":
         dot.className = "dot dot-running";
         text.textContent = "SpaceRouter is running";
         detail.textContent = status.detail || "";
+        errorReportShownForKey = null;
         break;
       case "reconnecting":
         dot.className = "dot dot-reconnecting";
         text.textContent = "Reconnecting...";
         detail.textContent = status.detail || "";
+        errorReportShownForKey = null;
         break;
       case "error_transient":
         dot.className = "dot dot-reconnecting";
@@ -535,6 +595,15 @@ async function updateStatus() {
         dot.className = "dot dot-stopped";
         text.textContent = "Stopped";
         detail.textContent = "";
+    }
+
+    // Show error report modal (once per error instance)
+    if (status.error_report_available) {
+      const reportKey = (status.error_code || "") + ":" + (status.retry_count || 0);
+      if (errorReportShownForKey !== reportKey) {
+        errorReportShownForKey = reportKey;
+        showErrorReportModal();
+      }
     }
 
     // Error display
