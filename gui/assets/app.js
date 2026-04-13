@@ -510,6 +510,10 @@ async function updateStatus() {
           detail.textContent = status.error_message || "Request timestamp expired. Check your system clock.";
         } else if (status.error_code === "endpoint_unreachable") {
           detail.textContent = status.error_message || "Coordination server cannot reach this node.";
+        } else if (status.error_code === "rate_limited") {
+          detail.textContent = "Too many requests. Waiting before retry...";
+        } else if (status.error_code === "connection_lost") {
+          detail.textContent = "Connection to coordination server interrupted. Retrying...";
         } else if (status.error_code === "network_unreachable") {
           detail.textContent = "Cannot reach coordination server. Check your internet connection.";
         } else if (status.error_code === "invalid_wallet") {
