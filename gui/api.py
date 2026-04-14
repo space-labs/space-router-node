@@ -161,6 +161,21 @@ class Api:
             "staking_status": ns.staking_status,
             # Error reporting
             "error_report_available": self._node._error_report_available,
+            # Version check
+            "version_check": self._get_version_check_dict(),
+        }
+
+    def _get_version_check_dict(self) -> dict | None:
+        """Build version check dict for status payload."""
+        vc = self._node.version_check
+        if vc is None:
+            return None
+        return {
+            "status": vc.status,
+            "latest_version": vc.latest_version,
+            "min_version": vc.min_version,
+            "download_url": vc.download_url,
+            "current_version": vc.current_version,
         }
 
     def get_build_version(self) -> str:

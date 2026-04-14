@@ -889,3 +889,46 @@ body.has-test-banner .screen {
 .staking-modal-secondary:hover {
   color: #999;
 }
+
+/* ── Version Update Modal variants ── */
+
+.version-modal-info {
+  color: #666;
+  font-size: 11px;
+  margin-top: -4px;
+  margin-bottom: 4px;
+}
+
+/* Hard update (red) */
+.version-modal-hard .staking-modal-title {
+  color: #ff6b8a;
+}
+
+.version-modal-hard .staking-modal-primary {
+  background: #ff6b8a;
+}
+
+.version-modal-hard .staking-modal-primary:hover {
+  background: #e05070;
+}
+
+/* Soft update (yellow/amber) */
+.version-modal-soft .staking-modal-title {
+  color: #fbbf24;
+}
+
+/* Version status in settings panel */
+.version-status {
+  color: #4caf50;
+  font-size: 12px;
+  text-align: center;
+  margin-top: 12px;
+}
+
+.version-status.has-update {
+  color: #fbbf24;
+}
+
+.version-status.needs-update {
+  color: #ff6b8a;
+}

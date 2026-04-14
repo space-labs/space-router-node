@@ -14,6 +14,7 @@ const ENV_URLS = {
 
 let statusPollId = null;
 let isTestBuild = false;
+let versionModalDismissed = false;  // reset on each node start
 
 // ── Helpers ──
 
@@ -430,6 +431,75 @@ function showErrorReportModal() {
   });
 }
 
+// ── Version Check Modal ──
+
+function handleVersionCheck(vc) {
+  if (!vc || versionModalDismissed) return;
+  if (vc.status !== "soft_update" && vc.status !== "hard_update") return;
+
+  const overlay = $("#version-modal-overlay");
+  const modal = $("#version-modal");
+  const title = $("#version-modal-title");
+  const body = $("#version-modal-body");
+  const info = $("#version-modal-info");
+  const downloadUrl = vc.download_url || "https://github.com/space-labs/space-router-node/releases/latest";
+
+  if (vc.status === "hard_update") {
+    modal.className = "staking-modal version-modal-hard";
+    title.textContent = "Update Required";
+    body.textContent =
+      "Your version is no longer supported. Please update to continue running your node.";
+    info.textContent =
+      "Current: " + (vc.current_version || "?") + " \u00b7 Min required: " + (vc.min_version || "?");
+  } else {
+    modal.className = "staking-modal version-modal-soft";
+    title.textContent = "New Version Available";
+    body.textContent =
+      (vc.latest_version || "A new version") +
+      " is now available. Update now to get the latest improvements.";
+    info.textContent =
+      "Current: " + (vc.current_version || "?") + " \u00b7 Min required: " + (vc.min_version || "any");
+  }
+
+  overlay.style.display = "flex";
+
+  // Strip old listeners
+  for (const sel of ["#btn-version-download", "#btn-version-dismiss"]) {
+    const el = document.querySelector(sel);
+    el.replaceWith(el.cloneNode(true));
+  }
+
+  document.querySelector("#btn-version-download").addEventListener("click", function () {
+    window.pywebview.api.open_url(downloadUrl);
+    overlay.style.display = "none";
+    versionModalDismissed = true;
+  });
+
+  document.querySelector("#btn-version-dismiss").addEventListener("click", function () {
+    overlay.style.display = "none";
+    versionModalDismissed = true;
+  });
+}
+
+function updateSettingsVersionStatus(vc) {
+  const el = $("#settings-version-status");
+  if (!el) return;
+  if (!vc || vc.status === "unknown") {
+    el.textContent = "";
+    return;
+  }
+  if (vc.status === "up_to_date") {
+    el.textContent = "You're on the latest version (" + (vc.current_version || "") + ")";
+    el.className = "version-status";
+  } else if (vc.status === "soft_update") {
+    el.textContent = "Update available: " + (vc.latest_version || "");
+    el.className = "version-status has-update";
+  } else if (vc.status === "hard_update") {
+    el.textContent = "Update required \u2014 minimum " + (vc.min_version || "");
+    el.className = "version-status needs-update";
+  }
+}
+
 // ── Status Dashboard ──
 
 function showStatus() {
@@ -606,6 +676,12 @@ async function updateStatus() {
       }
     }
 
+    // Version check modal + settings status
+    if (status.version_check) {
+      handleVersionCheck(status.version_check);
+      updateSettingsVersionStatus(status.version_check);
+    }
+
     // Error display
     if (status.error && state !== "error_transient" && state !== "passphrase_required") {
       errorText.textContent = status.error;
@@ -671,6 +747,7 @@ async function doFreshRestart() {
     }
 
     // Go directly to onboarding
+    versionModalDismissed = false;
     hideAll();
     show("screen-onboarding");
     initOnboarding();
@@ -698,6 +775,7 @@ function initActionButtons() {
     const btn = $("#btn-start-node");
     btn.disabled = true;
     btn.textContent = "Starting...";
+    versionModalDismissed = false;
     try {
       await window.pywebview.api.start_node();
     } catch (e) {}

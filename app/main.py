@@ -270,6 +270,59 @@ def _show_staking_prompt() -> None:
     input()
 
 
+def _show_version_check() -> None:
+    """Check for updates and display a banner if needed (CLI only).
+
+    Performs a synchronous version check against the coordination API.
+    Hard update: prints red banner and exits.  Soft update: prints
+    yellow banner and continues after Enter.  Fail-safe: errors are
+    logged and the node proceeds normally.
+    """
+    from app.updater import check_version_sync
+
+    s = load_settings()
+    result = check_version_sync(s.COORDINATION_API_URL)
+
+    if result.status not in ("soft_update", "hard_update"):
+        return
+
+    from rich.panel import Panel
+    from rich.console import Console
+
+    console = Console()
+    console.print()
+
+    if result.status == "hard_update":
+        console.print(Panel(
+            f"[bold white]Your version ({result.current_version}) is below the\n"
+            f"minimum required version ({result.min_version}).[/bold white]\n\n"
+            f"[cyan]Download the latest release:[/cyan]\n{result.download_url}\n\n"
+            "[bold red]The node cannot start until you update.[/bold red]",
+            title="[red]Update Required[/red]",
+            border_style="red",
+            padding=(1, 2),
+        ))
+        sys.exit(1)
+
+    # Soft update
+    if sys.stdin.isatty():
+        console.print(Panel(
+            f"[bold white]A new version ({result.latest_version}) is available.\n"
+            f"You are running {result.current_version}.[/bold white]\n\n"
+            f"[cyan]Download:[/cyan] {result.download_url}\n\n"
+            "[dim]Press Enter to continue...[/dim]",
+            title="[yellow]Update Available[/yellow]",
+            border_style="yellow",
+            padding=(1, 2),
+        ))
+        input()
+    else:
+        logger.warning(
+            "Update available: current %s, latest %s — download at %s",
+            result.current_version, result.latest_version, result.download_url,
+        )
+
+
 # ── Phase functions ──────────────────────────────────────────────────────────
 
 class _NodeContext:
@@ -289,6 +342,7 @@ class _NodeContext:
         self.server: asyncio.Server | None = None
         self.node_id: str = ""
         self.gateway_ca_cert: str | None = None
+        self.version_check = None  # VersionCheckResult | None
 
 
 async def _phase_init(ctx: _NodeContext) -> None:
@@ -455,6 +509,48 @@ async def _rebind_server_mtls(ctx: _NodeContext) -> None:
         handler, host=s.BIND_ADDRESS, port=s.NODE_PORT, ssl=ctx.ssl_ctx,
         reuse_address=True,
     )
+
+
+async def _version_check_loop(
+    ctx: _NodeContext,
+    stop_event: asyncio.Event,
+    on_version_check=None,  # noqa: ANN001
+) -> None:
+    """Periodic version check every 6 hours (fail-safe).
+
+    Updates ``ctx.version_check`` so the GUI can poll the result.
+    Never raises — all errors are swallowed and logged at debug level.
+    """
+    from app.updater import check_version, VERSION_CHECK_INTERVAL
+
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(), timeout=VERSION_CHECK_INTERVAL,
+            )
+            break  # stop_event was set
+        except asyncio.TimeoutError:
+            pass  # interval elapsed — run the check
+
+        try:
+            result = await check_version(ctx.http, ctx.s.COORDINATION_API_URL)
+            ctx.version_check = result
+            if on_version_check:
+                on_version_check(result)
+            if result.status == "hard_update":
+                logger.warning(
+                    "Scheduled version check: update required (current=%s, min=%s)",
+                    result.current_version, result.min_version,
+                )
+            elif result.status == "soft_update":
+                logger.info(
+                    "Scheduled version check: update available (current=%s, latest=%s)",
+                    result.current_version, result.latest_version,
+                )
+            else:
+                logger.debug("Scheduled version check: %s", result.status)
+        except Exception:
+            logger.debug("Scheduled version check failed", exc_info=True)
 
 
 async def _health_loop(
@@ -715,6 +811,7 @@ async def _run(
     stop_event: asyncio.Event | None = None,
     on_phase=None,  # noqa: ANN001
     state_machine: NodeStateMachine | None = None,
+    on_version_check=None,  # noqa: ANN001  # callback(VersionCheckResult)
 ) -> None:
     """Main orchestrator loop. Drives phases and handles retries."""
     # Deferred heavy imports — keep CLI startup fast
@@ -771,7 +868,45 @@ async def _run(
         probe_task = None
         dashboard = None
 
+        version_check_task = None
+
         try:
+            # ── Pre-flight: Version check ──
+            from app.updater import check_version
+
+            version_result = await check_version(http_client, s.COORDINATION_API_URL)
+            ctx.version_check = version_result
+            if on_version_check:
+                on_version_check(version_result)
+
+            if version_result.status == "hard_update":
+                logger.warning(
+                    "Version check: update required — current %s below minimum %s",
+                    version_result.current_version,
+                    version_result.min_version,
+                )
+                # In standalone CLI mode, abort immediately.
+                # In GUI mode (state_machine provided), store result and let
+                # registration's HTTP 426 act as the enforcement backstop.
+                if not state_machine:
+                    raise NodeError(
+                        NodeErrorCode.VERSION_TOO_OLD,
+                        f"Current version {version_result.current_version} is below "
+                        f"minimum required {version_result.min_version}. "
+                        f"Download the latest release: {version_result.download_url}",
+                    )
+            elif version_result.status == "soft_update":
+                logger.info(
+                    "Version check: update available — current %s, latest %s",
+                    version_result.current_version,
+                    version_result.latest_version,
+                )
+            else:
+                logger.debug("Version check: %s", version_result.status)
+
+            if stop_event.is_set():
+                return
+
             # ── Phase: INITIALIZING ──
             _report(NodeState.INITIALIZING, "Loading identity and certificates")
             logger.info("Initializing node (version %s)...", __version__)
@@ -894,6 +1029,11 @@ async def _run(
             # Start health monitoring
             health_task = asyncio.create_task(_health_loop(ctx, sm, stop_event))
 
+            # Start periodic version check (every 6 hours)
+            version_check_task = asyncio.create_task(
+                _version_check_loop(ctx, stop_event, on_version_check)
+            )
+
             # Start periodic status summary (text mode) or dashboard (rich mode)
             if dashboard:
                 status_task = asyncio.create_task(
@@ -926,6 +1066,7 @@ async def _run(
                 for _tname, _task in [
                     ("health", health_task), ("probe", probe_task),
                     ("status", status_task), ("renewal", renewal_task),
+                    ("version_check", version_check_task),
                 ]:
                     if _task is not None and not _task.done():
                         _task.cancel()
@@ -1018,6 +1159,9 @@ async def _run(
                         probe_task = asyncio.create_task(
                             _self_probe_loop(ctx, sm, stop_event, dashboard)
                         )
+                        version_check_task = asyncio.create_task(
+                            _version_check_loop(ctx, stop_event, on_version_check)
+                        )
 
                         # Restart health loop
                         health_task = asyncio.create_task(_health_loop(ctx, sm, stop_event))
@@ -1034,6 +1178,7 @@ async def _run(
                             for _tname, _task in [
                                 ("probe", probe_task), ("status", status_task),
                                 ("renewal", renewal_task),
+                                ("version_check", version_check_task),
                             ]:
                                 if _task is not None and not _task.done():
                                     _task.cancel()
@@ -1075,7 +1220,7 @@ async def _run(
                 await ctx.server.wait_closed()
 
             # Cancel background tasks
-            for task in (renewal_task, health_task, status_task, probe_task):
+            for task in (renewal_task, health_task, status_task, probe_task, version_check_task):
                 if task is not None and not task.done():
                     task.cancel()
                     try:
@@ -1343,6 +1488,7 @@ def main() -> None:
         if sys.stdin.isatty():
             if not _first_run_setup():
                 sys.exit(0)
+            _show_version_check()
             _show_staking_prompt()
             _run_node(settings_override=load_settings())
         else:
@@ -1360,10 +1506,12 @@ def main() -> None:
     if needs_setup and sys.stdin.isatty():
         if not _first_run_setup():
             sys.exit(0)
+        _show_version_check()
         _show_staking_prompt()
         _run_node(settings_override=load_settings())
         return
 
+    _show_version_check()
     _show_staking_prompt()
     _run_node()
 

@@ -24,6 +24,7 @@ class NodeManager:
         self._error_report_available: bool = False
         self._last_error: NodeError | None = None
         self._node_context_snapshot: dict | None = None
+        self._version_check = None  # VersionCheckResult | None
 
     @property
     def is_running(self) -> bool:
@@ -63,11 +64,26 @@ class NodeManager:
         """Backward-compatible error string."""
         return self._sm.status.error_message
 
+    @property
+    def version_check(self):
+        """Latest VersionCheckResult (or None)."""
+        return self._version_check
+
     def start(self) -> None:
         """Start the node in a background thread."""
         if self.is_running:
             logger.warning("Node is already running")
             return
+
+        # Pre-flight version check (sync, fail-safe) — result available
+        # immediately for the first GUI status poll.
+        try:
+            from app.updater import check_version_sync
+            from app.config import load_settings
+            s = load_settings()
+            self._version_check = check_version_sync(s.COORDINATION_API_URL)
+        except Exception:
+            logger.debug("GUI pre-flight version check failed", exc_info=True)
 
         self._sm.reset()
         self._error_report_available = False
@@ -100,6 +116,7 @@ class NodeManager:
                     stop_event=self._stop_event,
                     on_phase=self._on_phase,
                     state_machine=self._sm,
+                    on_version_check=self._on_version_check,
                 )
             )
         except KeystorePassphraseRequired:
@@ -173,6 +190,10 @@ class NodeManager:
         """Callback from _run() to report lifecycle phase."""
         # The state machine is already updated by _run(), this is just for logging
         pass
+
+    def _on_version_check(self, result) -> None:  # noqa: ANN001
+        """Callback from _run() / _version_check_loop to propagate result."""
+        self._version_check = result
 
     def stop(self, timeout: float = 20.0) -> None:
         """Signal the node to stop and wait for the thread to finish."""
