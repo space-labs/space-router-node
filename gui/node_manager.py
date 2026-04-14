@@ -1,5 +1,7 @@
 """Manages the SpaceRouter node lifecycle in a background thread."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import threading
@@ -19,6 +21,9 @@ class NodeManager:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop_event: asyncio.Event | None = None
         self._sm = NodeStateMachine()
+        self._error_report_available: bool = False
+        self._last_error: NodeError | None = None
+        self._node_context_snapshot: dict | None = None
 
     @property
     def is_running(self) -> bool:
@@ -49,7 +54,9 @@ class NodeManager:
 
     @property
     def status(self) -> NodeStatus:
-        return self._sm.status
+        ns = self._sm.status
+        ns.error_report_available = self._error_report_available
+        return ns
 
     @property
     def last_error(self) -> str | None:
@@ -63,6 +70,9 @@ class NodeManager:
             return
 
         self._sm.reset()
+        self._error_report_available = False
+        self._last_error = None
+        self._node_context_snapshot = None
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="spacerouter-node")
         self._thread.start()
 
@@ -105,7 +115,9 @@ class NodeManager:
                 if delay is not None:
                     # Transient error — schedule retry in a new run
                     self._schedule_retry(delay)
+                    self._mark_reportable(exc)
                     return
+            self._mark_reportable(exc)
         except SystemExit:
             logger.warning("Node exited with SystemExit")
             if self._sm.state not in (NodeState.ERROR_PERMANENT, NodeState.ERROR_TRANSIENT):
@@ -121,7 +133,9 @@ class NodeManager:
                 delay = self._sm.handle_error(error, self._sm.state)
                 if delay is not None:
                     self._schedule_retry(delay)
+                    self._mark_reportable(error)
                     return
+            self._mark_reportable(error)
         finally:
             if self._sm.state not in (
                 NodeState.ERROR_PERMANENT, NodeState.ERROR_TRANSIENT,
@@ -190,6 +204,74 @@ class NodeManager:
                 self._force_cancel_loop(loop)
                 self._thread.join(timeout=3.0)
             self._thread = None
+
+    def _mark_reportable(self, error: NodeError) -> None:
+        """Flag the error as eligible for user-initiated reporting."""
+        from app.error_report import is_reportable
+
+        if is_reportable(error.code.value):
+            self._error_report_available = True
+            self._last_error = error
+
+    def send_error_report(self) -> dict:
+        """Build, sign, and send the current error to coordination API.
+
+        Called from the GUI thread via pywebview API.
+        Returns ``{"ok": True}`` on success or ``{"ok": False, "error": "..."}``
+        on failure.
+        """
+        if not self._error_report_available or self._last_error is None:
+            return {"ok": False, "error": "No error report available"}
+
+        try:
+            from app.config import load_settings
+            from app.error_report import build_error_report, send_error_report_sync
+
+            settings = load_settings()
+            status_snapshot = self._sm.status
+
+            # Try to get identity info from the settings-level env vars
+            import os
+            identity_key = os.environ.get("_SR_IDENTITY_KEY", "")
+            identity_address = os.environ.get("_SR_IDENTITY_ADDRESS", "")
+
+            if not identity_key or not identity_address:
+                # Attempt to load identity from disk
+                try:
+                    from app.identity import load_or_create_identity
+                    identity_key, identity_address = load_or_create_identity(
+                        settings.IDENTITY_KEY_PATH,
+                        settings.IDENTITY_PASSPHRASE,
+                    )
+                except Exception:
+                    return {"ok": False, "error": "Cannot load identity key for signing"}
+
+            report = build_error_report(
+                self._last_error,
+                node_id=status_snapshot.node_id,
+                identity_address=identity_address,
+                staking_address=settings.STAKING_ADDRESS or None,
+                collection_address=settings.COLLECTION_ADDRESS or None,
+                settings=settings,
+                app_type="gui",
+                state_snapshot=status_snapshot,
+            )
+
+            ok = send_error_report_sync(
+                report,
+                identity_key,
+                identity_address,
+                settings.COORDINATION_API_URL,
+            )
+
+            if ok:
+                self._error_report_available = False
+                return {"ok": True}
+            else:
+                return {"ok": False, "error": "Server rejected the report"}
+        except Exception as exc:
+            logger.warning("Failed to send error report: %s", exc)
+            return {"ok": False, "error": str(exc)}
 
     def _force_cancel_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
         """Cancel all running tasks and stop the event loop."""

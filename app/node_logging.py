@@ -4,8 +4,12 @@ Provides:
 - CLI console formatter with rich, human-readable output
 - File handler with rotation for GUI log persistence
 - Shared connection/status tracking for periodic summaries
+- In-memory ring buffer for error reports
 """
 
+from __future__ import annotations
+
+import collections
 import logging
 import logging.handlers
 import os
@@ -139,6 +143,8 @@ def setup_cli_logging(log_level: str = "INFO") -> None:
     Replaces existing StreamHandlers with our CLIFormatter while
     preserving any file handlers (e.g. the GUI RotatingFileHandler).
     """
+    global _recent_handler
+
     root = logging.getLogger()
     # Remove only stream handlers — preserve file handlers (GUI log persistence)
     for h in root.handlers[:]:
@@ -160,6 +166,13 @@ def setup_cli_logging(log_level: str = "INFO") -> None:
     handler.setFormatter(CLIFormatter())
     root.addHandler(handler)
 
+    # Attach in-memory ring buffer (once)
+    if _recent_handler is None:
+        _recent_handler = RecentLogHandler(maxlen=20)
+        _recent_handler.setLevel(level)
+        _recent_handler.setFormatter(CLIFormatter())
+        root.addHandler(_recent_handler)
+
 
 def setup_gui_file_logging(log_level: str = "INFO") -> Path | None:
     """Add a rotating file handler for GUI log persistence.
@@ -171,12 +184,18 @@ def setup_gui_file_logging(log_level: str = "INFO") -> Path | None:
 
     Returns the log directory path, or None if setup failed.
     """
+    global _recent_handler
+
     try:
         log_dir = _gui_log_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / "spacerouter-node.log"
 
         level = getattr(logging, log_level.upper(), logging.INFO)
+
+        gui_formatter = logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s"
+        )
 
         handler = logging.handlers.RotatingFileHandler(
             str(log_file),
@@ -185,12 +204,17 @@ def setup_gui_file_logging(log_level: str = "INFO") -> Path | None:
             encoding="utf-8",
         )
         handler.setLevel(level)
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s %(levelname)s %(name)s: %(message)s"
-        ))
+        handler.setFormatter(gui_formatter)
 
         root = logging.getLogger()
         root.addHandler(handler)
+
+        # Attach in-memory ring buffer (once)
+        if _recent_handler is None:
+            _recent_handler = RecentLogHandler(maxlen=20)
+            _recent_handler.setLevel(level)
+            _recent_handler.setFormatter(gui_formatter)
+            root.addHandler(_recent_handler)
 
         logger.info("Log file: %s", log_file)
         return log_dir
@@ -211,3 +235,34 @@ def get_log_file_path() -> Path | None:
         return _gui_log_dir() / "spacerouter-node.log"
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# In-memory log ring buffer for error reports
+# ---------------------------------------------------------------------------
+
+
+class RecentLogHandler(logging.Handler):
+    """Keeps the last N formatted log lines in memory for error reports."""
+
+    def __init__(self, maxlen: int = 20) -> None:
+        super().__init__()
+        self._records: collections.deque[str] = collections.deque(maxlen=maxlen)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._records.append(self.format(record))
+        except Exception:
+            self.handleError(record)
+
+    def get_recent(self) -> list[str]:
+        return list(self._records)
+
+
+# Module-level singleton
+_recent_handler: RecentLogHandler | None = None
+
+
+def get_recent_logs() -> list[str]:
+    """Return the last ~20 log lines from memory."""
+    return _recent_handler.get_recent() if _recent_handler else []

@@ -159,6 +159,8 @@ class Api:
             "environment": env,
             "api_url": api_url,
             "staking_status": ns.staking_status,
+            # Error reporting
+            "error_report_available": self._node._error_report_available,
         }
 
     def get_build_version(self) -> str:
@@ -168,6 +170,10 @@ class Api:
     def get_build_variant(self) -> str:
         """Return 'test' or 'production'."""
         return BUILD_VARIANT
+
+    def send_error_report(self) -> dict:
+        """Build, sign, and send the current error report to coordination API."""
+        return self._node.send_error_report()
 
     def get_settings(self) -> dict:
         """Return current settings for the settings panel."""

@@ -789,6 +789,10 @@ async def _run(
             except Exception as exc:
                 raise classify_error(exc)
 
+            # Export identity info for GUI error reporting (read-only env vars)
+            os.environ["_SR_IDENTITY_KEY"] = ctx.identity_key
+            os.environ["_SR_IDENTITY_ADDRESS"] = ctx.identity_address
+
             if stop_event.is_set():
                 return
 
@@ -1228,6 +1232,60 @@ def _apply_cli_args(args: argparse.Namespace) -> None:
             sys.exit(1)
 
 
+def _prompt_error_report(error, settings_override=None) -> None:  # noqa: ANN001
+    """Prompt the user to send an opt-in error report (CLI only)."""
+    from app.error_report import is_reportable, build_error_report, send_error_report_sync
+
+    if not is_reportable(error.code.value):
+        return
+    if not sys.stdin.isatty():
+        return
+
+    try:
+        answer = input("\nSend error report to help us investigate? [Y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = "n"
+
+    if answer not in ("", "y", "yes"):
+        return
+
+    # Best-effort: load identity + settings to sign and build the report
+    try:
+        s = settings_override or load_settings()
+        identity_key = ""
+        identity_address = ""
+        try:
+            identity_key, identity_address = load_or_create_identity(
+                s.IDENTITY_KEY_PATH, s.IDENTITY_PASSPHRASE,
+            )
+        except Exception:
+            pass
+
+        report = build_error_report(
+            error,
+            node_id=None,
+            identity_address=identity_address or None,
+            staking_address=s.STAKING_ADDRESS or None,
+            collection_address=s.COLLECTION_ADDRESS or None,
+            settings=s,
+            app_type="cli",
+            state_snapshot=None,
+        )
+
+        if identity_key and identity_address:
+            ok = send_error_report_sync(
+                report, identity_key, identity_address, s.COORDINATION_API_URL,
+            )
+            if ok:
+                print("  Report sent. Thank you!")
+            else:
+                print("  Failed to send report.")
+        else:
+            print("  Cannot send report — identity key unavailable.")
+    except Exception:
+        print("  Failed to send report.")
+
+
 def _run_node(settings_override=None) -> None:  # noqa: ANN001
     """Run the node with proper error handling and signal cleanup."""
     from app.errors import NodeError
@@ -1246,6 +1304,7 @@ def _run_node(settings_override=None) -> None:  # noqa: ANN001
                 asyncio.run(_run(settings_override=load_settings()))
             except NodeError as exc:
                 logger.error("Node failed: %s", exc.user_message)
+                _prompt_error_report(exc, settings_override=load_settings())
                 sys.exit(1)
         else:
             print(
@@ -1256,6 +1315,7 @@ def _run_node(settings_override=None) -> None:  # noqa: ANN001
             sys.exit(1)
     except NodeError as exc:
         logger.error("Node failed: %s", exc.user_message)
+        _prompt_error_report(exc, settings_override=settings_override)
         sys.exit(1)
     finally:
         if sys.platform == "win32":

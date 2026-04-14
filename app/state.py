@@ -4,6 +4,8 @@ Defines the lifecycle states, enforces valid transitions, and provides
 a status snapshot for the GUI to poll.
 """
 
+from __future__ import annotations
+
 import enum
 import logging
 import random
@@ -110,6 +112,7 @@ class NodeStatus:
     node_id: str | None = None
     cert_expiry_warning: bool = False
     staking_status: str = "—"
+    error_report_available: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -123,6 +126,7 @@ class NodeStatus:
             "node_id": self.node_id,
             "cert_expiry_warning": self.cert_expiry_warning,
             "staking_status": self.staking_status,
+            "error_report_available": self.error_report_available,
         }
 
 
