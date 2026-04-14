@@ -14,6 +14,7 @@ const ENV_URLS = {
 
 let statusPollId = null;
 let isTestBuild = false;
+let versionModalDismissed = false;  // reset on each node start
 
 // ── Helpers ──
 
@@ -376,6 +377,129 @@ async function showStakingModal(onContinue) {
   });
 }
 
+// ── Error Report Modal ──
+
+let errorReportShownForKey = null;  // track to show only once per error
+
+function showErrorReportModal() {
+  const overlay = $("#error-report-overlay");
+  // Reset to initial state
+  $("#error-report-title").textContent = "Send Error Report?";
+  $("#error-report-body").textContent =
+    "Help improve Space Router by sharing this error with the team. " +
+    "The report includes error details, node state, and network config. " +
+    "No private keys or personal data are sent.";
+  overlay.style.display = "flex";
+
+  // Strip old listeners
+  for (const sel of ["#btn-send-report", "#btn-skip-report"]) {
+    const el = $(sel);
+    el.replaceWith(el.cloneNode(true));
+  }
+
+  const sendBtn = $("#btn-send-report");
+  sendBtn.textContent = "Send Report";
+  sendBtn.disabled = false;
+  sendBtn.style.display = "";
+
+  $("#btn-skip-report").textContent = "Dismiss";
+
+  sendBtn.addEventListener("click", async function () {
+    sendBtn.disabled = true;
+    sendBtn.textContent = "Sending...";
+    try {
+      const result = await window.pywebview.api.send_error_report();
+      if (result.ok) {
+        $("#error-report-title").textContent = "Report Sent";
+        $("#error-report-body").textContent = "Thank you! The report has been sent successfully.";
+        sendBtn.style.display = "none";
+        $("#btn-skip-report").textContent = "Close";
+      } else {
+        $("#error-report-body").textContent = "Failed to send report: " + (result.error || "Unknown error");
+        sendBtn.textContent = "Retry";
+        sendBtn.disabled = false;
+      }
+    } catch (e) {
+      $("#error-report-body").textContent = "Failed to send report.";
+      sendBtn.textContent = "Retry";
+      sendBtn.disabled = false;
+    }
+  });
+
+  $("#btn-skip-report").addEventListener("click", function () {
+    overlay.style.display = "none";
+  });
+}
+
+// ── Version Check Modal ──
+
+function handleVersionCheck(vc) {
+  if (!vc || versionModalDismissed) return;
+  if (vc.status !== "soft_update" && vc.status !== "hard_update") return;
+
+  const overlay = $("#version-modal-overlay");
+  const modal = $("#version-modal");
+  const title = $("#version-modal-title");
+  const body = $("#version-modal-body");
+  const info = $("#version-modal-info");
+  const downloadUrl = vc.download_url || "https://github.com/space-labs/space-router-node/releases/latest";
+
+  if (vc.status === "hard_update") {
+    modal.className = "staking-modal version-modal-hard";
+    title.textContent = "Update Required";
+    body.textContent =
+      "Your version is no longer supported. Please update to continue running your node.";
+    info.textContent =
+      "Current: " + (vc.current_version || "?") + " \u00b7 Min required: " + (vc.min_version || "?");
+  } else {
+    modal.className = "staking-modal version-modal-soft";
+    title.textContent = "New Version Available";
+    body.textContent =
+      (vc.latest_version || "A new version") +
+      " is now available. Update now to get the latest improvements.";
+    info.textContent =
+      "Current: " + (vc.current_version || "?") + " \u00b7 Min required: " + (vc.min_version || "any");
+  }
+
+  overlay.style.display = "flex";
+
+  // Strip old listeners
+  for (const sel of ["#btn-version-download", "#btn-version-dismiss"]) {
+    const el = document.querySelector(sel);
+    el.replaceWith(el.cloneNode(true));
+  }
+
+  document.querySelector("#btn-version-download").addEventListener("click", function () {
+    window.pywebview.api.open_url(downloadUrl);
+    overlay.style.display = "none";
+    versionModalDismissed = true;
+  });
+
+  document.querySelector("#btn-version-dismiss").addEventListener("click", function () {
+    overlay.style.display = "none";
+    versionModalDismissed = true;
+  });
+}
+
+function updateSettingsVersionStatus(vc) {
+  const el = $("#settings-version-status");
+  if (!el) return;
+  if (!vc || vc.status === "unknown") {
+    el.textContent = "";
+    return;
+  }
+  if (vc.status === "up_to_date") {
+    el.textContent = "You're on the latest version (" + (vc.current_version || "") + ")";
+    el.className = "version-status";
+  } else if (vc.status === "soft_update") {
+    el.textContent = "Update available: " + (vc.latest_version || "");
+    el.className = "version-status has-update";
+  } else if (vc.status === "hard_update") {
+    el.textContent = "Update required \u2014 minimum " + (vc.min_version || "");
+    el.className = "version-status needs-update";
+  }
+}
+
 // ── Status Dashboard ──
 
 function showStatus() {
@@ -442,31 +566,37 @@ async function updateStatus() {
         dot.className = "dot dot-idle";
         text.textContent = "Node is stopped";
         detail.textContent = "";
+        errorReportShownForKey = null;
         break;
       case "initializing":
         dot.className = "dot dot-starting";
         text.textContent = "Initializing...";
         detail.textContent = status.detail || "Loading certificates";
+        errorReportShownForKey = null;
         break;
       case "binding":
         dot.className = "dot dot-starting";
         text.textContent = "Starting server...";
         detail.textContent = status.detail || "";
+        errorReportShownForKey = null;
         break;
       case "registering":
         dot.className = "dot dot-starting";
         text.textContent = "Registering...";
         detail.textContent = status.detail || "";
+        errorReportShownForKey = null;
         break;
       case "running":
         dot.className = "dot dot-running";
         text.textContent = "SpaceRouter is running";
         detail.textContent = status.detail || "";
+        errorReportShownForKey = null;
         break;
       case "reconnecting":
         dot.className = "dot dot-reconnecting";
         text.textContent = "Reconnecting...";
         detail.textContent = status.detail || "";
+        errorReportShownForKey = null;
         break;
       case "error_transient":
         dot.className = "dot dot-reconnecting";
@@ -510,6 +640,10 @@ async function updateStatus() {
           detail.textContent = status.error_message || "Request timestamp expired. Check your system clock.";
         } else if (status.error_code === "endpoint_unreachable") {
           detail.textContent = status.error_message || "Coordination server cannot reach this node.";
+        } else if (status.error_code === "rate_limited") {
+          detail.textContent = "Too many requests. Waiting before retry...";
+        } else if (status.error_code === "connection_lost") {
+          detail.textContent = "Connection to coordination server interrupted. Retrying...";
         } else if (status.error_code === "network_unreachable") {
           detail.textContent = "Cannot reach coordination server. Check your internet connection.";
         } else if (status.error_code === "invalid_wallet") {
@@ -531,6 +665,29 @@ async function updateStatus() {
         dot.className = "dot dot-stopped";
         text.textContent = "Stopped";
         detail.textContent = "";
+    }
+
+    // Show error report modal:
+    // - Immediately on permanent errors
+    // - After 3+ retries for persistent transient errors (once per error type)
+    if (status.error_report_available) {
+      const showNow =
+        state === "error_permanent" ||
+        (state === "error_transient" && (status.retry_count || 0) >= 3);
+
+      if (showNow) {
+        const reportKey = status.error_code || "unknown";
+        if (errorReportShownForKey !== reportKey) {
+          errorReportShownForKey = reportKey;
+          showErrorReportModal();
+        }
+      }
+    }
+
+    // Version check modal + settings status
+    if (status.version_check) {
+      handleVersionCheck(status.version_check);
+      updateSettingsVersionStatus(status.version_check);
     }
 
     // Error display
@@ -598,6 +755,7 @@ async function doFreshRestart() {
     }
 
     // Go directly to onboarding
+    versionModalDismissed = false;
     hideAll();
     show("screen-onboarding");
     initOnboarding();
@@ -625,6 +783,7 @@ function initActionButtons() {
     const btn = $("#btn-start-node");
     btn.disabled = true;
     btn.textContent = "Starting...";
+    versionModalDismissed = false;
     try {
       await window.pywebview.api.start_node();
     } catch (e) {}
