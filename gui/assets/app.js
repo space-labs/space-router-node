@@ -667,12 +667,20 @@ async function updateStatus() {
         detail.textContent = "";
     }
 
-    // Show error report modal only on permanent errors (not during retries)
-    if (status.error_report_available && state === "error_permanent") {
-      const reportKey = status.error_code || "unknown";
-      if (errorReportShownForKey !== reportKey) {
-        errorReportShownForKey = reportKey;
-        showErrorReportModal();
+    // Show error report modal:
+    // - Immediately on permanent errors
+    // - After 3+ retries for persistent transient errors (once per error type)
+    if (status.error_report_available) {
+      const showNow =
+        state === "error_permanent" ||
+        (state === "error_transient" && (status.retry_count || 0) >= 3);
+
+      if (showNow) {
+        const reportKey = status.error_code || "unknown";
+        if (errorReportShownForKey !== reportKey) {
+          errorReportShownForKey = reportKey;
+          showErrorReportModal();
+        }
       }
     }
 

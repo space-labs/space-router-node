@@ -130,14 +130,12 @@ class NodeManager:
             if self._sm.state not in (NodeState.ERROR_PERMANENT, NodeState.ERROR_TRANSIENT):
                 delay = self._sm.handle_error(exc, self._sm.state)
                 if delay is not None:
-                    # Transient error — schedule retry in a new run.
-                    # Don't mark as reportable — transient errors auto-recover
-                    # and the modal would be invasive during retries.
+                    # Transient error — schedule retry.
+                    # Mark reportable so the JS can show the modal after 3+ retries.
                     self._schedule_retry(delay)
+                    self._mark_reportable(exc)
                     return
-            # Only offer error reporting for permanent errors
-            if self._sm.state == NodeState.ERROR_PERMANENT:
-                self._mark_reportable(exc)
+            self._mark_reportable(exc)
         except SystemExit:
             logger.warning("Node exited with SystemExit")
             if self._sm.state not in (NodeState.ERROR_PERMANENT, NodeState.ERROR_TRANSIENT):
@@ -153,9 +151,9 @@ class NodeManager:
                 delay = self._sm.handle_error(error, self._sm.state)
                 if delay is not None:
                     self._schedule_retry(delay)
+                    self._mark_reportable(error)
                     return
-            if self._sm.state == NodeState.ERROR_PERMANENT:
-                self._mark_reportable(error)
+            self._mark_reportable(error)
         finally:
             if self._sm.state not in (
                 NodeState.ERROR_PERMANENT, NodeState.ERROR_TRANSIENT,
