@@ -667,9 +667,9 @@ async function updateStatus() {
         detail.textContent = "";
     }
 
-    // Show error report modal (once per error instance)
-    if (status.error_report_available) {
-      const reportKey = (status.error_code || "") + ":" + (status.retry_count || 0);
+    // Show error report modal only on permanent errors (not during retries)
+    if (status.error_report_available && state === "error_permanent") {
+      const reportKey = status.error_code || "unknown";
       if (errorReportShownForKey !== reportKey) {
         errorReportShownForKey = reportKey;
         showErrorReportModal();
