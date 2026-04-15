@@ -29,6 +29,36 @@ function Log($msg) { Write-Host "  [INFO]  $msg" }
 function Pass($msg) { Write-Host "  [PASS]  $msg"; $script:Pass++ }
 function Fail($msg) { Write-Host "  [FAIL]  $msg"; $script:Fail++ }
 
+# Reliable TCP port check using TcpClient (Test-NetConnection is unreliable on CI runners)
+function Test-TcpPort {
+    param([int]$Port, [int]$TimeoutMs = 2000)
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $result = $tcp.BeginConnect("127.0.0.1", $Port, $null, $null)
+        $success = $result.AsyncWaitHandle.WaitOne($TimeoutMs)
+        if ($success) {
+            $tcp.EndConnect($result)
+        }
+        $tcp.Close()
+        return $success
+    }
+    catch {
+        return $false
+    }
+}
+
+# Poll until port is listening or timeout (returns $true/$false)
+function Wait-ForPort {
+    param([int]$Port, [int]$MaxSeconds = 30)
+    for ($i = 0; $i -lt $MaxSeconds; $i++) {
+        if (Test-TcpPort -Port $Port) {
+            return $true
+        }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
 # Start a mock coordination API
 function Start-MockApi {
     $mockScript = @"
@@ -79,19 +109,13 @@ server.serve_forever()
     $env:SR_COORDINATION_API_URL = "http://127.0.0.1:$MockApiPort"
     Log "Started mock coordination API on port $MockApiPort (PID $($script:MockApiProcess.Id))"
 
-    # Wait for the mock API to be ready (up to 10 seconds)
-    for ($i = 0; $i -lt 20; $i++) {
-        try {
-            $null = Invoke-WebRequest -Uri "http://127.0.0.1:$MockApiPort/" -Method GET -TimeoutSec 1 -ErrorAction SilentlyContinue
-            Log "Mock API is ready"
-            return
-        }
-        catch {
-            # Connection refused or other error — server not ready yet
-        }
-        Start-Sleep -Milliseconds 500
+    # Wait for the mock API to be ready
+    if (Wait-ForPort -Port $MockApiPort -MaxSeconds 10) {
+        Log "Mock API is ready"
     }
-    Log "WARNING: Mock API may not be ready after 10 seconds"
+    else {
+        Log "WARNING: Mock API may not be ready after 10 seconds"
+    }
 }
 
 function Stop-MockApi {
@@ -127,22 +151,12 @@ function Test-PortBinding {
     $proc = Start-Process -FilePath $Binary -PassThru -NoNewWindow
     Log "Started binary with PID $($proc.Id)"
 
-    Start-Sleep -Seconds 6
+    # Poll until the port is listening (up to 30 seconds)
+    $listening = Wait-ForPort -Port ([int]$env:SR_NODE_PORT) -MaxSeconds 30
 
     if ($proc.HasExited) {
         Fail "Binary exited prematurely with code $($proc.ExitCode)"
         return
-    }
-
-    # Check if the port is listening
-    try {
-        $connection = Test-NetConnection -ComputerName 127.0.0.1 -Port ([int]$env:SR_NODE_PORT) -WarningAction SilentlyContinue
-        $listening = $connection.TcpTestSucceeded
-    }
-    catch {
-        Log "Test-NetConnection failed: $_, trying netstat fallback"
-        $netstat = netstat -an 2>$null | Select-String ":$($env:SR_NODE_PORT)\s+.*LISTENING"
-        $listening = ($null -ne $netstat)
     }
 
     # Clean up
@@ -156,7 +170,7 @@ function Test-PortBinding {
         Pass "Binary is listening on port $($env:SR_NODE_PORT)"
     }
     else {
-        Fail "Binary did not bind to port $($env:SR_NODE_PORT)"
+        Fail "Binary did not bind to port $($env:SR_NODE_PORT) within 30 seconds"
     }
 }
 
@@ -169,11 +183,16 @@ function Test-CleanShutdown {
     $proc = Start-Process -FilePath $Binary -PassThru -NoNewWindow
     Log "Started binary with PID $($proc.Id)"
 
-    Start-Sleep -Seconds 6
+    # Wait until the port is bound before sending stop signal
+    $ready = Wait-ForPort -Port ([int]$env:SR_NODE_PORT) -MaxSeconds 30
 
     if ($proc.HasExited) {
         Fail "Binary exited before shutdown signal could be sent"
         return
+    }
+
+    if (-not $ready) {
+        Log "WARNING: Port not detected as listening, proceeding with shutdown test anyway"
     }
 
     # On Windows, console apps don't respond to WM_CLOSE (taskkill without /F).
