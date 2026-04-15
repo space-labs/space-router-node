@@ -93,9 +93,6 @@ class Settings(BaseSettings):
     EIP712_DOMAIN_NAME: str = "TokenPaymentEscrow"
     EIP712_DOMAIN_VERSION: str = "1"
 
-    RECEIPTS_SUPABASE_URL: str = ""
-    RECEIPTS_SUPABASE_KEY: SecretStr = SecretStr("")
-
     @field_validator("REGISTRATION_MODE")
     @classmethod
     def _validate_registration_mode(cls, v: str) -> str:

@@ -1,8 +1,12 @@
 """Provider SettlementManager — accumulates signed receipts and settles on-chain.
 
 The Provider receives EIP-712 signed receipts from the Gateway (Leg 2).
-These are stored and periodically submitted to the TokenPaymentEscrow
-contract via ``claimBatch()``.
+These are stored in-memory and periodically submitted to the
+TokenPaymentEscrow contract via ``claimBatch()``.
+
+Note: Provider apps run on user machines — NO external database connections.
+Storage is purely in-memory. Receipts are lost on restart but can be
+re-generated from on-chain events if needed.
 """
 
 from __future__ import annotations
@@ -36,7 +40,7 @@ class SettlementStats:
 class SettlementManager:
     """Accumulates signed receipts and settles them on-chain in batches.
 
-    If Supabase is not configured, falls back to in-memory storage.
+    All storage is in-memory (provider runs on user machines, no external DB).
     """
 
     def __init__(
@@ -46,22 +50,17 @@ class SettlementManager:
         private_key: str = "",
         batch_size: int = 50,
         settlement_interval: int = 3600,
-        supabase_url: str = "",
-        supabase_key: str = "",
     ) -> None:
         self._rpc_url = rpc_url
         self._contract_address = contract_address
         self._private_key = private_key
         self._batch_size = batch_size
         self._settlement_interval = settlement_interval
-        self._supabase_url = supabase_url
-        self._supabase_key = supabase_key
 
         self._w3: Web3 | None = None
         self._contract = None
         self._account = Account.from_key(private_key) if private_key else None
 
-        # In-memory fallback
         self._receipts: list[dict] = []
         self._settlement_task: asyncio.Task | None = None
 
@@ -90,7 +89,7 @@ class SettlementManager:
 
     def add_receipt(self, receipt: Receipt, signature: str) -> None:
         """Store a signed receipt for later batch settlement."""
-        entry = {
+        self._receipts.append({
             "request_uuid": receipt.request_uuid,
             "client_address": receipt.client_address,
             "node_address": receipt.node_address,
@@ -102,65 +101,14 @@ class SettlementManager:
             "created_at": time.time(),
             "settled_at": None,
             "source": "node_leg2",
-        }
-
-        if self._supabase_url:
-            self._store_to_supabase(entry)
-        else:
-            self._receipts.append(entry)
-
-    def _store_to_supabase(self, entry: dict) -> None:
-        import httpx
-        try:
-            resp = httpx.post(
-                f"{self._supabase_url}/rest/v1/signed_receipts",
-                json=entry,
-                headers={
-                    "apikey": self._supabase_key,
-                    "Authorization": f"Bearer {self._supabase_key}",
-                    "Content-Type": "application/json",
-                    "Prefer": "return=minimal",
-                },
-                timeout=10.0,
-            )
-            resp.raise_for_status()
-        except Exception as e:
-            logger.error("Failed to store receipt in Supabase: %s", e)
-            self._receipts.append(entry)
+        })
 
     def get_unsettled_batch(self, limit: int | None = None) -> list[dict]:
         batch_size = limit or self._batch_size
-        if self._supabase_url:
-            return self._fetch_from_supabase(batch_size)
         return [r for r in self._receipts if r["status"] == "unsettled"][:batch_size]
-
-    def _fetch_from_supabase(self, limit: int) -> list[dict]:
-        import httpx
-        try:
-            resp = httpx.get(
-                f"{self._supabase_url}/rest/v1/signed_receipts",
-                params={
-                    "status": "eq.unsettled",
-                    "source": "eq.node_leg2",
-                    "order": "created_at.asc",
-                    "limit": str(limit),
-                },
-                headers={
-                    "apikey": self._supabase_key,
-                    "Authorization": f"Bearer {self._supabase_key}",
-                },
-                timeout=10.0,
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            logger.error("Failed to fetch receipts from Supabase: %s", e)
-            return []
 
     def mark_settled(self, request_uuids: list[str], tx_hash: str) -> None:
         now = time.time()
-        if self._supabase_url:
-            self._mark_status_supabase(request_uuids, "settled", tx_hash)
         for r in self._receipts:
             if r["request_uuid"] in request_uuids:
                 r["status"] = "settled"
@@ -168,39 +116,9 @@ class SettlementManager:
                 r["settled_at"] = now
 
     def mark_failed(self, request_uuids: list[str]) -> None:
-        if self._supabase_url:
-            self._mark_status_supabase(request_uuids, "failed")
         for r in self._receipts:
             if r["request_uuid"] in request_uuids:
                 r["status"] = "failed"
-
-    def _mark_status_supabase(
-        self, request_uuids: list[str], status: str, tx_hash: str = "",
-    ) -> None:
-        import httpx
-        now = time.time()
-        for uuid_val in request_uuids:
-            try:
-                update = {"status": status}
-                if tx_hash:
-                    update["claim_tx_hash"] = tx_hash
-                if status == "settled":
-                    update["settled_at"] = now
-                resp = httpx.patch(
-                    f"{self._supabase_url}/rest/v1/signed_receipts",
-                    params={"request_uuid": f"eq.{uuid_val}"},
-                    json=update,
-                    headers={
-                        "apikey": self._supabase_key,
-                        "Authorization": f"Bearer {self._supabase_key}",
-                        "Content-Type": "application/json",
-                        "Prefer": "return=minimal",
-                    },
-                    timeout=10.0,
-                )
-                resp.raise_for_status()
-            except Exception as e:
-                logger.error("Failed to update receipt status in Supabase: %s", e)
 
     def get_stats(self) -> SettlementStats:
         total = len(self._receipts)
@@ -259,7 +177,7 @@ class SettlementManager:
         if self._settlement_interval > 0:
             self._settlement_task = asyncio.create_task(self._settlement_loop())
             logger.info(
-                "Node SettlementManager started: batch=%d interval=%ds",
+                "Provider SettlementManager started: batch=%d interval=%ds",
                 self._batch_size, self._settlement_interval,
             )
 
@@ -307,11 +225,11 @@ class SettlementManager:
         if not receipts:
             return
 
-        logger.info("Settling batch of %d node receipts...", len(receipts))
+        logger.info("Settling batch of %d provider receipts...", len(receipts))
         try:
-            tx_hash = self.claim_batch(receipts, signatures)
-            logger.info("Node settlement tx: %s (%d receipts)", tx_hash, len(receipts))
+            tx_hash = await asyncio.to_thread(self.claim_batch, receipts, signatures)
+            logger.info("Provider settlement tx: %s (%d receipts)", tx_hash, len(receipts))
             self.mark_settled(uuids, tx_hash)
         except Exception as e:
-            logger.error("Node settlement failed: %s", e)
+            logger.error("Provider settlement failed: %s", e)
             self.mark_failed(uuids)
