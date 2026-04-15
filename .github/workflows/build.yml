@@ -235,7 +235,16 @@ jobs:
                     "dist\${{ steps.artifact.outputs.name }}-setup.exe"
           Write-Host "Built installer: dist\${{ steps.artifact.outputs.name }}-setup.exe"
 
-      # Step 2: Sign the NSIS installer (freshly created, no lock issues)
+      # Step 2: Sign the NSIS installer only.
+      # The raw binary in dist/ is now AV-locked from the smoke test, so we
+      # isolate the installer in its own folder to avoid re-signing the binary.
+      - name: Prepare installer for signing (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist\installer-signing -Force | Out-Null
+          Move-Item "dist\${{ steps.artifact.outputs.name }}-setup.exe" dist\installer-signing\
+
       - name: Sign Windows installer
         if: runner.os == 'Windows'
         uses: azure/trusted-signing-action@v0.5.0
@@ -243,11 +252,18 @@ jobs:
           endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
           trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
-          files-folder: dist
+          files-folder: dist/installer-signing
           files-folder-filter: exe
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
+
+      - name: Move signed installer back (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Move-Item "dist\installer-signing\*" dist\
+          Remove-Item -Recurse -Force dist\installer-signing
 
       # ---- macOS code signing & notarization (cert already imported above) ----
       - name: Sign macOS binary
