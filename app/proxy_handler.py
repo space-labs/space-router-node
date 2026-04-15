@@ -454,12 +454,10 @@ async def _do_receipt_exchange(
 
     if result:
         signature, signed_receipt = result
-        # Store for settlement (lazy-import to avoid startup cost)
-        from app.payment import _settlement_manager
-        if _settlement_manager is not None:
-            _settlement_manager.add_receipt(signed_receipt, signature)
-        else:
-            logger.debug("No settlement manager — receipt not stored")
+        logger.info(
+            "Leg 2 receipt exchanged: uuid=%s amount=%d (Gateway settles on-chain)",
+            signed_receipt.request_uuid, signed_receipt.data_amount,
+        )
 
 
 # ---------------------------------------------------------------------------
