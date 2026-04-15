@@ -1,10 +1,9 @@
-"""Tests for node payment receipt exchange and settlement (Phase 4).
+"""Tests for provider payment receipt exchange (Phase 4).
 
 Covers:
 - Receipt building (price calculation, bytes32 node address)
 - Frame protocol (encode/decode/roundtrip)
 - Receipt exchange with gateway (happy path, rejection, timeout, EOF)
-- SettlementManager (store, batch, mark settled/failed, stats, lifecycle)
 - Config payment fields
 """
 
@@ -27,7 +26,6 @@ from app.payment.receipt_exchange import (
     exchange_receipt_with_gateway,
     read_frame,
 )
-from app.payment.settlement import SettlementManager, SettlementStats
 
 # ── Test constants ────────────────────────────────────────────────────
 
@@ -218,91 +216,6 @@ class TestReceiptExchangeWithGateway:
         assert result is None
 
 
-# ── SettlementManager ─────────────────────────────────────────────────
-
-
-class TestSettlementManager:
-    def _make_receipt(self) -> Receipt:
-        return Receipt(
-            client_address=GATEWAY_ADDRESS,
-            node_address=NODE_B32,
-            request_uuid=str(uuid.uuid4()),
-            data_amount=5000,
-            total_price=100,
-        )
-
-    def test_add_and_get_batch(self):
-        mgr = SettlementManager(batch_size=10, settlement_interval=0)
-        r = self._make_receipt()
-        mgr.add_receipt(r, "0xfakesig")
-
-        batch = mgr.get_unsettled_batch()
-        assert len(batch) == 1
-        assert batch[0]["request_uuid"] == r.request_uuid
-        assert batch[0]["source"] == "node_leg2"
-
-    def test_batch_limit(self):
-        mgr = SettlementManager(batch_size=3, settlement_interval=0)
-        for _ in range(10):
-            mgr.add_receipt(self._make_receipt(), "0xsig")
-        assert len(mgr.get_unsettled_batch()) == 3
-
-    def test_mark_settled(self):
-        mgr = SettlementManager(batch_size=10, settlement_interval=0)
-        r = self._make_receipt()
-        mgr.add_receipt(r, "0xsig")
-        mgr.mark_settled([r.request_uuid], "0xtxhash")
-
-        assert len(mgr.get_unsettled_batch()) == 0
-        stats = mgr.get_stats()
-        assert stats.settled == 1
-
-    def test_mark_failed(self):
-        mgr = SettlementManager(batch_size=10, settlement_interval=0)
-        r = self._make_receipt()
-        mgr.add_receipt(r, "0xsig")
-        mgr.mark_failed([r.request_uuid])
-
-        stats = mgr.get_stats()
-        assert stats.failed == 1
-        assert stats.unsettled == 0
-
-    def test_get_stats(self):
-        mgr = SettlementManager(batch_size=10, settlement_interval=0)
-        for i in range(5):
-            mgr.add_receipt(self._make_receipt(), f"0xsig{i}")
-
-        # Settle 2, fail 1
-        uuids = [r["request_uuid"] for r in mgr._receipts]
-        mgr.mark_settled(uuids[:2], "0xtx1")
-        mgr.mark_failed(uuids[2:3])
-
-        stats = mgr.get_stats()
-        assert stats.total == 5
-        assert stats.settled == 2
-        assert stats.failed == 1
-        assert stats.unsettled == 2
-
-    @pytest.mark.asyncio
-    async def test_start_and_stop(self):
-        mgr = SettlementManager(batch_size=10, settlement_interval=1)
-        await mgr.start()
-        assert mgr._settlement_task is not None
-        await mgr.stop()
-        assert mgr._settlement_task.cancelled() or mgr._settlement_task.done()
-
-    def test_claim_batch_empty_raises(self):
-        mgr = SettlementManager(batch_size=10, settlement_interval=0)
-        with pytest.raises(ValueError, match="Empty"):
-            mgr.claim_batch([], [])
-
-    def test_claim_batch_mismatch_raises(self):
-        mgr = SettlementManager(batch_size=10, settlement_interval=0)
-        r = self._make_receipt()
-        with pytest.raises(ValueError, match="same length"):
-            mgr.claim_batch([r], [])
-
-
 # ── Config Fields ─────────────────────────────────────────────────────
 
 
@@ -313,8 +226,7 @@ class TestPaymentConfig:
         fields = Settings.model_fields
         assert "PAYMENT_ENABLED" in fields
         assert "NODE_RATE_PER_GB" in fields
-        assert "SETTLEMENT_ENABLED" in fields
-        assert "EIP712_DOMAIN_NAME" in fields
+        assert "NODE_IDENTITY_ADDRESS" in fields
 
     def test_payment_config_from_env(self, monkeypatch):
         monkeypatch.setenv("SR_PAYMENT_ENABLED", "true")
