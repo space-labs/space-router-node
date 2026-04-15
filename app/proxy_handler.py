@@ -1,8 +1,8 @@
-"""Core proxy logic for the Home Node.
+"""Core proxy logic for the Provider.
 
-The Home Node is the server-side counterpart to the Proxy Gateway's
-_connect_to_node → handle_connect / handle_http_forward flow.  It receives
-proxied traffic from the Proxy Gateway and forwards it to target servers
+The Provider is the server-side counterpart to the Gateway's
+_connect_to_node -> handle_connect / handle_http_forward flow.  It receives
+proxied traffic from the Gateway and forwards it to target servers
 from its residential IP.
 """
 
@@ -350,6 +350,7 @@ async def handle_connect(
     target_port: int,
     settings: Settings,
     request_id: str | None = None,
+    gateway_address: str = "",
 ) -> None:
     """Open a TCP connection to *target_host:target_port*, reply 200, then
     relay bytes bidirectionally between the client (Proxy Gateway) and the
@@ -390,7 +391,7 @@ async def handle_connect(
     await client_writer.drain()
 
     try:
-        await relay_streams(
+        bytes_sent, bytes_received = await relay_streams(
             client_reader,
             client_writer,
             target_reader,
@@ -398,12 +399,67 @@ async def handle_connect(
             settings.BUFFER_SIZE,
             settings.RELAY_TIMEOUT,
         )
+
+        # Leg 2 receipt exchange: send receipt to gateway, get signature
+        if settings.PAYMENT_ENABLED and settings.NODE_RATE_PER_GB > 0:
+            await _do_receipt_exchange(
+                client_reader, client_writer, settings,
+                bytes_sent + bytes_received, request_id,
+                gateway_address=gateway_address,
+            )
     finally:
         try:
             target_writer.close()
             await target_writer.wait_closed()
         except Exception:
             pass
+
+
+async def _do_receipt_exchange(
+    gateway_reader: asyncio.StreamReader,
+    gateway_writer: asyncio.StreamWriter,
+    settings: Settings,
+    data_amount: int,
+    request_id: str | None,
+    gateway_address: str = "",
+) -> None:
+    """Build a receipt, send to Gateway, store the signed response.
+
+    The Gateway's EVM address is received via the
+    ``X-SpaceRouter-Gateway-Address`` header in the CONNECT request.
+    """
+    from app.payment.receipt_exchange import build_receipt, exchange_receipt_with_gateway
+    from app.payment.eip712 import address_to_bytes32
+
+    if not gateway_address:
+        logger.debug("No gateway address — skipping receipt exchange")
+        return
+
+    node_identity = settings.NODE_IDENTITY_ADDRESS or settings.COLLECTION_ADDRESS or settings.STAKING_ADDRESS
+    if not node_identity:
+        logger.debug("No provider identity address — skipping receipt exchange")
+        return
+
+    node_b32 = address_to_bytes32(node_identity)
+    receipt = build_receipt(
+        gateway_address=gateway_address,
+        node_address_bytes32=node_b32,
+        data_amount=data_amount,
+        rate_per_gb=settings.NODE_RATE_PER_GB,
+    )
+
+    result = await exchange_receipt_with_gateway(
+        gateway_reader, gateway_writer, receipt,
+    )
+
+    if result:
+        signature, signed_receipt = result
+        # Store for settlement (lazy-import to avoid startup cost)
+        from app.payment import _settlement_manager
+        if _settlement_manager is not None:
+            _settlement_manager.add_receipt(signed_receipt, signature)
+        else:
+            logger.debug("No settlement manager — receipt not stored")
 
 
 # ---------------------------------------------------------------------------
@@ -692,7 +748,16 @@ async def handle_client(
                         f" [request_id={request_id}]" if request_id else "",
                     )
 
-                await handle_connect(reader, writer, target_host, target_port, settings, request_id)
+                # Extract gateway payment address for Leg 2 receipt exchange
+                gw_addr = (
+                    headers.get("X-SpaceRouter-Gateway-Address")
+                    or headers.get("x-spacerouter-gateway-address")
+                    or ""
+                )
+                await handle_connect(
+                    reader, writer, target_host, target_port, settings,
+                    request_id, gateway_address=gw_addr,
+                )
             else:
                 counted = True
                 total = _activity.record_connection()
