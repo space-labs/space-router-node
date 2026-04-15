@@ -1,7 +1,7 @@
 import logging
 import warnings
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.variant import BUILD_VARIANT
@@ -77,6 +77,24 @@ class Settings(BaseSettings):
     # mTLS — Gateway authentication (requires gateway_ca_cert from registration)
     MTLS_ENABLED: bool = True
     GATEWAY_CA_CERT_PATH: str = "certs/gateway-ca.crt"
+
+    # ── Payment / Settlement (v0.2.x) ────────────────────────────────
+    PAYMENT_ENABLED: bool = False
+    NODE_RATE_PER_GB: int = 0               # Price per GB in token's smallest unit
+    NODE_IDENTITY_ADDRESS: str = ""         # EVM address, zero-padded to bytes32 for receipts
+
+    SETTLEMENT_ENABLED: bool = False
+    SETTLEMENT_BATCH_SIZE: int = 50
+    SETTLEMENT_INTERVAL: int = 3600         # seconds
+    ESCROW_CONTRACT_ADDRESS: str = ""
+    ESCROW_CHAIN_RPC: str = ""
+    NODE_SETTLEMENT_KEY: SecretStr = SecretStr("")
+
+    EIP712_DOMAIN_NAME: str = "TokenPaymentEscrow"
+    EIP712_DOMAIN_VERSION: str = "1"
+
+    RECEIPTS_SUPABASE_URL: str = ""
+    RECEIPTS_SUPABASE_KEY: SecretStr = SecretStr("")
 
     @field_validator("REGISTRATION_MODE")
     @classmethod
