@@ -143,9 +143,10 @@ jobs:
 
       # ---- Windows code signing via Azure Trusted Signing ----
       # Step 1: Sign the raw binary BEFORE building the NSIS installer so the
-      # installer embeds an already-signed executable.  A file-lock wait is
-      # needed because Windows Defender scans the binary after the smoke test
-      # runs it, holding a transient write lock.
+      # installer embeds an already-signed executable.
+      # After the smoke test, Windows Defender holds a write-lock on the binary
+      # while scanning it.  Copying to a fresh path sidesteps the lock entirely
+      # (AV tracks the original inode, not the copy).
       - name: Azure login (Windows)
         if: runner.os == 'Windows'
         uses: azure/login@v2
@@ -154,23 +155,14 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Wait for file lock and sign Windows binary
+      - name: Prepare binary for signing (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $binary = "dist\${{ steps.artifact.outputs.name }}.exe"
-          Write-Host "Waiting for $binary to be writable..."
-          for ($i = 0; $i -lt 60; $i++) {
-              try {
-                  $fs = [IO.File]::Open($binary, 'Open', 'ReadWrite', 'None')
-                  $fs.Close()
-                  Write-Host "File is writable after $i seconds"
-                  break
-              } catch {
-                  if ($i % 10 -eq 0) { Write-Host "  Still locked ($i s)..." }
-                  Start-Sleep -Seconds 1
-              }
-          }
+          New-Item -ItemType Directory -Path dist\signing -Force | Out-Null
+          Copy-Item $binary dist\signing\
+          Write-Host "Copied binary to dist\signing\ for signing"
 
       - name: Sign Windows binary
         if: runner.os == 'Windows'
@@ -179,11 +171,20 @@ jobs:
           endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
           trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
-          files-folder: dist
+          files-folder: dist/signing
           files-folder-filter: exe
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
+
+      - name: Replace binary with signed copy (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = "${{ steps.artifact.outputs.name }}.exe"
+          Move-Item -Force "dist\signing\$binary" "dist\$binary"
+          Remove-Item -Recurse -Force dist\signing
+          Write-Host "Replaced dist\$binary with signed version"
 
       # Build Windows NSIS installer with WinSW service wrapper.
       # The binary is already signed, so the installer embeds a signed exe.
