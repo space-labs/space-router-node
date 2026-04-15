@@ -159,6 +159,8 @@ class SettlementManager:
 
     def mark_settled(self, request_uuids: list[str], tx_hash: str) -> None:
         now = time.time()
+        if self._supabase_url:
+            self._mark_status_supabase(request_uuids, "settled", tx_hash)
         for r in self._receipts:
             if r["request_uuid"] in request_uuids:
                 r["status"] = "settled"
@@ -166,9 +168,39 @@ class SettlementManager:
                 r["settled_at"] = now
 
     def mark_failed(self, request_uuids: list[str]) -> None:
+        if self._supabase_url:
+            self._mark_status_supabase(request_uuids, "failed")
         for r in self._receipts:
             if r["request_uuid"] in request_uuids:
                 r["status"] = "failed"
+
+    def _mark_status_supabase(
+        self, request_uuids: list[str], status: str, tx_hash: str = "",
+    ) -> None:
+        import httpx
+        now = time.time()
+        for uuid_val in request_uuids:
+            try:
+                update = {"status": status}
+                if tx_hash:
+                    update["claim_tx_hash"] = tx_hash
+                if status == "settled":
+                    update["settled_at"] = now
+                resp = httpx.patch(
+                    f"{self._supabase_url}/rest/v1/signed_receipts",
+                    params={"request_uuid": f"eq.{uuid_val}"},
+                    json=update,
+                    headers={
+                        "apikey": self._supabase_key,
+                        "Authorization": f"Bearer {self._supabase_key}",
+                        "Content-Type": "application/json",
+                        "Prefer": "return=minimal",
+                    },
+                    timeout=10.0,
+                )
+                resp.raise_for_status()
+            except Exception as e:
+                logger.error("Failed to update receipt status in Supabase: %s", e)
 
     def get_stats(self) -> SettlementStats:
         total = len(self._receipts)

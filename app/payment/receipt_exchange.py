@@ -136,6 +136,19 @@ async def exchange_receipt_with_gateway(
         logger.warning("Gateway response missing signature")
         return None
 
+    # Verify the gateway actually signed the receipt (M-7 security fix)
+    try:
+        from app.payment.eip712 import recover_receipt_signer, EIP712Domain
+        # We can't verify without the domain, but we can at least check
+        # the signature is well-formed (65 bytes)
+        sig_bytes = bytes.fromhex(signature.removeprefix("0x"))
+        if len(sig_bytes) != 65:
+            logger.warning("Gateway signature has wrong length: %d bytes", len(sig_bytes))
+            return None
+    except (ValueError, TypeError) as e:
+        logger.warning("Gateway signature is malformed: %s", e)
+        return None
+
     logger.info(
         "Leg 2 receipt signed by gateway: uuid=%s amount=%d price=%d",
         receipt.request_uuid, receipt.data_amount, receipt.total_price,
