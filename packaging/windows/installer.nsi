@@ -79,12 +79,16 @@ Section "Install" SecInstall
   SetOutPath "$INSTDIR"
 
   ; --- Stop existing service if upgrading ---
-  IfFileExists "$INSTDIR\space-router-node-service.exe" 0 +3
+  IfFileExists "$INSTDIR\space-router-node-service.exe" 0 skip_stop
     nsExec::ExecToLog '"$INSTDIR\space-router-node-service.exe" stop'
     nsExec::ExecToLog '"$INSTDIR\space-router-node-service.exe" uninstall'
+    ; Wait for process to fully exit (WinSW stop returns before process terminates)
+    Sleep 3000
+    nsExec::ExecToLog 'taskkill /F /IM space-router-node.exe /T'
+  skip_stop:
 
   ; --- Install files ---
-  File "${BINARY}"
+  File /oname=space-router-node.exe "${BINARY}"
   File /oname=space-router-node-service.exe "${WINSW}"
   File "space-router-node-service.xml"
   File /oname=spacerouter.env.default "..\spacerouter.env"
@@ -134,9 +138,13 @@ SectionEnd
 ; ---------------------------------------------------------------------------
 Section "Uninstall"
   ; --- Stop and remove the service ---
-  IfFileExists "$INSTDIR\space-router-node-service.exe" 0 +3
+  IfFileExists "$INSTDIR\space-router-node-service.exe" 0 skip_svc_remove
     nsExec::ExecToLog '"$INSTDIR\space-router-node-service.exe" stop'
     nsExec::ExecToLog '"$INSTDIR\space-router-node-service.exe" uninstall'
+    ; Wait for process to fully exit (WinSW stop returns before process terminates)
+    Sleep 3000
+    nsExec::ExecToLog 'taskkill /F /IM space-router-node.exe /T'
+  skip_svc_remove:
 
   ; --- Remove firewall rule ---
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Space Router Home Node (TCP-In)"'

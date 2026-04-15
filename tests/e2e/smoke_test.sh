@@ -120,28 +120,33 @@ test_port_binding() {
     PID=$!
     log "Started binary with PID $PID"
 
-    # Give it time to start, register, and bind
-    sleep 5
-
-    if ! kill -0 "$PID" 2>/dev/null; then
-        fail "Binary exited prematurely"
-        return
-    fi
-
-    # Check if the port is listening
-    if command -v lsof &>/dev/null; then
-        LISTENING=$(lsof -iTCP:"${SR_NODE_PORT}" -sTCP:LISTEN 2>/dev/null || true)
-    elif command -v ss &>/dev/null; then
-        LISTENING=$(ss -tlnp 2>/dev/null | grep ":${SR_NODE_PORT}" || true)
-    elif command -v netstat &>/dev/null; then
-        LISTENING=$(netstat -an 2>/dev/null | grep "LISTEN" | grep ":${SR_NODE_PORT}" || true)
-    else
-        log "No port-checking tool available, skipping port binding check"
-        kill "$PID" 2>/dev/null || true
-        wait "$PID" 2>/dev/null || true
-        pass "Binary started (port check skipped — no lsof/ss/netstat)"
-        return
-    fi
+    # Poll until the port is listening (up to 30 seconds).
+    # The binary needs to fetch config, detect public IP, generate identity,
+    # and register — startup time varies with CI runner load.
+    LISTENING=""
+    for i in $(seq 1 30); do
+        if ! kill -0 "$PID" 2>/dev/null; then
+            fail "Binary exited prematurely"
+            return
+        fi
+        if command -v lsof &>/dev/null; then
+            LISTENING=$(lsof -iTCP:"${SR_NODE_PORT}" -sTCP:LISTEN 2>/dev/null || true)
+        elif command -v ss &>/dev/null; then
+            LISTENING=$(ss -tlnp 2>/dev/null | grep ":${SR_NODE_PORT}" || true)
+        elif command -v netstat &>/dev/null; then
+            LISTENING=$(netstat -an 2>/dev/null | grep "LISTEN" | grep ":${SR_NODE_PORT}" || true)
+        else
+            log "No port-checking tool available, skipping port binding check"
+            kill "$PID" 2>/dev/null || true
+            wait "$PID" 2>/dev/null || true
+            pass "Binary started (port check skipped — no lsof/ss/netstat)"
+            return
+        fi
+        if [ -n "$LISTENING" ]; then
+            break
+        fi
+        sleep 1
+    done
 
     # Clean up
     kill "$PID" 2>/dev/null || true
@@ -150,7 +155,7 @@ test_port_binding() {
     if [ -n "$LISTENING" ]; then
         pass "Binary is listening on port $SR_NODE_PORT"
     else
-        fail "Binary did not bind to port $SR_NODE_PORT"
+        fail "Binary did not bind to port $SR_NODE_PORT within 30 seconds"
     fi
 }
 
@@ -164,7 +169,22 @@ test_clean_shutdown() {
     PID=$!
     log "Started binary with PID $PID"
 
-    sleep 5
+    # Wait until the port is bound before sending SIGTERM
+    for i in $(seq 1 30); do
+        if ! kill -0 "$PID" 2>/dev/null; then
+            fail "Binary exited before SIGTERM could be sent"
+            return
+        fi
+        if command -v lsof &>/dev/null; then
+            READY=$(lsof -iTCP:"${SR_NODE_PORT}" -sTCP:LISTEN 2>/dev/null || true)
+        elif command -v ss &>/dev/null; then
+            READY=$(ss -tlnp 2>/dev/null | grep ":${SR_NODE_PORT}" || true)
+        else
+            READY=""
+        fi
+        [ -n "$READY" ] && break
+        sleep 1
+    done
 
     if ! kill -0 "$PID" 2>/dev/null; then
         fail "Binary exited before SIGTERM could be sent"

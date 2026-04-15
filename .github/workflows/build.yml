@@ -25,16 +25,19 @@ jobs:
   build:
     needs: test
     environment: release
+    permissions:
+      id-token: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-14
-            artifact: space-router-node-macos-arm64
+            artifact_base: spacerouter-cli-macos-arm64
           - os: windows-latest
-            artifact: space-router-node-windows-x64
+            artifact_base: spacerouter-cli-windows-x64
           - os: ubuntu-latest
-            artifact: space-router-node-linux-x64
+            artifact_base: spacerouter-cli-linux-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +59,14 @@ jobs:
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building version: ${VERSION}"
+
+      - name: Compute artifact name
+        id: artifact
+        shell: bash
+        run: |
+          PKG_VERSION="${{ steps.version.outputs.version }}"
+          PKG_VERSION="${PKG_VERSION#v}"
+          echo "name=${{ matrix.artifact_base }}-${PKG_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: pip install -r requirements.txt pyinstaller
@@ -103,15 +114,41 @@ jobs:
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
-            mv dist/space-router-node.exe "dist/${{ matrix.artifact }}.exe"
+            mv dist/space-router-node.exe "dist/${{ steps.artifact.outputs.name }}.exe"
           else
-            mv dist/space-router-node "dist/${{ matrix.artifact }}"
+            mv dist/space-router-node "dist/${{ steps.artifact.outputs.name }}"
           fi
+
+      # ---- Windows code signing via Azure Trusted Signing ----
+      # Sign the binary BEFORE the smoke test.  Running the binary triggers a
+      # Windows Defender post-execution scan that holds a write-lock on the exe,
+      # making it impossible to sign afterwards.  Signing first avoids the lock
+      # entirely, and the smoke test then validates the signed binary (what we ship).
+      - name: Azure login (Windows)
+        if: runner.os == 'Windows'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Windows binary
+        if: runner.os == 'Windows'
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
+          files-folder: dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       - name: Smoke test (Unix)
         if: runner.os != 'Windows'
         shell: bash
-        run: bash tests/e2e/smoke_test.sh "dist/${{ matrix.artifact }}"
+        run: bash tests/e2e/smoke_test.sh "dist/${{ steps.artifact.outputs.name }}"
         env:
           EXPECTED_VERSION: ${{ steps.version.outputs.version }}
           SR_PUBLIC_IP: 127.0.0.1
@@ -122,7 +159,7 @@ jobs:
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: .\tests\e2e\smoke_test.ps1 -Binary "dist\${{ matrix.artifact }}.exe"
+        run: .\tests\e2e\smoke_test.ps1 -Binary "dist\${{ steps.artifact.outputs.name }}.exe"
         env:
           EXPECTED_VERSION: ${{ steps.version.outputs.version }}
           SR_PUBLIC_IP: 127.0.0.1
@@ -130,7 +167,8 @@ jobs:
           SR_NODE_PORT: "19090"
           SR_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
 
-      # Build Windows NSIS installer with WinSW service wrapper
+      # Build Windows NSIS installer with WinSW service wrapper.
+      # The binary is already signed, so the installer embeds a signed exe.
       - name: Download WinSW
         if: runner.os == 'Windows'
         shell: pwsh
@@ -189,13 +227,43 @@ jobs:
 
           makensis /DVERSION=$pkg_version `
                    /DNUMERIC_VERSION=$numeric_version `
-                   /DBINARY="..\..\dist\${{ matrix.artifact }}.exe" `
+                   /DBINARY="..\..\dist\${{ steps.artifact.outputs.name }}.exe" `
                    /DWINSW="WinSW-x64.exe" `
                    packaging\windows\installer.nsi
 
           Move-Item "packaging\windows\space-router-node-${pkg_version}-setup.exe" `
-                    "dist\${{ matrix.artifact }}-setup.exe"
-          Write-Host "Built installer: dist\${{ matrix.artifact }}-setup.exe"
+                    "dist\${{ steps.artifact.outputs.name }}-setup.exe"
+          Write-Host "Built installer: dist\${{ steps.artifact.outputs.name }}-setup.exe"
+
+      # Step 2: Sign the NSIS installer only.
+      # The raw binary in dist/ is now AV-locked from the smoke test, so we
+      # isolate the installer in its own folder to avoid re-signing the binary.
+      - name: Prepare installer for signing (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist\installer-signing -Force | Out-Null
+          Move-Item "dist\${{ steps.artifact.outputs.name }}-setup.exe" dist\installer-signing\
+
+      - name: Sign Windows installer
+        if: runner.os == 'Windows'
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
+          files-folder: dist/installer-signing
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Move signed installer back (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Move-Item "dist\installer-signing\*" dist\
+          Remove-Item -Recurse -Force dist\installer-signing
 
       # ---- macOS code signing & notarization (cert already imported above) ----
       - name: Sign macOS binary
@@ -208,7 +276,7 @@ jobs:
           codesign --force --options runtime \
             --sign "$APPLE_SIGNING_IDENTITY" \
             --timestamp \
-            "dist/${{ matrix.artifact }}"
+            "dist/${{ steps.artifact.outputs.name }}"
 
       - name: Notarize macOS binary
         if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
@@ -220,7 +288,7 @@ jobs:
         shell: bash
         run: |
           # Create a zip for notarization (notarytool requires zip/dmg/pkg)
-          ditto -c -k --keepParent "dist/${{ matrix.artifact }}" "$RUNNER_TEMP/notarize.zip"
+          ditto -c -k --keepParent "dist/${{ steps.artifact.outputs.name }}" "$RUNNER_TEMP/notarize.zip"
 
           xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
             --apple-id "$APPLE_ID" \
@@ -239,9 +307,9 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           PKG_VERSION="${VERSION#v}"
           bash packaging/macos/build_pkg.sh \
-            --binary "dist/${{ matrix.artifact }}" \
+            --binary "dist/${{ steps.artifact.outputs.name }}" \
             --version "${PKG_VERSION}" \
-            --output "dist/${{ matrix.artifact }}.pkg"
+            --output "dist/${{ steps.artifact.outputs.name }}.pkg"
 
       - name: Sign and notarize macOS package
         if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
@@ -252,7 +320,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
         run: |
-          PKG="dist/${{ matrix.artifact }}.pkg"
+          PKG="dist/${{ steps.artifact.outputs.name }}.pkg"
           [ -f "$PKG" ] || exit 0
 
           # productsign requires a "Developer ID Installer" cert which may
@@ -268,38 +336,13 @@ jobs:
               --wait
             xcrun stapler staple "$PKG"
           else
-            echo "⚠ Installer signing cert not found — .pkg will be unsigned (skipping notarization)"
+            echo "Installer signing cert not found — .pkg will be unsigned (skipping notarization)"
           fi
 
       - name: Clean up macOS keychain
         if: always() && runner.os == 'macOS' && env.KEYCHAIN_PATH != ''
         shell: bash
         run: security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
-
-      # ---- Windows code signing (skipped if secrets not set) ----
-      - name: Sign Windows binary
-        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_PFX != ''
-        env:
-          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        shell: pwsh
-        run: |
-          # Decode PFX from secret
-          $pfxBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX)
-          $pfxPath = Join-Path $env:RUNNER_TEMP "cert.pfx"
-          [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
-
-          # Find signtool
-          $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits" `
-            -Recurse -Filter "signtool.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-
-          # Sign the binary
-          & $signtool.FullName sign /f $pfxPath /p $env:WINDOWS_CERTIFICATE_PASSWORD `
-            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
-            "dist\${{ matrix.artifact }}.exe"
-
-          # Clean up
-          Remove-Item $pfxPath -Force
 
       # Build Linux packages (.deb and .rpm) via nfpm
       - name: Build Linux packages
@@ -313,35 +356,42 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           # Strip leading 'v' for package version
           PKG_VERSION="${VERSION#v}"
+          ARTIFACT="${{ steps.artifact.outputs.name }}"
+
+          # Update nfpm.yaml source path to match the versioned artifact name
+          sed -i "s|dist/space-router-node-linux-x64|dist/${ARTIFACT}|" nfpm.yaml
 
           # Build .deb
-          VERSION="${PKG_VERSION}" nfpm package --packager deb --target "dist/${{ matrix.artifact }}.deb"
+          VERSION="${PKG_VERSION}" nfpm package --packager deb --target "dist/${ARTIFACT}.deb"
 
           # Build .rpm
-          VERSION="${PKG_VERSION}" nfpm package --packager rpm --target "dist/${{ matrix.artifact }}.rpm"
+          VERSION="${PKG_VERSION}" nfpm package --packager rpm --target "dist/${ARTIFACT}.rpm"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: ${{ steps.artifact.outputs.name }}
           path: |
-            dist/${{ matrix.artifact }}
-            dist/${{ matrix.artifact }}.exe
-            dist/${{ matrix.artifact }}-setup.exe
-            dist/${{ matrix.artifact }}.deb
-            dist/${{ matrix.artifact }}.rpm
-            dist/${{ matrix.artifact }}.pkg
+            dist/${{ steps.artifact.outputs.name }}
+            dist/${{ steps.artifact.outputs.name }}.exe
+            dist/${{ steps.artifact.outputs.name }}-setup.exe
+            dist/${{ steps.artifact.outputs.name }}.deb
+            dist/${{ steps.artifact.outputs.name }}.rpm
+            dist/${{ steps.artifact.outputs.name }}.pkg
 
   build-gui:
     needs: test
     environment: release
+    permissions:
+      id-token: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-14
-            artifact: spacerouter-gui-macos-arm64
+            artifact_base: spacerouter-gui-macos-arm64
           - os: windows-latest
-            artifact: spacerouter-gui-windows-x64
+            artifact_base: spacerouter-gui-windows-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -363,6 +413,14 @@ jobs:
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building GUI version: ${VERSION}"
+
+      - name: Compute artifact name
+        id: artifact
+        shell: bash
+        run: |
+          PKG_VERSION="${{ steps.version.outputs.version }}"
+          PKG_VERSION="${PKG_VERSION#v}"
+          echo "name=${{ matrix.artifact_base }}-${PKG_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: pip install -r requirements.txt pyinstaller pywebview
@@ -439,7 +497,7 @@ jobs:
               if hdiutil create -volname "SpaceRouter" \
                    -srcfolder "dist/SpaceRouter.app" \
                    -ov -format UDZO \
-                   "dist/${{ matrix.artifact }}.dmg"; then
+                   "dist/${{ steps.artifact.outputs.name }}.dmg"; then
                 break
               fi
               if [ "$attempt" -lt 3 ]; then
@@ -447,7 +505,7 @@ jobs:
                 sleep 5
               fi
             done
-            if [ ! -f "dist/${{ matrix.artifact }}.dmg" ]; then
+            if [ ! -f "dist/${{ steps.artifact.outputs.name }}.dmg" ]; then
               echo "All hdiutil attempts failed"
               exit 1
             fi
@@ -462,7 +520,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
         run: |
-          DMG="dist/${{ matrix.artifact }}.dmg"
+          DMG="dist/${{ steps.artifact.outputs.name }}.dmg"
           if [ -f "$DMG" ]; then
             xcrun notarytool submit "$DMG" \
               --apple-id "$APPLE_ID" \
@@ -484,37 +542,41 @@ jobs:
         shell: pwsh
         run: |
           if (Test-Path "dist\SpaceRouter.exe") {
-            Move-Item "dist\SpaceRouter.exe" "dist\${{ matrix.artifact }}.exe"
+            Move-Item "dist\SpaceRouter.exe" "dist\${{ steps.artifact.outputs.name }}.exe"
           } else {
             Write-Error "SpaceRouter.exe not found in dist\"
             Get-ChildItem dist\ | Select-Object FullName
             exit 1
           }
 
-      # ---- Windows code signing ----
-      - name: Sign Windows binary
-        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_PFX != ''
-        env:
-          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        shell: pwsh
-        run: |
-          $pfxBytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX)
-          $pfxPath = Join-Path $env:RUNNER_TEMP "cert.pfx"
-          [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
-          $signtool = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits" `
-            -Recurse -Filter "signtool.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          & $signtool.FullName sign /f $pfxPath /p $env:WINDOWS_CERTIFICATE_PASSWORD `
-            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
-            "dist\${{ matrix.artifact }}.exe"
-          Remove-Item $pfxPath -Force
+      # ---- Windows code signing via Azure Trusted Signing ----
+      - name: Azure login (Windows)
+        if: runner.os == 'Windows'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Windows GUI executable
+        if: runner.os == 'Windows'
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
+          files-folder: dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: ${{ steps.artifact.outputs.name }}
           path: |
-            dist/${{ matrix.artifact }}.exe
-            dist/${{ matrix.artifact }}.dmg
+            dist/${{ steps.artifact.outputs.name }}.exe
+            dist/${{ steps.artifact.outputs.name }}.dmg
 
   release:
     needs: [build, build-gui]
