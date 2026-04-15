@@ -141,7 +141,52 @@ jobs:
           SR_NODE_PORT: "19090"
           SR_WALLET_ADDRESS: "0x0000000000000000000000000000000000000001"
 
-      # Build Windows NSIS installer with WinSW service wrapper
+      # ---- Windows code signing via Azure Trusted Signing ----
+      # Step 1: Sign the raw binary BEFORE building the NSIS installer so the
+      # installer embeds an already-signed executable.  A file-lock wait is
+      # needed because Windows Defender scans the binary after the smoke test
+      # runs it, holding a transient write lock.
+      - name: Azure login (Windows)
+        if: runner.os == 'Windows'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Wait for file lock and sign Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = "dist\${{ steps.artifact.outputs.name }}.exe"
+          Write-Host "Waiting for $binary to be writable..."
+          for ($i = 0; $i -lt 60; $i++) {
+              try {
+                  $fs = [IO.File]::Open($binary, 'Open', 'ReadWrite', 'None')
+                  $fs.Close()
+                  Write-Host "File is writable after $i seconds"
+                  break
+              } catch {
+                  if ($i % 10 -eq 0) { Write-Host "  Still locked ($i s)..." }
+                  Start-Sleep -Seconds 1
+              }
+          }
+
+      - name: Sign Windows binary
+        if: runner.os == 'Windows'
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
+          files-folder: dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # Build Windows NSIS installer with WinSW service wrapper.
+      # The binary is already signed, so the installer embeds a signed exe.
       - name: Download WinSW
         if: runner.os == 'Windows'
         shell: pwsh
@@ -207,6 +252,20 @@ jobs:
           Move-Item "packaging\windows\space-router-node-${pkg_version}-setup.exe" `
                     "dist\${{ steps.artifact.outputs.name }}-setup.exe"
           Write-Host "Built installer: dist\${{ steps.artifact.outputs.name }}-setup.exe"
+
+      # Step 2: Sign the NSIS installer (freshly created, no lock issues)
+      - name: Sign Windows installer
+        if: runner.os == 'Windows'
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
+          files-folder: dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       # ---- macOS code signing & notarization (cert already imported above) ----
       - name: Sign macOS binary
@@ -286,30 +345,6 @@ jobs:
         if: always() && runner.os == 'macOS' && env.KEYCHAIN_PATH != ''
         shell: bash
         run: security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
-
-      # ---- Windows code signing via Azure Trusted Signing ----
-      # Signs ALL .exe files in dist/ (both the raw binary and the NSIS installer).
-      # Positioned after NSIS build so both artifacts are present.
-      - name: Azure login (Windows)
-        if: runner.os == 'Windows'
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Sign Windows executables
-        if: runner.os == 'Windows'
-        uses: azure/trusted-signing-action@v0.5.0
-        with:
-          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_CERT_PROFILE }}
-          files-folder: dist
-          files-folder-filter: exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
 
       # Build Linux packages (.deb and .rpm) via nfpm
       - name: Build Linux packages
