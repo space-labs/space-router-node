@@ -330,10 +330,11 @@ class ReceiptPoller:
         logger.debug("Leg 2 poller: updated %d signatures from coord API", len(rows))
 
 
-# Module-level singletons used by the proxy_handler's post-relay hook
-# and main.py's lifecycle.
+# Module-level singleton used by the proxy_handler's post-relay hook so
+# it can call into the submitter without threading the instance through
+# every function signature. The poller has a dedicated slot on ctx
+# (main.py) — no singleton needed because only shutdown reads it.
 _submitter: ReceiptSubmitter | None = None
-_poller: ReceiptPoller | None = None
 
 
 def set_submitter(submitter: ReceiptSubmitter | None) -> None:
@@ -343,12 +344,3 @@ def set_submitter(submitter: ReceiptSubmitter | None) -> None:
 
 def get_submitter() -> ReceiptSubmitter | None:
     return _submitter
-
-
-def set_poller(poller: ReceiptPoller | None) -> None:
-    global _poller
-    _poller = poller
-
-
-def get_poller() -> ReceiptPoller | None:
-    return _poller

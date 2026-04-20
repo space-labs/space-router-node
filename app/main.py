@@ -485,7 +485,7 @@ async def _phase_register(ctx: _NodeContext) -> None:
 
 async def _init_receipt_submitter(ctx: _NodeContext) -> None:
     from app.payment.receipt_submitter import (
-        ReceiptPoller, ReceiptSubmitter, set_poller, set_submitter,
+        ReceiptPoller, ReceiptSubmitter, set_submitter,
     )
     try:
         resp = await ctx.http.get(f"{ctx.s.COORDINATION_API_URL}/config", timeout=10.0)
@@ -532,7 +532,6 @@ async def _init_receipt_submitter(ctx: _NodeContext) -> None:
         identity_key=ctx.identity_key,
         node_wallet_address=node_wallet,
     )
-    set_poller(poller)
     await poller.start()
     ctx.receipt_poller = poller
 
