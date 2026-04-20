@@ -80,10 +80,21 @@ class Settings(BaseSettings):
     GATEWAY_CA_CERT_PATH: str = "certs/gateway-ca.crt"
 
     # ── Payment (v1.5.0) ────────────────────────────────────────────
-    # Receipt exchange with Gateway after relay (best-effort, Gateway settles)
+    # Leg 2 receipt exchange with Gateway after relay. Provider generates the receipt,
+    # Gateway EIP-712 signs it, Provider stores it locally and later submits claimBatch()
+    # on-chain to settle. See app/payment/receipt_store.py.
     PAYMENT_ENABLED: bool = False
     NODE_RATE_PER_GB: int = 0               # Price per GB in token's smallest unit
     NODE_IDENTITY_ADDRESS: str = ""         # EVM address, zero-padded to bytes32 for receipts
+
+    # Path to the SQLite file holding gateway-signed Leg 2 receipts until claimed.
+    RECEIPT_STORE_PATH: str = "~/.spacerouter/receipts.db"
+
+    # On-chain settlement — only needed for the `claim` CLI command, not the relay path.
+    ESCROW_CONTRACT_ADDRESS: str = ""       # TokenPaymentEscrow proxy address
+    ESCROW_CHAIN_RPC: str = ""              # Creditcoin RPC endpoint
+    ESCROW_CHAIN_ID: int = 102031           # Creditcoin testnet
+    CLAIM_BATCH_SIZE: int = 50              # Max receipts per claimBatch tx
 
     @field_validator("REGISTRATION_MODE")
     @classmethod

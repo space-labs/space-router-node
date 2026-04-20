@@ -452,12 +452,29 @@ async def _do_receipt_exchange(
         gateway_reader, gateway_writer, receipt,
     )
 
-    if result:
-        signature, signed_receipt = result
-        logger.info(
-            "Leg 2 receipt exchanged: uuid=%s amount=%d (Gateway settles on-chain)",
-            signed_receipt.request_uuid, signed_receipt.data_amount,
+    if not result:
+        return
+
+    signature, signed_receipt = result
+    try:
+        from app.payment.receipt_store import get_store
+        store = get_store(settings.RECEIPT_STORE_PATH)
+        await store.initialize()
+        await store.store(signed_receipt, signature)
+    except Exception as e:
+        logger.warning(
+            "Leg 2 receipt received but failed to persist locally "
+            "(uuid=%s): %s — signature logged below, recover manually if needed: %s",
+            signed_receipt.request_uuid, e, signature,
         )
+        return
+
+    logger.info(
+        "Leg 2 receipt signed and stored: uuid=%s amount=%d price=%d",
+        signed_receipt.request_uuid,
+        signed_receipt.data_amount,
+        signed_receipt.total_price,
+    )
 
 
 # ---------------------------------------------------------------------------

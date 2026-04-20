@@ -1343,6 +1343,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Human-readable node label",
     )
 
+    # Leg 2 settlement commands — run instead of starting the node.
+    claim_group = parser.add_argument_group("payment settlement")
+    claim_group.add_argument(
+        "--receipts", action="store_true",
+        help="List outstanding (unclaimed) Leg 2 receipts and exit",
+    )
+    claim_group.add_argument(
+        "--claim", action="store_true",
+        help="Submit all unclaimed Leg 2 receipts on-chain via claimBatch() and exit",
+    )
+
     return parser
 
 
@@ -1468,6 +1479,78 @@ def _run_node(settings_override=None) -> None:  # noqa: ANN001
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
 
+async def _cmd_receipts() -> None:
+    """List outstanding (unclaimed) Leg 2 receipts from the local store."""
+    from app.payment.settlement import list_unclaimed
+
+    s = load_settings()
+    count, total_wei, preview = await list_unclaimed(s)
+    print(f"Receipt store: {s.RECEIPT_STORE_PATH}")
+    print(f"Unclaimed: {count} receipt(s), total owed = {total_wei} wei ({total_wei / 10**18:.6f} tokens)")
+    if not preview:
+        return
+    print()
+    print(f"  {'UUID':<38} {'bytes':>12} {'price (wei)':>22} {'age (s)':>8}")
+    now = int(time.time())
+    for sr in preview[:20]:
+        age = now - sr.created_at
+        print(
+            f"  {sr.receipt.request_uuid:<38} "
+            f"{sr.receipt.data_amount:>12d} "
+            f"{sr.receipt.total_price:>22d} "
+            f"{age:>8d}"
+        )
+    if len(preview) > 20:
+        print(f"  ... ({len(preview) - 20} more)")
+
+
+async def _cmd_claim() -> None:
+    """Submit all unclaimed Leg 2 receipts on-chain."""
+    from app.payment.settlement import claim_all
+
+    s = load_settings()
+
+    # Use identity key by default — operator can override with SR_SETTLEMENT_KEY if they want
+    # a separate settlement wallet. Both paths require the key file on disk.
+    settlement_key_hex = os.environ.get("SR_SETTLEMENT_KEY", "")
+    if not settlement_key_hex:
+        try:
+            identity_key, identity_address = load_or_create_identity(
+                s.IDENTITY_KEY_PATH, s.IDENTITY_PASSPHRASE,
+            )
+            settlement_key_hex = identity_key if identity_key.startswith("0x") else "0x" + identity_key
+            print(f"Submitting as identity {identity_address}")
+        except KeystorePassphraseRequired:
+            print("Identity key is encrypted. Set SR_IDENTITY_PASSPHRASE or use --password-file.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    try:
+        results = await claim_all(s, settlement_key_hex)
+    except ValueError as e:
+        print(f"Cannot claim: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not results:
+        print("No unclaimed receipts to submit.")
+        return
+
+    total_submitted = sum(r.submitted for r in results)
+    total_failed = sum(1 for r in results if r.error)
+    print(f"Submitted {len(results)} batch(es), {total_submitted} receipt(s) total.")
+    for i, r in enumerate(results, 1):
+        if r.error:
+            print(f"  Batch {i}: FAILED ({r.submitted} receipts) — {r.error}")
+        else:
+            print(f"  Batch {i}: OK ({r.submitted} receipts) tx={r.tx_hash} gas={r.gas_used}")
+    if total_failed:
+        sys.exit(1)
+
+
+# ``time`` is used inside _cmd_receipts for age display.
+import time  # noqa: E402
+
+
 def main() -> None:
     from app.node_logging import setup_cli_logging, reset_activity  # noqa: E402
 
@@ -1479,6 +1562,14 @@ def main() -> None:
 
     # Apply CLI args as env var overrides before loading settings
     _apply_cli_args(args)
+
+    # Settlement commands — read outstanding receipts or submit them on-chain, then exit.
+    if args.receipts:
+        asyncio.run(_cmd_receipts())
+        return
+    if args.claim:
+        asyncio.run(_cmd_claim())
+        return
 
     # --reset: clear everything, then re-run wizard and start
     if args.reset:
