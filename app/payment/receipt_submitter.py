@@ -97,7 +97,10 @@ class ReceiptSubmitter:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            # Coord API retries internally for up to ~10s while waiting for the
+            # gateway to finalise its pending_leg2 row, so we need a longer
+            # client-side timeout than the usual 10s default.
+            async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.post(url, json=payload)
         except httpx.RequestError as exc:
             logger.warning("Leg 2 receipt submission failed (network): %s", exc)
