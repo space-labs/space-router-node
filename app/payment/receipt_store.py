@@ -1,15 +1,12 @@
-"""SQLite-backed store for gateway-signed Leg 2 receipts.
+"""SQLite-backed store for Leg 2 receipts on the provider side.
 
-After the gateway signs a receipt for relayed bandwidth, the provider stores
-the signed receipt locally. The ``claim`` CLI command later reads unclaimed
-receipts from this store and settles them on-chain via ``claimBatch()``.
+A receipt starts life ``unsigned`` right after the provider's relay ends
+(``signature IS NULL``) and becomes ``signed`` once the coord API returns
+the gateway's EIP-712 signature. ``--claim`` CLI only submits signed
+receipts on-chain.
 
-Schema is versioned with a simple ``PRAGMA user_version``. The file is created
-on first use; the directory is derived from settings (default ~/.spacerouter/).
-
-Uses the stdlib ``sqlite3`` driver inside ``asyncio.to_thread`` rather than
-``aiosqlite`` to keep the provider's dependency surface minimal (providers
-run on user machines; smaller deps = fewer install failures).
+Uses stdlib ``sqlite3`` via ``asyncio.to_thread`` to keep the provider's
+dependency surface minimal (providers run on user machines).
 """
 
 from __future__ import annotations
@@ -26,38 +23,44 @@ from app.payment.eip712 import Receipt
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 1
+# Schema version 2 adds ``tunnel_request_id`` (gateway's tunnel correlation id)
+# and relaxes ``signature`` to NULL for receipts awaiting coord API / gateway
+# signing.
+_SCHEMA_VERSION = 2
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS signed_receipts (
-    request_uuid    TEXT PRIMARY KEY,
-    client_address  TEXT NOT NULL,
-    node_address    TEXT NOT NULL,
-    data_amount     INTEGER NOT NULL,
-    total_price     INTEGER NOT NULL,
-    signature       TEXT NOT NULL,
-    created_at      INTEGER NOT NULL,
-    claimed_at      INTEGER,
-    claim_tx_hash   TEXT
+    request_uuid      TEXT PRIMARY KEY,
+    tunnel_request_id TEXT,
+    client_address    TEXT NOT NULL,
+    node_address      TEXT NOT NULL,
+    data_amount       INTEGER NOT NULL,
+    total_price       INTEGER NOT NULL,
+    signature         TEXT,
+    created_at        INTEGER NOT NULL,
+    claimed_at        INTEGER,
+    claim_tx_hash     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_signed_receipts_unclaimed
     ON signed_receipts (claimed_at) WHERE claimed_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_signed_receipts_unsigned
+    ON signed_receipts (created_at) WHERE signature IS NULL;
 """
 
 
 @dataclass
 class StoredReceipt:
     receipt: Receipt
-    signature: str
+    signature: str | None
     created_at: int
     claimed_at: int | None
     claim_tx_hash: str | None
+    tunnel_request_id: str | None = None
 
 
 class ReceiptStore:
-    """Async-friendly SQLite store for gateway-signed Leg 2 receipts."""
-
     def __init__(self, db_path: str | os.PathLike) -> None:
         self._path = Path(db_path).expanduser()
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,12 +78,47 @@ class ReceiptStore:
     async def initialize(self) -> None:
         def _do() -> None:
             with self._connect() as conn:
-                conn.executescript(_SCHEMA_SQL)
+                cur = conn.execute("PRAGMA user_version")
+                current = cur.fetchone()[0]
+                if current < 1:
+                    # v1 schema: create fresh
+                    conn.executescript(_SCHEMA_SQL)
+                elif current < 2:
+                    # v1 → v2 migration: add new columns, relax signature NOT NULL.
+                    # SQLite doesn't support dropping NOT NULL directly — rebuild.
+                    conn.executescript("""
+                        CREATE TABLE signed_receipts_new (
+                            request_uuid      TEXT PRIMARY KEY,
+                            tunnel_request_id TEXT,
+                            client_address    TEXT NOT NULL,
+                            node_address      TEXT NOT NULL,
+                            data_amount       INTEGER NOT NULL,
+                            total_price       INTEGER NOT NULL,
+                            signature         TEXT,
+                            created_at        INTEGER NOT NULL,
+                            claimed_at        INTEGER,
+                            claim_tx_hash     TEXT
+                        );
+                        INSERT INTO signed_receipts_new
+                            (request_uuid, client_address, node_address,
+                             data_amount, total_price, signature, created_at,
+                             claimed_at, claim_tx_hash)
+                        SELECT request_uuid, client_address, node_address,
+                               data_amount, total_price, signature, created_at,
+                               claimed_at, claim_tx_hash
+                          FROM signed_receipts;
+                        DROP TABLE signed_receipts;
+                        ALTER TABLE signed_receipts_new RENAME TO signed_receipts;
+                        CREATE INDEX idx_signed_receipts_unclaimed
+                            ON signed_receipts (claimed_at) WHERE claimed_at IS NULL;
+                        CREATE INDEX idx_signed_receipts_unsigned
+                            ON signed_receipts (created_at) WHERE signature IS NULL;
+                    """)
                 conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         await asyncio.to_thread(_do)
 
-    async def store(self, receipt: Receipt, signature: str) -> None:
-        """Persist a gateway-signed receipt. Idempotent on request_uuid."""
+    async def store_unsigned(self, receipt: Receipt, request_id: str) -> None:
+        """Record a receipt that hasn't been signed yet. Idempotent."""
         now = int(time.time())
 
         def _do() -> None:
@@ -88,9 +126,57 @@ class ReceiptStore:
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO signed_receipts
-                        (request_uuid, client_address, node_address,
-                         data_amount, total_price, signature, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                        (request_uuid, tunnel_request_id, client_address,
+                         node_address, data_amount, total_price,
+                         signature, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+                    """,
+                    (
+                        receipt.request_uuid,
+                        request_id,
+                        receipt.client_address,
+                        receipt.node_address,
+                        int(receipt.data_amount),
+                        int(receipt.total_price),
+                        now,
+                    ),
+                )
+
+        await asyncio.to_thread(_do)
+
+    async def mark_signed(self, request_uuid: str, signature: str) -> bool:
+        """Fill in the signature for an unsigned row. Returns True if updated."""
+        def _do() -> int:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE signed_receipts
+                       SET signature = ?
+                     WHERE request_uuid = ?
+                       AND signature IS NULL
+                    """,
+                    (signature, request_uuid),
+                )
+                return cur.rowcount
+
+        n = await asyncio.to_thread(_do)
+        return n > 0
+
+    async def store(self, receipt: Receipt, signature: str) -> None:
+        """Backward-compatible: store a receipt that's already signed."""
+        now = int(time.time())
+
+        def _do() -> None:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO signed_receipts
+                        (request_uuid, tunnel_request_id, client_address,
+                         node_address, data_amount, total_price, signature, created_at)
+                    VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(request_uuid) DO UPDATE
+                        SET signature = excluded.signature
+                        WHERE signed_receipts.signature IS NULL
                     """,
                     (
                         receipt.request_uuid,
@@ -106,16 +192,17 @@ class ReceiptStore:
         await asyncio.to_thread(_do)
 
     async def unclaimed(self, limit: int = 50) -> list[StoredReceipt]:
-        """Return up to ``limit`` receipts that have not been settled yet."""
+        """Return up to ``limit`` SIGNED receipts that haven't been settled."""
         def _do() -> list[StoredReceipt]:
             with self._connect() as conn:
                 rows = conn.execute(
                     """
-                    SELECT request_uuid, client_address, node_address,
+                    SELECT request_uuid, tunnel_request_id, client_address, node_address,
                            data_amount, total_price, signature,
                            created_at, claimed_at, claim_tx_hash
                     FROM signed_receipts
                     WHERE claimed_at IS NULL
+                      AND signature IS NOT NULL
                     ORDER BY created_at ASC
                     LIMIT ?
                     """,
@@ -124,16 +211,17 @@ class ReceiptStore:
             return [
                 StoredReceipt(
                     receipt=Receipt(
-                        client_address=r[1],
-                        node_address=r[2],
+                        client_address=r[2],
+                        node_address=r[3],
                         request_uuid=r[0],
-                        data_amount=int(r[3]),
-                        total_price=int(r[4]),
+                        data_amount=int(r[4]),
+                        total_price=int(r[5]),
                     ),
-                    signature=r[5],
-                    created_at=int(r[6]),
-                    claimed_at=int(r[7]) if r[7] is not None else None,
-                    claim_tx_hash=r[8],
+                    signature=r[6],
+                    created_at=int(r[7]),
+                    claimed_at=int(r[8]) if r[8] is not None else None,
+                    claim_tx_hash=r[9],
+                    tunnel_request_id=r[1],
                 )
                 for r in rows
             ]
@@ -141,7 +229,6 @@ class ReceiptStore:
         return await asyncio.to_thread(_do)
 
     async def mark_claimed(self, request_uuids: list[str], tx_hash: str) -> int:
-        """Mark receipts as settled. Returns number of rows updated."""
         if not request_uuids:
             return 0
         now = int(time.time())
@@ -163,7 +250,7 @@ class ReceiptStore:
         return await asyncio.to_thread(_do)
 
     async def count_unclaimed(self) -> tuple[int, int]:
-        """Return (count, total_price_sum) of unclaimed receipts."""
+        """Return (signed-but-unclaimed count, total_price_sum)."""
         def _do() -> tuple[int, int]:
             with self._connect() as conn:
                 row = conn.execute(
@@ -171,9 +258,20 @@ class ReceiptStore:
                     SELECT COUNT(*), COALESCE(SUM(total_price), 0)
                       FROM signed_receipts
                      WHERE claimed_at IS NULL
+                       AND signature IS NOT NULL
                     """
                 ).fetchone()
             return int(row[0] or 0), int(row[1] or 0)
+
+        return await asyncio.to_thread(_do)
+
+    async def count_unsigned(self) -> int:
+        def _do() -> int:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM signed_receipts WHERE signature IS NULL"
+                ).fetchone()
+            return int(row[0] or 0)
 
         return await asyncio.to_thread(_do)
 
@@ -182,7 +280,6 @@ _singleton: ReceiptStore | None = None
 
 
 def get_store(db_path: str | os.PathLike) -> ReceiptStore:
-    """Module-level singleton so the proxy handler and CLI share one store."""
     global _singleton
     if _singleton is None or str(_singleton.path) != str(Path(db_path).expanduser()):
         _singleton = ReceiptStore(db_path)

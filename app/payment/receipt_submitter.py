@@ -1,18 +1,34 @@
-"""Submit Leg 2 receipts to the coordination API after each relay.
+"""Leg 2 receipt submission + background sync with the coord API.
 
-Providers generate their own receipts (using their own byte count) then POST
-them here, signing the submission with their identity key via EIP-191. The
-coord API brokers the signing with the gateway and returns the signed copy,
-which we persist in local SQLite for future ``--claim`` CLI usage.
+By topology rule the provider never connects to the gateway. Interaction
+goes through the coord API:
 
-By product topology, providers never connect directly to the gateway.
+1. After a relay, generate a Receipt from the provider's own byte count
+   and hand it to the submitter. Submitter records it locally as
+   ``unsigned`` (signature=None) then fires a best-effort POST to the
+   coord API.
+2. Happy path: coord API returns 200 with the signed receipt immediately
+   (gateway's pending_leg2 row already existed). Submitter stores the
+   signature locally.
+3. Slow path: coord API returns 202 (accepted for async signing). Nothing
+   else to do — the provider's local record stays unsigned and will be
+   filled in by the poller.
+4. ``ReceiptPoller`` runs in the background every ``poll_interval_seconds``
+   and does a single short GET to ``/nodes/{id}/signed-receipts?since=<ts>``
+   to pick up any signed copies for locally-unsigned rows. Short HTTP
+   timeouts throughout (5s).
+
+All failures are non-fatal: local state is the source of truth, and the
+poller will pick up signatures on its next tick.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
+from datetime import datetime, timezone
 
 import httpx
 from eth_account import Account
@@ -26,9 +42,44 @@ logger = logging.getLogger(__name__)
 
 _GB = 1024 ** 3
 
+# Short timeouts — no request should wait for another service's work.
+SUBMIT_TIMEOUT_SECONDS = 5.0
+POLL_TIMEOUT_SECONDS = 5.0
+POLL_INTERVAL_SECONDS = 10.0
+
+
+def _build_receipt(
+    gateway_payer_address: str,
+    node_wallet_address: str,
+    rate_per_gb: int,
+    data_amount: int,
+) -> Receipt:
+    total_price = (data_amount * rate_per_gb) // _GB
+    return Receipt(
+        client_address=gateway_payer_address,
+        node_address=address_to_bytes32(node_wallet_address),
+        request_uuid=str(uuid.uuid4()),
+        data_amount=int(data_amount),
+        total_price=int(total_price),
+    )
+
+
+def _sign_submission(identity_key: str, node_id: str, request_id: str, timestamp: int) -> str:
+    msg = f"space-router:submit-receipt:{node_id}:{request_id}:{timestamp}"
+    account = Account.from_key(identity_key)
+    signed = account.sign_message(encode_defunct(text=msg))
+    return "0x" + signed.signature.hex()
+
+
+def _sign_list_request(identity_key: str, node_id: str, timestamp: int) -> str:
+    msg = f"space-router:list-signed-receipts:{node_id}:{timestamp}"
+    account = Account.from_key(identity_key)
+    signed = account.sign_message(encode_defunct(text=msg))
+    return "0x" + signed.signature.hex()
+
 
 class ReceiptSubmitter:
-    """Builds, submits, and persists Leg 2 receipts."""
+    """Builds receipts, records them locally, and fires the best-effort POST."""
 
     def __init__(
         self,
@@ -55,39 +106,41 @@ class ReceiptSubmitter:
             and self._node_id
         )
 
-    def _build_receipt(self, data_amount: int) -> Receipt:
-        total_price = (data_amount * self._settings.NODE_RATE_PER_GB) // _GB
-        return Receipt(
-            client_address=self._gateway_payer_address,
-            node_address=address_to_bytes32(self._node_wallet_address),
-            request_uuid=str(uuid.uuid4()),
-            data_amount=int(data_amount),
-            total_price=int(total_price),
+    async def submit(self, request_id: str, data_amount: int) -> None:
+        """Generate + store unsigned + fire async POST.
+
+        Returns after the POST completes (or times out) but never
+        raises — the poller will fill in the signature later if the POST
+        didn't already.
+        """
+        if not self.ready or data_amount <= 0:
+            return
+
+        receipt = _build_receipt(
+            gateway_payer_address=self._gateway_payer_address,
+            node_wallet_address=self._node_wallet_address,
+            rate_per_gb=self._settings.NODE_RATE_PER_GB,
+            data_amount=data_amount,
         )
 
-    def _sign_submission(self, request_id: str, timestamp: int) -> str:
-        msg = f"space-router:submit-receipt:{self._node_id}:{request_id}:{timestamp}"
-        account = Account.from_key(self._identity_key)
-        signed = account.sign_message(encode_defunct(text=msg))
-        return "0x" + signed.signature.hex()
-
-    async def submit(self, request_id: str, data_amount: int) -> None:
-        """Build, submit to coord API, and persist the signed receipt locally.
-
-        Best-effort: all failure modes log a warning and return. A later relay
-        can retry for its own request, and the operator can always run
-        ``--claim`` on whatever receipts did land in the local store.
-        """
-        if not self.ready:
-            logger.debug("ReceiptSubmitter not ready — skipping for request %s", request_id)
-            return
-        if data_amount <= 0:
+        # Persist locally as unsigned *before* firing the POST, so a
+        # crash/timeout doesn't lose the receipt.
+        try:
+            store = get_store(self._settings.RECEIPT_STORE_PATH)
+            await store.initialize()
+            await store.store_unsigned(receipt, request_id=request_id)
+        except Exception:
+            logger.exception("Failed to persist unsigned receipt uuid=%s", receipt.request_uuid)
             return
 
-        receipt = self._build_receipt(data_amount)
+        # Best-effort submit.
+        await self._fire_submit(receipt, request_id)
+
+    async def _fire_submit(self, receipt: Receipt, request_id: str) -> None:
         timestamp = int(time.time())
-        signature = self._sign_submission(request_id, timestamp)
-
+        signature = _sign_submission(
+            self._identity_key, self._node_id, request_id, timestamp,
+        )
         url = self._settings.COORDINATION_API_URL.rstrip("/") + f"/nodes/{self._node_id}/receipts"
         payload = {
             "request_id": request_id,
@@ -97,57 +150,149 @@ class ReceiptSubmitter:
         }
 
         try:
-            # Coord API retries internally for up to ~30s while waiting for the
-            # gateway to finalise its pending_leg2 row, plus signing round-trip
-            # — total can be 35s+. Give ourselves 60s of headroom.
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=SUBMIT_TIMEOUT_SECONDS) as client:
                 resp = await client.post(url, json=payload)
         except httpx.RequestError as exc:
-            logger.warning("Leg 2 receipt submission failed (network): %s", exc)
+            logger.debug("Leg 2 submit network error uuid=%s: %s — poller will retry",
+                         receipt.request_uuid, exc)
+            return
+
+        if resp.status_code == 200:
+            try:
+                body = resp.json()
+            except Exception:
+                return
+            if body.get("status") == "signed" and body.get("signature"):
+                try:
+                    store = get_store(self._settings.RECEIPT_STORE_PATH)
+                    await store.mark_signed(receipt.request_uuid, body["signature"])
+                    logger.info(
+                        "Leg 2 receipt signed synchronously uuid=%s amount=%d",
+                        receipt.request_uuid, receipt.data_amount,
+                    )
+                except Exception:
+                    logger.exception("Failed to mark receipt signed uuid=%s",
+                                     receipt.request_uuid)
+        elif resp.status_code == 202:
+            logger.debug(
+                "Leg 2 receipt queued for async signing uuid=%s", receipt.request_uuid,
+            )
+        else:
+            logger.debug(
+                "Leg 2 submit got %d uuid=%s — poller will retry",
+                resp.status_code, receipt.request_uuid,
+            )
+
+
+class ReceiptPoller:
+    """Background loop that fetches signed receipts and fills in local signatures.
+
+    Runs every ``POLL_INTERVAL_SECONDS``. Each tick is a single short GET.
+    Uses ``created_at`` as a cursor (persisted through the next tick via
+    the store's last-seen-timestamp).
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        node_id: str,
+        identity_key: str,
+        node_wallet_address: str,
+    ) -> None:
+        self._settings = settings
+        self._node_id = node_id
+        self._identity_key = identity_key if identity_key.startswith("0x") else "0x" + identity_key
+        self._node_wallet_address = node_wallet_address
+        self._cursor: datetime | None = None
+        self._task: asyncio.Task | None = None
+        self._stop = asyncio.Event()
+
+    async def start(self) -> None:
+        if self._task is not None:
+            return
+        # Initial cursor = now - 1h so first tick catches any recent receipts.
+        self._cursor = datetime.now(timezone.utc)
+        self._stop.clear()
+        self._task = asyncio.create_task(self._loop())
+        logger.info("Leg 2 receipt poller started (interval=%ds)", POLL_INTERVAL_SECONDS)
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._task:
+            await self._task
+            self._task = None
+
+    async def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await self._tick()
+            except Exception:
+                logger.exception("Leg 2 poller tick failed")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=POLL_INTERVAL_SECONDS)
+                break
+            except asyncio.TimeoutError:
+                continue
+
+    async def _tick(self) -> None:
+        store = get_store(self._settings.RECEIPT_STORE_PATH)
+        await store.initialize()
+
+        # Only poll when we have unsigned receipts waiting — saves API calls.
+        unsigned_count = await store.count_unsigned()
+        if unsigned_count == 0:
+            return
+
+        timestamp = int(time.time())
+        sig = _sign_list_request(self._identity_key, self._node_id, timestamp)
+        params = {"ts": timestamp, "sig": sig, "limit": 50}
+        if self._cursor is not None:
+            params["since"] = self._cursor.isoformat()
+
+        url = self._settings.COORDINATION_API_URL.rstrip("/") + f"/nodes/{self._node_id}/signed-receipts"
+        try:
+            async with httpx.AsyncClient(timeout=POLL_TIMEOUT_SECONDS) as client:
+                resp = await client.get(url, params=params)
+        except httpx.RequestError as exc:
+            logger.debug("Leg 2 poll network error: %s", exc)
             return
 
         if resp.status_code != 200:
-            try:
-                err = resp.json().get("detail") or resp.text
-            except Exception:
-                err = resp.text
-            logger.warning(
-                "Leg 2 receipt rejected by coord API (status=%d): %s",
-                resp.status_code, err,
-            )
+            logger.debug("Leg 2 poll got %d", resp.status_code)
             return
-
-        body = resp.json()
-        if body.get("status") != "signed":
-            logger.warning("Unexpected coord API response: %s", body)
-            return
-
-        signed_receipt = Receipt.from_json_dict(body["receipt"])
-        gw_sig = body["signature"]
 
         try:
-            store = get_store(self._settings.RECEIPT_STORE_PATH)
-            await store.initialize()
-            await store.store(signed_receipt, gw_sig)
+            rows = resp.json()
         except Exception:
-            logger.exception(
-                "Leg 2 receipt signed but failed to persist locally (uuid=%s). "
-                "Signature recoverable from coord API signed_receipts table.",
-                signed_receipt.request_uuid,
-            )
             return
 
-        logger.info(
-            "Leg 2 receipt submitted and stored: uuid=%s amount=%d price=%d",
-            signed_receipt.request_uuid,
-            signed_receipt.data_amount,
-            signed_receipt.total_price,
-        )
+        if not rows:
+            return
+
+        newest_cursor = self._cursor
+        for r in rows:
+            try:
+                created = datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
+            except Exception:
+                created = None
+            try:
+                await store.mark_signed(r["request_uuid"], r["signature"])
+            except Exception:
+                logger.exception("Failed to mark receipt signed uuid=%s",
+                                 r.get("request_uuid"))
+            if created and (newest_cursor is None or created > newest_cursor):
+                newest_cursor = created
+
+        if newest_cursor is not None:
+            self._cursor = newest_cursor
+
+        logger.info("Leg 2 poller: updated %d signatures from coord API", len(rows))
 
 
-# Module-level singleton so proxy_handler's post-relay hook can find it
-# without threading the submitter through every function signature.
+# Module-level singletons used by the proxy_handler's post-relay hook
+# and main.py's lifecycle.
 _submitter: ReceiptSubmitter | None = None
+_poller: ReceiptPoller | None = None
 
 
 def set_submitter(submitter: ReceiptSubmitter | None) -> None:
@@ -157,3 +302,12 @@ def set_submitter(submitter: ReceiptSubmitter | None) -> None:
 
 def get_submitter() -> ReceiptSubmitter | None:
     return _submitter
+
+
+def set_poller(poller: ReceiptPoller | None) -> None:
+    global _poller
+    _poller = poller
+
+
+def get_poller() -> ReceiptPoller | None:
+    return _poller
