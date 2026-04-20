@@ -485,28 +485,42 @@ jobs:
             --timestamp \
             "dist/SpaceRouter.app"
 
-      # Create .dmg from the (now signed) .app bundle.
-      # Retry because hdiutil can fail with "Resource busy" right after codesign
+      - name: Install create-dmg
+        if: runner.os == 'macOS'
+        run: brew install create-dmg
+
+      # Build a drag-to-Applications DMG from the (now signed) .app bundle.
+      # Retry because create-dmg/hdiutil can fail with "Resource busy" right after codesign
       # while Gatekeeper/XProtect finishes scanning the signed bundle.
       - name: Package macOS DMG
         if: runner.os == 'macOS'
         shell: bash
         run: |
           if [ -d "dist/SpaceRouter.app" ]; then
+            DMG="dist/${{ steps.artifact.outputs.name }}.dmg"
+            rm -f "$DMG"
             for attempt in 1 2 3; do
-              if hdiutil create -volname "SpaceRouter" \
-                   -srcfolder "dist/SpaceRouter.app" \
-                   -ov -format UDZO \
-                   "dist/${{ steps.artifact.outputs.name }}.dmg"; then
+              if create-dmg \
+                   --volname "SpaceRouter" \
+                   --background "packaging/macos/dmg/background.tiff" \
+                   --window-size 600 400 \
+                   --icon-size 110 \
+                   --icon "SpaceRouter.app" 150 185 \
+                   --app-drop-link 450 185 \
+                   --hide-extension "SpaceRouter.app" \
+                   --no-internet-enable \
+                   "$DMG" \
+                   "dist/SpaceRouter.app"; then
                 break
               fi
               if [ "$attempt" -lt 3 ]; then
-                echo "hdiutil failed (attempt $attempt/3), retrying in 5s..."
+                echo "create-dmg failed (attempt $attempt/3), retrying in 5s..."
+                rm -f "$DMG"
                 sleep 5
               fi
             done
-            if [ ! -f "dist/${{ steps.artifact.outputs.name }}.dmg" ]; then
-              echo "All hdiutil attempts failed"
+            if [ ! -f "$DMG" ]; then
+              echo "All create-dmg attempts failed"
               exit 1
             fi
           fi
