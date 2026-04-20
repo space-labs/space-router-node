@@ -498,10 +498,23 @@ async def _init_receipt_submitter(ctx: _NodeContext) -> None:
         logger.info("Coord API reports no gatewayPayerAddress — Leg 2 disabled")
         return
 
-    node_wallet = ctx.s.NODE_IDENTITY_ADDRESS or ctx.s.COLLECTION_ADDRESS or ctx.s.STAKING_ADDRESS
+    # Single source of truth: COLLECTION_ADDRESS is what the contract pays,
+    # and it's what coord API stores as the node's wallet. Falling back to
+    # STAKING_ADDRESS for legacy configs where COLLECTION_ADDRESS wasn't set.
+    # NODE_IDENTITY_ADDRESS is ignored for receipts — if operator configured
+    # it distinct from the collection wallet, we warn.
+    node_wallet = ctx.s.COLLECTION_ADDRESS or ctx.s.STAKING_ADDRESS
     if not node_wallet:
         logger.info("No provider wallet address configured — Leg 2 disabled")
         return
+
+    nia = (ctx.s.NODE_IDENTITY_ADDRESS or "").strip()
+    if nia and nia.lower() != node_wallet.lower():
+        logger.warning(
+            "SR_NODE_IDENTITY_ADDRESS=%s is set but differs from COLLECTION_ADDRESS=%s; "
+            "Leg 2 receipts pay COLLECTION_ADDRESS. Remove NODE_IDENTITY_ADDRESS or match it.",
+            nia, node_wallet,
+        )
 
     submitter = ReceiptSubmitter(
         settings=ctx.s,
