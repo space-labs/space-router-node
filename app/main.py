@@ -472,8 +472,47 @@ async def _phase_register(ctx: _NodeContext) -> None:
     if gateway_ca_cert:
         save_gateway_ca_cert(gateway_ca_cert, ctx.s.GATEWAY_CA_CERT_PATH)
 
+    # Initialise the Leg 2 receipt submitter. Needs node_id + identity key +
+    # gateway's payer address (fetched from coord API /config). We do this
+    # after registration since node_id isn't known before.
+    if ctx.s.PAYMENT_ENABLED and ctx.s.NODE_RATE_PER_GB > 0:
+        await _init_receipt_submitter(ctx)
+
     # Upgrade to mTLS if enabled
     _upgrade_mtls(ctx)
+
+
+async def _init_receipt_submitter(ctx: _NodeContext) -> None:
+    from app.payment.receipt_submitter import ReceiptSubmitter, set_submitter
+    try:
+        resp = await ctx.http.get(f"{ctx.s.COORDINATION_API_URL}/config", timeout=10.0)
+        resp.raise_for_status()
+        gateway_payer = resp.json().get("gatewayPayerAddress") or ""
+    except Exception:
+        logger.warning("Failed to fetch /config for Leg 2 payer address — Leg 2 disabled", exc_info=True)
+        return
+    if not gateway_payer:
+        logger.info("Coord API reports no gatewayPayerAddress — Leg 2 disabled")
+        return
+
+    node_wallet = ctx.s.NODE_IDENTITY_ADDRESS or ctx.s.COLLECTION_ADDRESS or ctx.s.STAKING_ADDRESS
+    if not node_wallet:
+        logger.info("No provider wallet address configured — Leg 2 disabled")
+        return
+
+    submitter = ReceiptSubmitter(
+        settings=ctx.s,
+        node_id=ctx.node_id,
+        identity_key=ctx.identity_key,
+        identity_address=ctx.identity_address,
+        gateway_payer_address=gateway_payer,
+        node_wallet_address=node_wallet,
+    )
+    set_submitter(submitter)
+    logger.info(
+        "Leg 2 submitter ready — payer=%s node_wallet=%s rate=%d/GB",
+        gateway_payer, node_wallet[:12] + "...", ctx.s.NODE_RATE_PER_GB,
+    )
 
 
 def _upgrade_mtls(ctx: _NodeContext) -> None:

@@ -350,7 +350,6 @@ async def handle_connect(
     target_port: int,
     settings: Settings,
     request_id: str | None = None,
-    gateway_address: str = "",
 ) -> None:
     """Open a TCP connection to *target_host:target_port*, reply 200, then
     relay bytes bidirectionally between the client (Proxy Gateway) and the
@@ -400,12 +399,12 @@ async def handle_connect(
             settings.RELAY_TIMEOUT,
         )
 
-        # Leg 2 receipt exchange: send receipt to gateway, get signature
+        # Leg 2: provider submits generated receipt to coord API after relay.
+        # Never connects directly to the gateway (topology rule).
         if settings.PAYMENT_ENABLED and settings.NODE_RATE_PER_GB > 0:
-            await _do_receipt_exchange(
-                client_reader, client_writer, settings,
-                bytes_sent + bytes_received, request_id,
-                gateway_address=gateway_address,
+            await _submit_leg2_receipt(
+                data_amount=bytes_sent + bytes_received,
+                request_id=request_id,
             )
     finally:
         try:
@@ -415,66 +414,26 @@ async def handle_connect(
             pass
 
 
-async def _do_receipt_exchange(
-    gateway_reader: asyncio.StreamReader,
-    gateway_writer: asyncio.StreamWriter,
-    settings: Settings,
+async def _submit_leg2_receipt(
     data_amount: int,
     request_id: str | None,
-    gateway_address: str = "",
 ) -> None:
-    """Build a receipt, send to Gateway, store the signed response.
+    """Submit a Leg 2 receipt to the coordination API after relay completes.
 
-    The Gateway's EVM address is received via the
-    ``X-SpaceRouter-Gateway-Address`` header in the CONNECT request.
+    The provider generates the receipt from its own byte count; the coord
+    API brokers verification + EIP-712 signing with the gateway (providers
+    never connect directly to the gateway per product topology). On success
+    the signed receipt lands in the provider's local SQLite store for
+    future ``--claim`` CLI use.
     """
-    from app.payment.receipt_exchange import build_receipt, exchange_receipt_with_gateway
-    from app.payment.eip712 import address_to_bytes32
-
-    if not gateway_address:
-        logger.debug("No gateway address — skipping receipt exchange")
+    if not request_id:
         return
-
-    node_identity = settings.NODE_IDENTITY_ADDRESS or settings.COLLECTION_ADDRESS or settings.STAKING_ADDRESS
-    if not node_identity:
-        logger.debug("No provider identity address — skipping receipt exchange")
+    from app.payment.receipt_submitter import get_submitter
+    submitter = get_submitter()
+    if submitter is None:
+        logger.debug("ReceiptSubmitter not configured — skipping Leg 2")
         return
-
-    node_b32 = address_to_bytes32(node_identity)
-    receipt = build_receipt(
-        gateway_address=gateway_address,
-        node_address_bytes32=node_b32,
-        data_amount=data_amount,
-        rate_per_gb=settings.NODE_RATE_PER_GB,
-    )
-
-    result = await exchange_receipt_with_gateway(
-        gateway_reader, gateway_writer, receipt,
-    )
-
-    if not result:
-        return
-
-    signature, signed_receipt = result
-    try:
-        from app.payment.receipt_store import get_store
-        store = get_store(settings.RECEIPT_STORE_PATH)
-        await store.initialize()
-        await store.store(signed_receipt, signature)
-    except Exception as e:
-        logger.warning(
-            "Leg 2 receipt received but failed to persist locally "
-            "(uuid=%s): %s — signature logged below, recover manually if needed: %s",
-            signed_receipt.request_uuid, e, signature,
-        )
-        return
-
-    logger.info(
-        "Leg 2 receipt signed and stored: uuid=%s amount=%d price=%d",
-        signed_receipt.request_uuid,
-        signed_receipt.data_amount,
-        signed_receipt.total_price,
-    )
+    await submitter.submit(request_id=request_id, data_amount=data_amount)
 
 
 # ---------------------------------------------------------------------------
@@ -763,15 +722,9 @@ async def handle_client(
                         f" [request_id={request_id}]" if request_id else "",
                     )
 
-                # Extract gateway payment address for Leg 2 receipt exchange
-                gw_addr = (
-                    headers.get("X-SpaceRouter-Gateway-Address")
-                    or headers.get("x-spacerouter-gateway-address")
-                    or ""
-                )
                 await handle_connect(
                     reader, writer, target_host, target_port, settings,
-                    request_id, gateway_address=gw_addr,
+                    request_id,
                 )
             else:
                 counted = True
