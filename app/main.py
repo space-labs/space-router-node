@@ -343,6 +343,7 @@ class _NodeContext:
         self.node_id: str = ""
         self.gateway_ca_cert: str | None = None
         self.version_check = None  # VersionCheckResult | None
+        self.receipt_poller = None  # ReceiptPoller | None
 
 
 async def _phase_init(ctx: _NodeContext) -> None:
@@ -483,7 +484,9 @@ async def _phase_register(ctx: _NodeContext) -> None:
 
 
 async def _init_receipt_submitter(ctx: _NodeContext) -> None:
-    from app.payment.receipt_submitter import ReceiptSubmitter, set_submitter
+    from app.payment.receipt_submitter import (
+        ReceiptPoller, ReceiptSubmitter, set_poller, set_submitter,
+    )
     try:
         resp = await ctx.http.get(f"{ctx.s.COORDINATION_API_URL}/config", timeout=10.0)
         resp.raise_for_status()
@@ -509,8 +512,19 @@ async def _init_receipt_submitter(ctx: _NodeContext) -> None:
         node_wallet_address=node_wallet,
     )
     set_submitter(submitter)
+
+    poller = ReceiptPoller(
+        settings=ctx.s,
+        node_id=ctx.node_id,
+        identity_key=ctx.identity_key,
+        node_wallet_address=node_wallet,
+    )
+    set_poller(poller)
+    await poller.start()
+    ctx.receipt_poller = poller
+
     logger.info(
-        "Leg 2 submitter ready — payer=%s node_wallet=%s rate=%d/GB",
+        "Leg 2 submitter ready — payer=%s node_wallet=%s rate=%d/GB (poller every 10s)",
         gateway_payer, node_wallet[:12] + "...", ctx.s.NODE_RATE_PER_GB,
     )
 
@@ -1266,6 +1280,13 @@ async def _run(
                         await task
                     except asyncio.CancelledError:
                         pass
+
+            # Stop Leg 2 receipt poller
+            if ctx.receipt_poller is not None:
+                try:
+                    await ctx.receipt_poller.stop()
+                except Exception:
+                    logger.debug("Receipt poller stop errored", exc_info=True)
 
             # Remove UPnP mapping
             if ctx.upnp_endpoint:
