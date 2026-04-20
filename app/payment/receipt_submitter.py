@@ -25,6 +25,7 @@ poller will pick up signatures on its next tick.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 import uuid
@@ -64,8 +65,29 @@ def _build_receipt(
     )
 
 
-def _sign_submission(identity_key: str, node_id: str, request_id: str, timestamp: int) -> str:
-    msg = f"space-router:submit-receipt:{node_id}:{request_id}:{timestamp}"
+def _receipt_body_hash(receipt: Receipt) -> str:
+    """Deterministic sha256 over the receipt body — used to bind the
+    identity signature to the exact payload so a MITM can't tamper with
+    ``dataAmount``/``totalPrice`` using a captured signature.
+    """
+    canonical = (
+        f"{receipt.client_address.lower()}|{receipt.node_address.lower()}|"
+        f"{receipt.request_uuid}|{int(receipt.data_amount)}|{int(receipt.total_price)}"
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _sign_submission(
+    identity_key: str,
+    node_id: str,
+    request_id: str,
+    timestamp: int,
+    receipt_hash: str,
+) -> str:
+    msg = (
+        f"space-router:submit-receipt:{node_id}:{request_id}"
+        f":{receipt_hash}:{timestamp}"
+    )
     account = Account.from_key(identity_key)
     signed = account.sign_message(encode_defunct(text=msg))
     return "0x" + signed.signature.hex()
@@ -138,8 +160,9 @@ class ReceiptSubmitter:
 
     async def _fire_submit(self, receipt: Receipt, request_id: str) -> None:
         timestamp = int(time.time())
+        receipt_hash = _receipt_body_hash(receipt)
         signature = _sign_submission(
-            self._identity_key, self._node_id, request_id, timestamp,
+            self._identity_key, self._node_id, request_id, timestamp, receipt_hash,
         )
         url = self._settings.COORDINATION_API_URL.rstrip("/") + f"/nodes/{self._node_id}/receipts"
         payload = {
