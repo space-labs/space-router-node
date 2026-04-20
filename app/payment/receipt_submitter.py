@@ -48,6 +48,16 @@ SUBMIT_TIMEOUT_SECONDS = 5.0
 POLL_TIMEOUT_SECONDS = 5.0
 POLL_INTERVAL_SECONDS = 10.0
 
+# Absorbs clock skew between coord API DB and provider host — after each
+# poll, cursor is rolled back by this much so a row inserted with an
+# older timestamp (e.g. cron-side sync path finishing after a fast GET)
+# still gets picked up on the next tick. mark_signed is idempotent.
+POLL_CURSOR_BUFFER_SECONDS = 60
+
+# On start, back the cursor up by this much — catches anything signed
+# between the node's previous shutdown and this startup.
+POLL_INITIAL_LOOKBACK_HOURS = 24
+
 
 def _build_receipt(
     gateway_payer_address: str,
@@ -233,8 +243,11 @@ class ReceiptPoller:
     async def start(self) -> None:
         if self._task is not None:
             return
-        # Initial cursor = now - 1h so first tick catches any recent receipts.
-        self._cursor = datetime.now(timezone.utc)
+        # Initial cursor = now - 24h so first tick picks up anything signed
+        # while the node was offline. mark_signed is idempotent, so
+        # re-fetching already-stored rows is safe.
+        from datetime import timedelta
+        self._cursor = datetime.now(timezone.utc) - timedelta(hours=POLL_INITIAL_LOOKBACK_HOURS)
         self._stop.clear()
         self._task = asyncio.create_task(self._loop())
         logger.info("Leg 2 receipt poller started (interval=%ds)", POLL_INTERVAL_SECONDS)
@@ -307,9 +320,14 @@ class ReceiptPoller:
                 newest_cursor = created
 
         if newest_cursor is not None:
-            self._cursor = newest_cursor
+            # Roll back the cursor by POLL_CURSOR_BUFFER_SECONDS so a row
+            # inserted with an older timestamp (clock skew, late sync-path
+            # commit) gets picked up on the next tick. mark_signed's
+            # WHERE signature IS NULL guard makes duplicates a no-op.
+            from datetime import timedelta
+            self._cursor = newest_cursor - timedelta(seconds=POLL_CURSOR_BUFFER_SECONDS)
 
-        logger.info("Leg 2 poller: updated %d signatures from coord API", len(rows))
+        logger.debug("Leg 2 poller: updated %d signatures from coord API", len(rows))
 
 
 # Module-level singletons used by the proxy_handler's post-relay hook

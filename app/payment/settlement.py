@@ -114,14 +114,18 @@ async def _submit_batch(
         receipts_tuples = [_to_contract_tuple(sr) for sr in batch]
         signatures = [bytes.fromhex(sr.signature.removeprefix("0x")) for sr in batch]
 
+        # Creditcoin block gas limit is well below 20M. Cap any estimate at
+        # 12M to guarantee inclusion; operators should pick smaller batches
+        # if they need more than one claim in one block.
+        GAS_CAP = 12_000_000
         try:
             # Estimate with headroom; contract ~330K gas per receipt worst case
             gas_estimate = contract.functions.claimBatch(
                 receipts_tuples, signatures,
             ).estimate_gas({"from": account.address})
-            gas_limit = int(gas_estimate * 1.2)
+            gas_limit = min(int(gas_estimate * 1.2), GAS_CAP)
         except Exception as e:
-            gas_limit = 350_000 * len(batch)
+            gas_limit = min(350_000 * len(batch), GAS_CAP)
             logger.warning("Gas estimation failed (%s); falling back to %d", e, gas_limit)
 
         nonce = w3.eth.get_transaction_count(account.address)
