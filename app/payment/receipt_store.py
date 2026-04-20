@@ -64,24 +64,33 @@ class ReceiptStore:
     def __init__(self, db_path: str | os.PathLike) -> None:
         self._path = Path(db_path).expanduser()
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._initialized = False
 
     @property
     def path(self) -> Path:
         return self._path
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path, isolation_level=None)
+        conn = sqlite3.connect(self._path, isolation_level=None, timeout=30.0)
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
     async def initialize(self) -> None:
+        # Idempotent: reading PRAGMA user_version takes no write lock, so
+        # callers in the hot path (submitter, poller) don't serialize on
+        # the SQLite writer once the DB is at the current schema version.
+        if self._initialized:
+            return
+
         def _do() -> None:
             with self._connect() as conn:
                 cur = conn.execute("PRAGMA user_version")
                 current = cur.fetchone()[0]
+                if current == _SCHEMA_VERSION:
+                    return
                 if current < 1:
-                    # v1 schema: create fresh
                     conn.executescript(_SCHEMA_SQL)
                 elif current < 2:
                     # v1 → v2 migration: add new columns, relax signature NOT NULL.
@@ -115,7 +124,9 @@ class ReceiptStore:
                             ON signed_receipts (created_at) WHERE signature IS NULL;
                     """)
                 conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+
         await asyncio.to_thread(_do)
+        self._initialized = True
 
     async def store_unsigned(self, receipt: Receipt, request_id: str) -> None:
         """Record a receipt that hasn't been signed yet. Idempotent."""
