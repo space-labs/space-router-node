@@ -1586,6 +1586,7 @@ async def _cmd_claim() -> None:
     # Use identity key by default — operator can override with SR_SETTLEMENT_KEY if they want
     # a separate settlement wallet. Both paths require the key file on disk.
     settlement_key_hex = os.environ.get("SR_SETTLEMENT_KEY", "")
+    override = bool(settlement_key_hex)
     if not settlement_key_hex:
         try:
             identity_key, identity_address = load_or_create_identity(
@@ -1597,6 +1598,29 @@ async def _cmd_claim() -> None:
             print("Identity key is encrypted. Set SR_IDENTITY_PASSPHRASE or use --password-file.",
                   file=sys.stderr)
             sys.exit(1)
+
+    # Gas pre-check — the chain tx will revert with cryptic "insufficient
+    # funds" if the settlement wallet has 0 native tokens. Fail early with
+    # guidance instead.
+    if s.ESCROW_CHAIN_RPC:
+        from web3 import Web3
+        from eth_account import Account
+        try:
+            w3 = Web3(Web3.HTTPProvider(s.ESCROW_CHAIN_RPC, request_kwargs={"timeout": 10}))
+            addr = Account.from_key(settlement_key_hex).address
+            balance = w3.eth.get_balance(addr)
+        except Exception as e:
+            print(f"Could not check gas balance ({e}); proceeding.", file=sys.stderr)
+            balance = None
+        if balance is not None and balance == 0:
+            print(
+                f"Settlement wallet {addr} has 0 native tokens for gas.\n"
+                f"{'(This is your identity key.) ' if not override else ''}"
+                f"Fund it with a small amount of the chain's native token, "
+                f"or set SR_SETTLEMENT_KEY=<hex> to a funded wallet and retry.",
+                file=sys.stderr,
+            )
+            sys.exit(0)
 
     try:
         results = await claim_all(s, settlement_key_hex)
