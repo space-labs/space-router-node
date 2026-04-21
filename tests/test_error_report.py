@@ -176,7 +176,7 @@ class TestSendErrorReport:
         mock_client.post.return_value = mock_response
 
         with patch("app.identity.sign_request", return_value=("sig123", 1234)):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 send_error_report(
                     {"test": "payload"},
                     "fake_key",
@@ -194,7 +194,7 @@ class TestSendErrorReport:
         mock_client.post.return_value = mock_response
 
         with patch("app.identity.sign_request", return_value=("sig123", 1234)):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 send_error_report(
                     {"test": "payload"},
                     "fake_key",
@@ -210,7 +210,7 @@ class TestSendErrorReport:
         mock_client.post.side_effect = Exception("network error")
 
         with patch("app.identity.sign_request", return_value=("sig123", 1234)):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 send_error_report(
                     {"test": "payload"},
                     "fake_key",
@@ -226,7 +226,7 @@ class TestSendErrorReport:
         mock_client = AsyncMock()
         # sign_request itself raises
         with patch("app.identity.sign_request", side_effect=RuntimeError("boom")):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = asyncio.run(
                 send_error_report(
                     {"test": "payload"},
                     "fake_key",
