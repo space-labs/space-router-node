@@ -1107,39 +1107,111 @@ def _acquire_daemon_lock(settings) -> int:
         )
         return -1
 
-    # Short retry loop: on Windows, when a prior daemon was hard-killed
-    # (Stop-Process -Force / TerminateProcess) the OS takes a moment to
-    # fully release the msvcrt lock on the file handle. Without retries,
-    # a quick restart after a crash hits "another instance" even though
-    # nothing is running. The real "two daemons running" case still gets
-    # caught — that lock stays held indefinitely.
+    # Two-layer acquisition:
+    #
+    # 1. Try the OS lock. Fast path; genuine "another live daemon" case
+    #    also hits this path and we exit after the stale-check finds a
+    #    live PID.
+    # 2. If the lock is already held, check whether the PID written in
+    #    the lock file corresponds to a **live** process. If not, treat
+    #    the lock as stale (crashed predecessor still holding a file
+    #    handle on Windows under CI load, an uncleaned-up zombie on
+    #    Unix, etc). Truncate the file, reacquire.
+    #
+    # This replaces a short retry loop that was too tight for Windows
+    # CI smoke tests where the OS sometimes took >2s to release the
+    # msvcrt lock after TerminateProcess.
     import time as _time
-    last_err: Exception | None = None
-    for attempt in range(4):
+
+    def _try_acquire(fd_) -> bool:
         try:
             if is_windows:
                 import msvcrt
-                fd.seek(0)
-                msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+                fd_.seek(0)
+                msvcrt.locking(fd_.fileno(), msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
-                fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            last_err = None
-            break
-        except (BlockingIOError, OSError) as exc:
-            last_err = exc
-            if attempt < 3:
-                _time.sleep(0.5)
+                fcntl.flock(fd_.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except (BlockingIOError, OSError):
+            return False
 
-    if last_err is not None:
-        fd.close()
-        print(
-            f"Another space-router-node daemon is already running against "
-            f"{store_path}. Refusing to start to avoid receipt corruption. "
-            f"Lock: {lock_path}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    def _pid_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        if is_windows:
+            try:
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                h = kernel32.OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION, False, pid,
+                )
+                if not h:
+                    return False
+                # Still alive if the process handle is valid AND the
+                # process hasn't signalled exit.
+                STILL_ACTIVE = 259
+                code = ctypes.c_ulong(0)
+                kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+                kernel32.CloseHandle(h)
+                return code.value == STILL_ACTIVE
+            except Exception:
+                return True  # uncertain → assume alive, be safe
+        else:
+            try:
+                os.kill(pid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True  # alive but not ours; still a live daemon
+
+    if not _try_acquire(fd):
+        # Read stored PID to decide whether the lock is stale.
+        stale = False
+        try:
+            fd.seek(0)
+            content = fd.read().strip()
+            pid_line = content.splitlines()[-1] if content else ""
+            prior_pid = int(pid_line) if pid_line.isdigit() else 0
+            stale = not _pid_alive(prior_pid)
+        except Exception:
+            stale = False
+
+        if stale:
+            # The holder is gone — the OS just hasn't reaped the lock
+            # yet (typical Windows post-TerminateProcess behaviour).
+            # Close, reopen (truncating), retry a few times.
+            fd.close()
+            acquired = False
+            for _ in range(8):
+                _time.sleep(0.25)
+                try:
+                    fd = open(lock_path, "a+" if is_windows else "w")
+                except OSError:
+                    continue
+                if _try_acquire(fd):
+                    acquired = True
+                    break
+                fd.close()
+            if not acquired:
+                print(
+                    f"Daemon lock {lock_path} appears stale but the OS "
+                    f"won't release it. Delete the file manually if no "
+                    f"space-router-node process is running, then retry.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        else:
+            fd.close()
+            print(
+                f"Another space-router-node daemon is already running "
+                f"against {store_path}. Refusing to start to avoid "
+                f"receipt corruption. Lock: {lock_path}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     # Write our PID for diagnostic purposes. Lock itself is the source
     # of truth, but `ps`-side tooling benefits from having a PID in the
