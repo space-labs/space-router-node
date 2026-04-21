@@ -450,6 +450,34 @@ def test_daemon_lock_allows_different_stores(tmp_path):
     assert fd_a != fd_b
 
 
+def test_daemon_lock_reclaims_stale_lock(tmp_path):
+    """A lock file from a crashed predecessor (PID written but that
+    process is no longer alive) should be reclaimable — the stale-PID
+    check treats it as abandoned. This is the Windows-smoke-test case
+    where the OS takes a moment to release the file-lock after
+    TerminateProcess.
+    """
+    from app.main import _acquire_daemon_lock
+
+    store_dir = tmp_path / "crashed"
+    store_dir.mkdir()
+    lock_path = store_dir / "daemon.lock"
+    # Simulate a dead predecessor: write a PID that definitely isn't
+    # a live process. Values above 4 million exceed typical PID space.
+    dead_pid = 4_194_303
+    lock_path.write_text(f"{dead_pid}\n")
+
+    class S:
+        RECEIPT_STORE_PATH = str(store_dir / "receipts.db")
+
+    fd = _acquire_daemon_lock(S())
+    assert fd >= 0
+
+    # File now has our live PID, not the dead one.
+    content = lock_path.read_text()
+    assert str(os.getpid()) in content
+
+
 # ── Disk-space check ────────────────────────────────────────────────
 
 
