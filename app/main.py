@@ -1107,21 +1107,31 @@ def _acquire_daemon_lock(settings) -> int:
         )
         return -1
 
-    try:
-        if is_windows:
-            import msvcrt
-            # LK_NBLCK = non-blocking exclusive lock on 1 byte at offset 0.
-            # Raises OSError(EDEADLK/EACCES) if another process already
-            # holds the region.
-            fd.seek(0)
-            msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (BlockingIOError, OSError) as exc:
-        # On POSIX the "already held" error is BlockingIOError (EWOULDBLOCK).
-        # On Windows msvcrt.locking raises OSError with errno=EDEADLK or
-        # EACCES. Treat any of these as "another instance".
+    # Short retry loop: on Windows, when a prior daemon was hard-killed
+    # (Stop-Process -Force / TerminateProcess) the OS takes a moment to
+    # fully release the msvcrt lock on the file handle. Without retries,
+    # a quick restart after a crash hits "another instance" even though
+    # nothing is running. The real "two daemons running" case still gets
+    # caught — that lock stays held indefinitely.
+    import time as _time
+    last_err: Exception | None = None
+    for attempt in range(4):
+        try:
+            if is_windows:
+                import msvcrt
+                fd.seek(0)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            last_err = None
+            break
+        except (BlockingIOError, OSError) as exc:
+            last_err = exc
+            if attempt < 3:
+                _time.sleep(0.5)
+
+    if last_err is not None:
         fd.close()
         print(
             f"Another space-router-node daemon is already running against "
