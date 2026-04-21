@@ -36,6 +36,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 
 from app.config import Settings
+from app.payment import reasons
 from app.payment.eip712 import Receipt, address_to_bytes32
 from app.payment.receipt_store import get_store
 
@@ -105,6 +106,13 @@ def _sign_submission(
 
 def _sign_list_request(identity_key: str, node_id: str, timestamp: int) -> str:
     msg = f"space-router:list-signed-receipts:{node_id}:{timestamp}"
+    account = Account.from_key(identity_key)
+    signed = account.sign_message(encode_defunct(text=msg))
+    return "0x" + signed.signature.hex()
+
+
+def _sign_list_rejections_request(identity_key: str, node_id: str, timestamp: int) -> str:
+    msg = f"space-router:list-rejected-receipts:{node_id}:{timestamp}"
     account = Account.from_key(identity_key)
     signed = account.sign_message(encode_defunct(text=msg))
     return "0x" + signed.signature.hex()
@@ -210,11 +218,51 @@ class ReceiptSubmitter:
             logger.debug(
                 "Leg 2 receipt queued for async signing uuid=%s", receipt.request_uuid,
             )
+        elif resp.status_code in (400, 409, 422):
+            # Explicit rejection from the coord API / gateway with a
+            # structured reason. Record it so the user sees "why" in the
+            # retryable-failures UI.
+            await _record_sign_rejection(
+                self._settings, receipt.request_uuid, resp,
+            )
         else:
             logger.debug(
                 "Leg 2 submit got %d uuid=%s — poller will retry",
                 resp.status_code, receipt.request_uuid,
             )
+
+
+async def _record_sign_rejection(
+    settings: Settings, request_uuid: str, resp: httpx.Response,
+) -> None:
+    """Parse a 4xx rejection response and persist it to the receipt store.
+
+    Accepted body shape: ``{"reason": "<CODE>", "detail": "<text>"}``.
+    Unknown codes fall back to ``SIGN_REJECTED_UNKNOWN_REQUEST`` so the
+    row still surfaces in the failed-retryable bucket.
+    """
+    code = reasons.SIGN_REJECTED_UNKNOWN_REQUEST
+    detail: str | None = None
+    try:
+        body = resp.json()
+        raw_code = (body.get("reason") or "").strip().upper()
+        if raw_code in reasons.SIGN_CODES:
+            code = raw_code
+        detail = body.get("detail")
+    except Exception:
+        detail = (resp.text or "")[:200] or None
+
+    try:
+        store = get_store(settings.RECEIPT_STORE_PATH)
+        await store.mark_sign_failed(request_uuid, code, detail)
+        logger.info(
+            "Leg 2 submit rejected uuid=%s code=%s detail=%s",
+            request_uuid, code, detail,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to record sign rejection uuid=%s", request_uuid,
+        )
 
 
 class ReceiptPoller:
@@ -279,6 +327,11 @@ class ReceiptPoller:
         if unsigned_count == 0:
             return
 
+        # Also pull any async rejections the coord API has queued. Runs on
+        # the same cadence as the signed-receipt poll so a rejected row
+        # flips from pending_sign → failed_retryable within one tick.
+        await self._tick_rejections(store)
+
         timestamp = int(time.time())
         sig = _sign_list_request(self._identity_key, self._node_id, timestamp)
         params = {"ts": timestamp, "sig": sig, "limit": 50}
@@ -328,6 +381,83 @@ class ReceiptPoller:
             self._cursor = newest_cursor - timedelta(seconds=POLL_CURSOR_BUFFER_SECONDS)
 
         logger.debug("Leg 2 poller: updated %d signatures from coord API", len(rows))
+
+    async def _tick_rejections(self, store) -> None:
+        """Pull async rejections the coord API queued and persist them.
+
+        Uses a separate cursor (``_rejection_cursor``) so signed and
+        rejected streams advance independently. Authenticated the same
+        way as the signed-receipts poll, with a distinct message prefix
+        so the coord API can route the signature to the correct handler.
+        """
+        timestamp = int(time.time())
+        sig = _sign_list_rejections_request(
+            self._identity_key, self._node_id, timestamp,
+        )
+        params = {"ts": timestamp, "sig": sig, "limit": 50}
+        cursor = getattr(self, "_rejection_cursor", None) or self._cursor
+        if cursor is not None:
+            params["since"] = cursor.isoformat()
+
+        url = (
+            self._settings.COORDINATION_API_URL.rstrip("/")
+            + f"/nodes/{self._node_id}/rejected-receipts"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=POLL_TIMEOUT_SECONDS) as client:
+                resp = await client.get(url, params=params)
+        except httpx.RequestError as exc:
+            logger.debug("Leg 2 rejection-poll network error: %s", exc)
+            return
+
+        if resp.status_code == 404:
+            # Endpoint not deployed yet — gracefully degrade. Provider keeps
+            # working against older coord APIs; rejections just won't
+            # surface until the coord API is updated.
+            return
+        if resp.status_code != 200:
+            logger.debug("Leg 2 rejection-poll got %d", resp.status_code)
+            return
+
+        try:
+            rows = resp.json()
+        except Exception:
+            return
+        if not rows:
+            return
+
+        newest = cursor
+        for r in rows:
+            try:
+                when = datetime.fromisoformat(
+                    r["rejected_at"].replace("Z", "+00:00"),
+                )
+            except Exception:
+                when = None
+            code = (r.get("reason") or "").strip().upper()
+            if code not in reasons.SIGN_CODES:
+                code = reasons.SIGN_REJECTED_UNKNOWN_REQUEST
+            try:
+                await store.mark_sign_failed(
+                    r["request_uuid"], code, r.get("detail"),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to mark receipt rejected uuid=%s",
+                    r.get("request_uuid"),
+                )
+            if when and (newest is None or when > newest):
+                newest = when
+
+        if newest is not None:
+            from datetime import timedelta
+            self._rejection_cursor = newest - timedelta(
+                seconds=POLL_CURSOR_BUFFER_SECONDS,
+            )
+
+        logger.debug(
+            "Leg 2 poller: recorded %d rejections from coord API", len(rows),
+        )
 
 
 # Module-level singleton used by the proxy_handler's post-relay hook so
