@@ -13,6 +13,8 @@ const ENV_URLS = {
 };
 
 let statusPollId = null;
+let receiptsPollId = null;
+let currentClaimTaskId = null;
 let isTestBuild = false;
 let versionModalDismissed = false;  // reset on each node start
 
@@ -37,12 +39,17 @@ function hideAll() {
     "screen-settings",
     "screen-fresh-restart",
     "screen-network",
+    "screen-receipts",
   ]) {
     hide(id);
   }
   if (statusPollId) {
     clearInterval(statusPollId);
     statusPollId = null;
+  }
+  if (receiptsPollId) {
+    clearInterval(receiptsPollId);
+    receiptsPollId = null;
   }
 }
 
@@ -505,8 +512,14 @@ function updateSettingsVersionStatus(vc) {
 function showStatus() {
   show("screen-status");
   updateStatus();
+  updateEarningsRow();
   if (statusPollId) clearInterval(statusPollId);
-  statusPollId = setInterval(updateStatus, 3000);
+  statusPollId = setInterval(function () {
+    updateStatus();
+    // Earnings row refreshes on a slower cadence (10s vs 3s) — store
+    // queries are cheap but the row doesn't need to be real-time.
+    if (Date.now() % 10000 < 3100) updateEarningsRow();
+  }, 3000);
 }
 
 async function updateStatus() {
@@ -1071,6 +1084,7 @@ async function init() {
     // Action buttons
     initFreshRestart();
     initActionButtons();
+    initReceiptsScreen();
 
     if (needsOnboarding) {
       showOnboarding();
@@ -1084,6 +1098,413 @@ async function init() {
     // pywebview.api not ready — retry
     setTimeout(init, 200);
   }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Earnings / Payments — PR 5
+// ─────────────────────────────────────────────────────────────────
+
+function formatSpace(wei) {
+  // 18-decimal token; show up to 6 decimal places, strip trailing zeros.
+  if (!wei && wei !== 0) return "—";
+  const n = Number(wei) / 1e18;
+  if (!isFinite(n)) return "—";
+  let s = n.toFixed(6);
+  if (s.includes(".")) s = s.replace(/\.?0+$/, "");
+  return s || "0";
+}
+
+function formatBytes(bytes) {
+  if (bytes == null) return "—";
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+}
+
+function humanAge(sec) {
+  if (sec < 60) return sec + "s ago";
+  if (sec < 3600) return Math.floor(sec / 60) + "m ago";
+  if (sec < 86400) return Math.floor(sec / 3600) + "h ago";
+  return Math.floor(sec / 86400) + "d ago";
+}
+
+async function updateEarningsRow() {
+  const btn = $("#btn-earnings");
+  if (!btn) return;
+
+  let resp;
+  try {
+    resp = await window.pywebview.api.receipts_summary();
+  } catch (e) {
+    btn.style.display = "none";
+    return;
+  }
+
+  if (!resp || !resp.ok || !resp.escrow_configured) {
+    btn.style.display = "none";
+    return;
+  }
+
+  const s = resp.summary || {};
+  const outstanding = (s.claimable || 0) + (s.pending_sign || 0);
+  const failed = (s.failed_retryable || 0) + (s.failed_terminal || 0);
+  const summaryEl = $("#earnings-summary");
+
+  if (outstanding === 0 && failed === 0 && (s.claimed || 0) === 0) {
+    summaryEl.textContent = "No earnings yet";
+    summaryEl.className = "wallet-summary text-muted";
+  } else if (s.failed_retryable > 0) {
+    summaryEl.innerHTML =
+      "&#9888; " + s.failed_retryable + " need attention";
+    summaryEl.className = "wallet-summary text-warn";
+  } else if (s.failed_terminal > 0 && s.claimable === 0 && s.pending_sign === 0) {
+    summaryEl.textContent = s.failed_terminal + " locked";
+    summaryEl.className = "wallet-summary text-error";
+  } else if (s.pending_sign > 0) {
+    summaryEl.textContent =
+      s.pending_sign + " pending · " +
+      formatSpace(s.claimable_total_price) + " SPACE";
+    summaryEl.className = "wallet-summary";
+  } else {
+    summaryEl.textContent =
+      formatSpace(s.claimable_total_price) + " SPACE ready";
+    summaryEl.className = "wallet-summary text-success";
+  }
+
+  btn.style.display = "flex";
+}
+
+async function showReceipts() {
+  hideAll();
+  show("screen-receipts");
+  await refreshReceipts();
+  if (receiptsPollId) clearInterval(receiptsPollId);
+  receiptsPollId = setInterval(refreshReceipts, 10000);
+}
+
+async function refreshReceipts() {
+  let resp;
+  try {
+    resp = await window.pywebview.api.receipts_list("all", 500, 0);
+  } catch (e) {
+    showToast("Could not load receipts: " + e, "error");
+    return;
+  }
+  if (!resp || !resp.ok) {
+    showToast("Could not load receipts: " + (resp && resp.error), "error");
+    return;
+  }
+
+  const rows = resp.receipts || [];
+  const summary = resp.summary || {};
+
+  const claimable = rows.filter(r => r.view === "claimable");
+  const retryable = rows.filter(r => r.view === "failed_retryable");
+  const pending = rows.filter(r => r.view === "pending_sign");
+  const locked = rows.filter(r => r.view === "failed_terminal");
+
+  renderClaimableCard(summary, claimable);
+  renderRowList("receipts-retryable-list", retryable, "failed_retryable");
+  renderRowList("receipts-pending-list", pending, "pending_sign");
+  renderRowList("receipts-locked-list", locked, "failed_terminal");
+
+  $("#receipts-retryable-card").style.display = retryable.length ? "block" : "none";
+  $("#receipts-retryable-title").textContent =
+    "Needs attention · " + retryable.length;
+  $("#receipts-pending-card").style.display = pending.length ? "block" : "none";
+  $("#receipts-locked-card").style.display = locked.length ? "block" : "none";
+
+  const empty =
+    claimable.length === 0 && retryable.length === 0 &&
+    pending.length === 0 && locked.length === 0;
+  $("#receipts-empty").style.display = empty ? "block" : "none";
+}
+
+function renderClaimableCard(summary, claimable) {
+  const card = $("#receipts-claimable-card");
+  const count = summary.claimable || 0;
+  if (count === 0) {
+    card.style.display = "none";
+    return;
+  }
+  $("#receipts-claimable-count").textContent = count;
+  $("#receipts-claimable-plural").textContent = count === 1 ? "" : "s";
+  $("#receipts-claimable-total").textContent =
+    formatSpace(summary.claimable_total_price);
+  card.style.display = "block";
+
+  const btn = $("#btn-claim-all");
+  // Don't let a click drop duplicate claims — the backend also
+  // serialises via flock, but disabling here keeps the UI honest.
+  btn.disabled = !!currentClaimTaskId;
+  btn.textContent = currentClaimTaskId
+    ? "Claiming..." : "Claim All Outstanding";
+}
+
+function renderRowList(containerId, rows, view) {
+  const container = $("#" + containerId);
+  container.innerHTML = "";
+  const now = Math.floor(Date.now() / 1000);
+
+  for (const r of rows) {
+    const row = document.createElement("div");
+    row.className = "receipt-row" + (r.locked ? " locked" : "");
+
+    const header = document.createElement("div");
+    header.className = "receipt-row-header";
+    const uuid = document.createElement("span");
+    uuid.className = "uuid";
+    uuid.textContent = r.request_uuid.slice(0, 8) + "…";
+    const price = document.createElement("span");
+    price.textContent = formatSpace(r.total_price) + " SPACE";
+    header.appendChild(uuid);
+    header.appendChild(price);
+    row.appendChild(header);
+
+    const meta = document.createElement("div");
+    meta.className = "receipt-meta";
+    const triesText = r.view === "failed_retryable"
+      ? "try " + (r.claim_attempts || r.sign_attempts) + " of " +
+        (r.view.startsWith("failed") && r.sign_attempts
+          ? r.max_sign_attempts : r.max_claim_attempts)
+      : r.view === "failed_terminal" ? "locked" : "";
+    meta.textContent = formatBytes(r.data_amount)
+      + " · " + humanAge(now - r.created_at)
+      + (triesText ? " · " + triesText : "");
+    row.appendChild(meta);
+
+    if (r.last_error_message) {
+      const reason = document.createElement("div");
+      reason.className = "receipt-reason";
+      reason.textContent = r.last_error_message;
+      row.appendChild(reason);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "receipt-actions";
+
+    if (view === "failed_retryable") {
+      const retryBtn = document.createElement("button");
+      retryBtn.className = "btn-ghost";
+      retryBtn.textContent = "Retry";
+      retryBtn.disabled = !!currentClaimTaskId;
+      retryBtn.addEventListener("click", () => onRetryRow(r.request_uuid));
+      actions.appendChild(retryBtn);
+    }
+
+    const detailBtn = document.createElement("button");
+    detailBtn.className = "btn-text-subtle";
+    detailBtn.textContent = "Details";
+    detailBtn.addEventListener("click", () => showReceiptDetail(r.request_uuid));
+    actions.appendChild(detailBtn);
+
+    row.appendChild(actions);
+    container.appendChild(row);
+  }
+}
+
+async function onClaimAll() {
+  if (currentClaimTaskId) return;
+  const btn = $("#btn-claim-all");
+  btn.disabled = true;
+  btn.textContent = "Starting claim...";
+
+  let resp;
+  try {
+    resp = await window.pywebview.api.receipts_claim_all();
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "Claim All Outstanding";
+    showToast("Claim failed: " + e, "error");
+    return;
+  }
+
+  if (!resp || !resp.ok) {
+    btn.disabled = false;
+    btn.textContent = "Claim All Outstanding";
+    showToast("Claim failed: " + (resp && resp.error), "error");
+    return;
+  }
+  currentClaimTaskId = resp.task_id;
+  btn.textContent = "Claiming...";
+  pollClaimTask(resp.task_id);
+}
+
+async function onRetryRow(uuid) {
+  if (currentClaimTaskId) return;
+  let resp;
+  try {
+    resp = await window.pywebview.api.receipts_retry(uuid);
+  } catch (e) {
+    showToast("Retry failed: " + e, "error");
+    return;
+  }
+  if (!resp.ok) {
+    showToast("Retry failed: " + resp.error, "error");
+    return;
+  }
+  if (resp.noop) {
+    showToast("Nothing to retry (" + resp.reason + ")", "warn");
+    refreshReceipts();
+    return;
+  }
+  currentClaimTaskId = resp.task_id;
+  refreshReceipts();
+  pollClaimTask(resp.task_id);
+}
+
+async function pollClaimTask(taskId) {
+  const poll = async () => {
+    let st;
+    try {
+      st = await window.pywebview.api.receipts_claim_status(taskId);
+    } catch (e) {
+      // Retry once on pywebview hiccup.
+      setTimeout(poll, 1500);
+      return;
+    }
+    if (!st.ok) {
+      finishClaimTask();
+      showToast("Claim task lost: " + st.error, "error");
+      return;
+    }
+    if (st.state === "done") {
+      finishClaimTask();
+      renderClaimOutcome(st.result);
+      await refreshReceipts();
+      await updateEarningsRow();
+      return;
+    }
+    if (st.state === "error") {
+      finishClaimTask();
+      showToast("Claim failed: " + st.error, "error");
+      await refreshReceipts();
+      return;
+    }
+    setTimeout(poll, 1500);
+  };
+  poll();
+}
+
+function finishClaimTask() {
+  currentClaimTaskId = null;
+  const btn = $("#btn-claim-all");
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = "Claim All Outstanding";
+  }
+}
+
+function renderClaimOutcome(result) {
+  if (!result) return;
+  if (result.noop) {
+    showToast("Another claim was already running — skipped.", "warn");
+    return;
+  }
+  if (!result.ok) {
+    showToast("Claim failed: " + (result.error || "unknown"), "error");
+    return;
+  }
+  const s = result.summary || {};
+  const parts = [];
+  if (s.submitted) parts.push(s.submitted + " claimed");
+  if (s.reconciled) parts.push(s.reconciled + " reconciled");
+  if (s.failed_batches) parts.push(s.failed_batches + " failed");
+  if (s.locked_after_failure) parts.push(s.locked_after_failure + " locked");
+  if (parts.length === 0) parts.push("Nothing to claim");
+  const tone = s.failed_batches ? "warn" : "success";
+  showToast("Claim: " + parts.join(" · "), tone);
+}
+
+async function showReceiptDetail(uuid) {
+  let resp;
+  try {
+    resp = await window.pywebview.api.receipts_detail(uuid);
+  } catch (e) {
+    showToast("Could not load detail: " + e, "error");
+    return;
+  }
+  if (!resp || !resp.ok) {
+    showToast("Could not load detail: " + (resp && resp.error), "error");
+    return;
+  }
+  const r = resp.receipt;
+
+  const body = $("#receipt-detail-body");
+  const rows = [
+    ["UUID",         r.request_uuid],
+    ["Status",       r.view],
+    ["Bytes",        formatBytes(r.data_amount)],
+    ["Price",        formatSpace(r.total_price) + " SPACE (" + r.total_price + " wei)"],
+    ["Client",       r.client_address],
+    ["Node",         r.node_address],
+    ["Created",      new Date(r.created_at * 1000).toLocaleString()],
+    ["Sign attempts", r.sign_attempts + " / " + r.max_sign_attempts],
+    ["Claim attempts", r.claim_attempts + " / " + r.max_claim_attempts],
+  ];
+  if (r.last_error_code) {
+    rows.push(["Last error", r.last_error_code]);
+    rows.push(["Details", r.last_error_detail || r.last_error_message]);
+  }
+  if (r.claim_tx_hash && r.claim_tx_hash !== "external") {
+    rows.push(["Tx hash", r.claim_tx_hash]);
+  }
+
+  body.innerHTML = rows.map(([k, v]) =>
+    "<div style='margin-bottom:6px;'>" +
+    "<span style='color:#8080a0; display:inline-block; width:110px;'>" +
+    k + "</span>" +
+    "<span style='color:#e0e0e0; word-break:break-all;'>" +
+    escapeHtml(String(v)) + "</span></div>"
+  ).join("");
+
+  const txBtn = $("#btn-receipt-detail-tx");
+  if (r.claim_tx_hash && r.claim_tx_hash !== "external") {
+    txBtn.style.display = "block";
+    txBtn.onclick = () => window.pywebview.api.receipts_open_explorer(r.claim_tx_hash);
+  } else {
+    txBtn.style.display = "none";
+    txBtn.onclick = null;
+  }
+
+  $("#receipt-detail-overlay").style.display = "flex";
+}
+
+function hideReceiptDetail() {
+  $("#receipt-detail-overlay").style.display = "none";
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;",
+    '"': "&quot;", "'": "&#39;",
+  })[c]);
+}
+
+let toastTimer = null;
+function showToast(msg, tone) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.className = "toast visible " + (tone || "");
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    t.className = "toast " + (tone || "");
+  }, 4000);
+}
+
+function initReceiptsScreen() {
+  const earningsBtn = $("#btn-earnings");
+  if (earningsBtn) earningsBtn.addEventListener("click", showReceipts);
+
+  const backBtn = $("#btn-receipts-back");
+  if (backBtn) backBtn.addEventListener("click", showStatus);
+
+  const claimBtn = $("#btn-claim-all");
+  if (claimBtn) claimBtn.addEventListener("click", onClaimAll);
+
+  const closeDetailBtn = $("#btn-receipt-detail-close");
+  if (closeDetailBtn) closeDetailBtn.addEventListener("click", hideReceiptDetail);
 }
 
 // Wait for pywebview to be ready

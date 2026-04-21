@@ -173,6 +173,12 @@
         <span id="staking-status" class="wallet-value">-</span>
       </div>
 
+      <button type="button" id="btn-earnings" class="wallet-display-clickable" style="display: none;">
+        <span class="wallet-label">Earnings</span>
+        <span class="wallet-summary" id="earnings-summary">—</span>
+        <span class="wallet-chevron">&rsaquo;</span>
+      </button>
+
       <div class="info-box">
         <p>Earn <strong>Spacecoin</strong> by running this node. <strong>Stake</strong> to earn yield.</p>
       </div>
@@ -314,6 +320,65 @@
       <div id="settings-version-status" class="version-status"></div>
     </div>
   </div>
+
+  <!-- Earnings / Payments Screen -->
+  <div id="screen-receipts" class="screen" style="display: none;">
+    <div class="container">
+      <div class="settings-header">
+        <button id="btn-receipts-back" class="btn-back">&larr; Back</button>
+        <h2>Earnings</h2>
+      </div>
+
+      <!-- Claimable section -->
+      <div id="receipts-claimable-card" class="status-card" style="display: none;">
+        <p class="receipt-claim-summary">
+          <strong id="receipts-claimable-count">—</strong> receipt<span id="receipts-claimable-plural">s</span>
+          ·
+          <strong id="receipts-claimable-total">—</strong> SPACE ready
+        </p>
+        <button id="btn-claim-all" class="btn-primary">Claim All Outstanding</button>
+      </div>
+
+      <!-- Needs attention section -->
+      <div id="receipts-retryable-card" class="status-card" style="display: none;">
+        <p class="receipts-section-title" id="receipts-retryable-title">Needs attention</p>
+        <div id="receipts-retryable-list"></div>
+      </div>
+
+      <!-- Pending signing section -->
+      <div id="receipts-pending-card" class="status-card" style="display: none;">
+        <p class="receipts-section-title">Pending signing</p>
+        <div id="receipts-pending-list"></div>
+      </div>
+
+      <!-- Locked section -->
+      <div id="receipts-locked-card" class="status-card" style="display: none;">
+        <p class="receipts-section-title">Locked (cannot retry)</p>
+        <div id="receipts-locked-list"></div>
+      </div>
+
+      <div id="receipts-empty" class="receipt-empty" style="display: none;">
+        No earnings yet. Receipts from routed traffic appear here.
+      </div>
+    </div>
+  </div>
+
+  <!-- Receipt Detail Modal (uses staking-modal-overlay chrome) -->
+  <div id="receipt-detail-overlay" class="staking-modal-overlay" style="display: none;">
+    <div class="staking-modal" style="width: 340px; text-align: left;">
+      <div class="staking-modal-title" id="receipt-detail-title">Receipt details</div>
+      <div id="receipt-detail-body" style="color: #c0c0d8; font-size: 12px; line-height: 1.5; width: 100%;">
+        <!-- populated from JS -->
+      </div>
+      <button id="btn-receipt-detail-tx" class="staking-modal-primary" style="display: none;">
+        View on Blockscout
+      </button>
+      <button id="btn-receipt-detail-close" class="staking-modal-secondary">Close</button>
+    </div>
+  </div>
+
+  <!-- Toast for claim-completion feedback -->
+  <div id="toast" class="toast"></div>
 
   <!-- Passphrase Unlock Dialog -->
   <div id="dialog-overlay" class="dialog-overlay" style="display: none;">

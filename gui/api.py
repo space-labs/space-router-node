@@ -1,7 +1,11 @@
 """Python API exposed to the webview frontend via pywebview's js_api."""
 
+import asyncio
 import logging
 import os
+import threading
+import time
+import uuid as uuid_mod
 
 from dotenv import set_key
 
@@ -11,6 +15,83 @@ from gui.config_store import ConfigStore
 from gui.node_manager import NodeManager
 
 logger = logging.getLogger(__name__)
+
+
+class _ClaimTaskRegistry:
+    """In-memory registry for background claim/retry tasks.
+
+    The GUI fires ``receipts_claim_all`` / ``receipts_retry`` which
+    return immediately with a ``task_id``. The JS side polls
+    ``receipts_claim_status(task_id)`` until the task completes. A
+    file lock (``~/.spacerouter/claim.lock``) serialises real claim
+    work across CLI, GUI, and accidental double-clicks, so only one
+    claim tx runs at any moment.
+    """
+
+    def __init__(self) -> None:
+        self._tasks: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    def start(self, runner) -> str:
+        task_id = uuid_mod.uuid4().hex
+        with self._lock:
+            self._tasks[task_id] = {
+                "state": "queued", "started_at": time.time(),
+                "result": None, "error": None,
+            }
+
+        def _run():
+            try:
+                with self._lock:
+                    self._tasks[task_id]["state"] = "running"
+                result = runner()
+                with self._lock:
+                    self._tasks[task_id]["state"] = "done"
+                    self._tasks[task_id]["result"] = result
+            except Exception as exc:
+                logger.exception("Claim task %s failed", task_id)
+                with self._lock:
+                    self._tasks[task_id]["state"] = "error"
+                    self._tasks[task_id]["error"] = str(exc)
+
+        threading.Thread(target=_run, daemon=True).start()
+        return task_id
+
+    def status(self, task_id: str) -> dict | None:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return None
+            return dict(task)
+
+    def gc(self, max_age_seconds: int = 3600) -> None:
+        """Drop tasks older than max_age to keep the map bounded."""
+        cutoff = time.time() - max_age_seconds
+        with self._lock:
+            stale = [
+                tid for tid, t in self._tasks.items()
+                if t.get("started_at", 0) < cutoff
+                and t["state"] in ("done", "error")
+            ]
+            for tid in stale:
+                del self._tasks[tid]
+
+
+_claim_tasks = _ClaimTaskRegistry()
+
+
+def _run_async(coro):
+    """Run a coroutine to completion from a sync pywebview-API method.
+
+    Uses a fresh event loop per call — these methods are cheap DB queries
+    so the overhead is negligible and avoids cross-loop issues with the
+    provider's main event loop.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 class Api:
@@ -242,6 +323,163 @@ class Api:
         except Exception:
             return 1
 
+    # ── Leg 2 receipts / earnings ──────────────────────────────────
+
+    def receipts_summary(self) -> dict:
+        """Cheap counts + claimable SPACE total. Called on status poll.
+
+        Returns ``{summary, escrow_configured}`` where ``summary`` is
+        the raw per-view counts and ``escrow_configured`` tells the UI
+        whether claim actions are available.
+        """
+        from app.main import load_settings
+        from app.payment.receipt_store import get_store
+
+        try:
+            settings = load_settings()
+        except Exception as exc:
+            return {"ok": False, "error": f"config unavailable: {exc}"}
+
+        async def _go():
+            store = get_store(settings.RECEIPT_STORE_PATH)
+            await store.initialize()
+            return await store.summary()
+
+        try:
+            summary = _run_async(_go())
+        except Exception as exc:
+            logger.exception("receipts_summary failed")
+            return {"ok": False, "error": str(exc)}
+
+        return {
+            "ok": True,
+            "summary": summary,
+            "escrow_configured": bool(
+                settings.ESCROW_CHAIN_RPC
+                and settings.ESCROW_CONTRACT_ADDRESS
+            ),
+        }
+
+    def receipts_list(
+        self, view: str = "all", limit: int = 100, offset: int = 0,
+    ) -> dict:
+        from app.main import load_settings, _receipt_to_json
+        from app.payment.receipt_store import get_store
+
+        settings = load_settings()
+
+        async def _go():
+            store = get_store(settings.RECEIPT_STORE_PATH)
+            await store.initialize()
+            rows = await store.list_by_view(
+                view=view, limit=int(limit), offset=int(offset),
+            )
+            summary = await store.summary()
+            return summary, rows
+
+        try:
+            summary, rows = _run_async(_go())
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            logger.exception("receipts_list failed")
+            return {"ok": False, "error": str(exc)}
+
+        return {
+            "ok": True,
+            "view": view,
+            "summary": summary,
+            "receipts": [_receipt_to_json(sr) for sr in rows],
+        }
+
+    def receipts_detail(self, request_uuid: str) -> dict:
+        from app.main import load_settings, _receipt_to_json
+        from app.payment.receipt_store import get_store
+
+        settings = load_settings()
+
+        async def _go():
+            store = get_store(settings.RECEIPT_STORE_PATH)
+            await store.initialize()
+            return await store.get_by_uuid(request_uuid)
+
+        try:
+            sr = _run_async(_go())
+        except Exception as exc:
+            logger.exception("receipts_detail failed")
+            return {"ok": False, "error": str(exc)}
+
+        if sr is None:
+            return {"ok": False, "error": "not_found"}
+        return {"ok": True, "receipt": _receipt_to_json(sr)}
+
+    def receipts_claim_all(self) -> dict:
+        """Kick off a claim-all task in the background.
+
+        Returns a ``task_id`` the UI polls via ``receipts_claim_status``.
+        Serialised across CLI / GUI via a file lock in the runner.
+        """
+        _claim_tasks.gc()
+        try:
+            task_id = _claim_tasks.start(lambda: _claim_runner(None, False))
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "task_id": task_id}
+
+    def receipts_retry(self, request_uuid: str) -> dict:
+        """Retry a single receipt. No-op (``noop=True``) on locked / claimed."""
+        from app.main import load_settings
+        from app.payment.receipt_store import get_store
+
+        settings = load_settings()
+
+        async def _peek():
+            store = get_store(settings.RECEIPT_STORE_PATH)
+            await store.initialize()
+            return await store.get_by_uuid(request_uuid)
+
+        try:
+            sr = _run_async(_peek())
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+        if sr is None:
+            return {"ok": False, "error": "not_found"}
+        if sr.claimed_at is not None:
+            return {"ok": True, "noop": True, "reason": "already_claimed"}
+        if sr.locked:
+            return {"ok": True, "noop": True, "reason": "locked"}
+
+        task_id = _claim_tasks.start(
+            lambda: _claim_runner(request_uuid, True),
+        )
+        return {"ok": True, "task_id": task_id}
+
+    def receipts_claim_status(self, task_id: str) -> dict:
+        task = _claim_tasks.status(task_id)
+        if task is None:
+            return {"ok": False, "error": "unknown_task"}
+        return {"ok": True, **task}
+
+    def receipts_open_explorer(self, tx_hash: str) -> dict:
+        """Open blockscout for the active escrow chain at a tx hash."""
+        import webbrowser
+        from app.main import load_settings
+
+        settings = load_settings()
+        chain_id = getattr(settings, "ESCROW_CHAIN_ID", 0)
+        # cc3 testnet = 102031. Mainnet creditcoin = 102030. Fall back
+        # to the testnet explorer for unknown chains (test env default).
+        if chain_id == 102030:
+            base = "https://creditcoin.blockscout.com/tx/"
+        else:
+            base = "https://creditcoin-testnet.blockscout.com/tx/"
+        try:
+            webbrowser.open(base + tx_hash)
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def fresh_restart(self) -> dict:
         """Stop node, fully reset config and identity, return to onboarding.
 
@@ -264,3 +502,79 @@ class Api:
         except Exception as exc:
             logger.exception("Failed to fresh restart")
             return {"ok": False, "error": str(exc)}
+
+
+# ──────────────────────────────────────────────────────────────────
+# Background claim runner — called from _ClaimTaskRegistry.start()
+# ──────────────────────────────────────────────────────────────────
+
+
+def _claim_runner(only_uuid: str | None, include_retryable: bool) -> dict:
+    """Background claim job.
+
+    Serialised across CLI / GUI / double-clicks via a ``fcntl.flock``
+    on ``~/.spacerouter/claim.lock``. If the lock is already held,
+    returns ``{noop: True}`` so the UI stays calm rather than showing
+    an error when a second concurrent click comes in.
+    """
+    import fcntl
+    from pathlib import Path
+
+    from app.main import load_settings
+    from app.payment.settlement import claim_all
+    from app.identity import load_or_create_identity, KeystorePassphraseRequired
+
+    settings = load_settings()
+    lock_path = Path(settings.RECEIPT_STORE_PATH).expanduser().parent / "claim.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd = open(lock_path, "w")
+    try:
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"noop": True, "reason": "claim_in_progress"}
+
+        # Use identity key as settlement key unless operator overrides.
+        settlement_key = os.environ.get("SR_SETTLEMENT_KEY", "")
+        if not settlement_key:
+            try:
+                identity_key, _ = load_or_create_identity(
+                    settings.IDENTITY_KEY_PATH, settings.IDENTITY_PASSPHRASE,
+                )
+                settlement_key = (
+                    identity_key if identity_key.startswith("0x")
+                    else "0x" + identity_key
+                )
+            except KeystorePassphraseRequired:
+                return {
+                    "ok": False,
+                    "error": "Identity key is encrypted. Set a passphrase "
+                             "and restart before claiming.",
+                }
+
+        try:
+            results = _run_async(claim_all(
+                settings, settlement_key,
+                include_retryable=include_retryable,
+                only_uuids=[only_uuid] if only_uuid else None,
+            ))
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+        summary = {
+            "batches": len(results),
+            "submitted": sum(r.submitted for r in results),
+            "reconciled": sum(r.skipped_as_already_claimed for r in results),
+            "failed_batches": sum(1 for r in results if r.error),
+            "locked_after_failure": sum(r.locked_after_failure for r in results),
+            "tx_hashes": [r.tx_hash for r in results if r.tx_hash],
+            "reasons": [r.reason_code for r in results if r.reason_code],
+        }
+        return {"ok": True, "summary": summary}
+    finally:
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        fd.close()
