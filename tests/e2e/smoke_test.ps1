@@ -146,6 +146,11 @@ function Test-VersionFlag {
 function Test-PortBinding {
     # Use a dedicated port so TIME_WAIT state doesn't affect other tests
     $env:SR_NODE_PORT = "$PortBindingPort"
+    # Separate receipts-store path per sub-test so the daemon-lock's
+    # TerminateProcess-lag on Windows can't cause false "another instance"
+    # failures in the next sub-test. Real operators run one daemon per
+    # store; only CI hits two in succession.
+    $env:SR_RECEIPT_STORE_PATH = "$env:TEMP\sr-smoke-portbinding\receipts.db"
     Log "Testing port binding on port $($env:SR_NODE_PORT)..."
 
     $proc = Start-Process -FilePath $Binary -PassThru -NoNewWindow
@@ -178,6 +183,9 @@ function Test-PortBinding {
 function Test-CleanShutdown {
     # Use a different port than Test-PortBinding to avoid TIME_WAIT conflicts
     $env:SR_NODE_PORT = "$ShutdownPort"
+    # Separate receipts-store so the daemon-lock from Test-PortBinding's
+    # killed binary can't block this one. See note above.
+    $env:SR_RECEIPT_STORE_PATH = "$env:TEMP\sr-smoke-shutdown\receipts.db"
     Log "Testing clean shutdown on port $($env:SR_NODE_PORT)..."
 
     $proc = Start-Process -FilePath $Binary -PassThru -NoNewWindow

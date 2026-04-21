@@ -114,6 +114,10 @@ test_version_flag() {
 test_port_binding() {
     # Use a dedicated port so TIME_WAIT state doesn't affect other tests
     export SR_NODE_PORT="$PORT_BINDING_PORT"
+    # Separate receipts-store per sub-test so the daemon-lock can't carry
+    # across. Real operators run one daemon per store; only CI hits two
+    # in succession.
+    export SR_RECEIPT_STORE_PATH="${TMPDIR:-/tmp}/sr-smoke-portbinding/receipts.db"
     log "Testing port binding on port $SR_NODE_PORT..."
 
     "$BINARY" &
@@ -163,6 +167,8 @@ test_port_binding() {
 test_clean_shutdown() {
     # Use a different port than test_port_binding to avoid TIME_WAIT conflicts
     export SR_NODE_PORT="$SHUTDOWN_PORT"
+    # Separate receipts-store from port-binding (see comment there).
+    export SR_RECEIPT_STORE_PATH="${TMPDIR:-/tmp}/sr-smoke-shutdown/receipts.db"
     log "Testing clean shutdown via SIGTERM on port $SR_NODE_PORT..."
 
     "$BINARY" &
