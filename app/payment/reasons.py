@@ -24,6 +24,8 @@ SIGN_REJECTED_BYTE_MISMATCH = "SIGN_REJECTED_BYTE_MISMATCH"
 SIGN_REJECTED_PRICE_CAP = "SIGN_REJECTED_PRICE_CAP"
 SIGN_REJECTED_BAD_SIGNATURE = "SIGN_REJECTED_BAD_SIGNATURE"
 SIGN_REJECTED_UNKNOWN_REQUEST = "SIGN_REJECTED_UNKNOWN_REQUEST"
+SIGN_REJECTED_CLOCK_SKEW = "SIGN_REJECTED_CLOCK_SKEW"
+SIGN_EXPIRED_NO_PENDING = "SIGN_EXPIRED_NO_PENDING"
 SIGN_TIMEOUT = "SIGN_TIMEOUT"
 
 # --- Claim-side codes --------------------------------------------------------
@@ -39,6 +41,8 @@ SIGN_CODES = frozenset({
     SIGN_REJECTED_PRICE_CAP,
     SIGN_REJECTED_BAD_SIGNATURE,
     SIGN_REJECTED_UNKNOWN_REQUEST,
+    SIGN_REJECTED_CLOCK_SKEW,
+    SIGN_EXPIRED_NO_PENDING,
     SIGN_TIMEOUT,
 })
 
@@ -65,6 +69,12 @@ MESSAGES: dict[str, str] = {
         "The gateway has no record of this traffic — receipt cannot be signed.",
     SIGN_TIMEOUT:
         "The signing service didn't respond in time. Will retry automatically.",
+    SIGN_REJECTED_CLOCK_SKEW:
+        "Your provider's clock is drifting. Enable NTP (e.g. "
+        "`sudo timedatectl set-ntp true`) and restart.",
+    SIGN_EXPIRED_NO_PENDING:
+        "The gateway never recorded this relay. Receipt expired in "
+        "the signing queue (typically 24h). No action required.",
     CLAIM_REVERTED:
         "The on-chain claim transaction reverted.",
     CLAIM_RPC_UNREACHABLE:
@@ -100,6 +110,7 @@ MAX_CLAIM_ATTEMPTS = int(os.environ.get("SR_RECEIPT_MAX_CLAIM_ATTEMPTS", "2"))
 # indefinitely. Only explicit rejections / terminal tx failures count.
 TRANSIENT_CODES = frozenset({
     SIGN_TIMEOUT,
+    SIGN_REJECTED_CLOCK_SKEW,  # fix NTP, receipt will be retried on next tick
     CLAIM_RPC_UNREACHABLE,
     CLAIM_TX_TIMEOUT,
 })

@@ -452,4 +452,9 @@ async def test_reaper_tick_noop_when_no_timeouts(tmp_path):
 
     reaper = ClaimReaper(settings=Settings())
     result = await reaper.tick()
-    assert result == {"checked": 0, "reconciled": 0, "cleared": 0}
+    # Two-pass result now includes reorg stats — both should be zero.
+    assert result["checked"] == 0
+    assert result["reconciled"] == 0
+    assert result["cleared"] == 0
+    assert result["reorg_checked"] == 0
+    assert result["reorg_reverted"] == 0

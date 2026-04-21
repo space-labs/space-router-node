@@ -156,6 +156,15 @@ class ReceiptSubmitter:
         if not self.ready or data_amount <= 0:
             return
 
+        # Refuse to generate zero-value receipts — they cluster the local
+        # DB and waste sign round-trips with no payout. Operators are
+        # already warned at startup when NODE_RATE_PER_GB is 0.
+        if self._settings.NODE_RATE_PER_GB <= 0:
+            logger.debug(
+                "Leg 2 submit skipped: NODE_RATE_PER_GB=0, receipt would be zero-value",
+            )
+            return
+
         receipt = _build_receipt(
             gateway_payer_address=self._gateway_payer_address,
             node_wallet_address=self._node_wallet_address,
@@ -218,6 +227,26 @@ class ReceiptSubmitter:
             logger.debug(
                 "Leg 2 receipt queued for async signing uuid=%s", receipt.request_uuid,
             )
+        elif resp.status_code == 403:
+            # Special-case the coord API's "Timestamp expired" anti-replay
+            # rejection — it's a clock-drift diagnostic, not a permanent
+            # failure. Transient so the counter doesn't increment; user
+            # gets an NTP-friendly message.
+            detail = ""
+            try:
+                detail = resp.json().get("detail", "")
+            except Exception:
+                detail = (resp.text or "")[:200]
+            if "timestamp" in detail.lower() and "expire" in detail.lower():
+                await _record_clock_skew(
+                    self._settings, receipt.request_uuid, detail,
+                )
+            else:
+                # 403 with a different reason → signature mismatch, node
+                # not found — treat as permanent to surface in UI.
+                await _record_sign_rejection(
+                    self._settings, receipt.request_uuid, resp,
+                )
         elif resp.status_code in (400, 409, 422):
             # Explicit rejection from the coord API / gateway with a
             # structured reason. Record it so the user sees "why" in the
@@ -230,6 +259,31 @@ class ReceiptSubmitter:
                 "Leg 2 submit got %d uuid=%s — poller will retry",
                 resp.status_code, receipt.request_uuid,
             )
+
+
+async def _record_clock_skew(
+    settings: Settings, request_uuid: str, detail: str,
+) -> None:
+    """Record a clock-drift diagnostic.
+
+    Transient per ``reasons.TRANSIENT_CODES``, so the attempts counter
+    doesn't increment — once the operator fixes NTP, the next poll tick
+    re-submits naturally.
+    """
+    try:
+        store = get_store(settings.RECEIPT_STORE_PATH)
+        await store.mark_sign_failed(
+            request_uuid, reasons.SIGN_REJECTED_CLOCK_SKEW, detail,
+        )
+        logger.warning(
+            "Leg 2 submit rejected uuid=%s code=%s — enable NTP on this host "
+            "(sudo timedatectl set-ntp true) and the receipt will retry.",
+            request_uuid, reasons.SIGN_REJECTED_CLOCK_SKEW,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to record clock-skew rejection uuid=%s", request_uuid,
+        )
 
 
 async def _record_sign_rejection(

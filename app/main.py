@@ -552,6 +552,141 @@ async def _init_receipt_submitter(ctx: _NodeContext) -> None:
         ctx.s.NODE_RATE_PER_GB, reaper.enabled,
     )
 
+    # Sanity checks for Leg 2 config — ERROR-log only, never fail
+    # startup. The node is still useful for routing even if Leg 2 is
+    # misconfigured; we want to surface the root cause instead of
+    # accumulating silent failures in the receipt store.
+    await _verify_escrow_config(ctx.s, node_wallet)
+
+
+async def _verify_escrow_config(settings, node_wallet: str) -> None:
+    """Run cheap sanity checks against the configured escrow chain.
+
+    Three checks (each logs ERROR + continues):
+
+    - **S8**: Does the RPC actually point at the chain_id we expect?
+      Misconfigured prod-vs-test RPCs silently broadcast claim txs to
+      the wrong chain otherwise.
+    - **P1**: Is the node wallet registered via ``registerNode()``?
+      Without registration, every Leg 2 claim silently skips on-chain.
+    - **P2**: Does ``SR_COLLECTION_ADDRESS`` match the ``node_address``
+      in existing unclaimed signed receipts? Changing the config after
+      receipts accumulate orphans them.
+    - **P9**: Warn if ``NODE_RATE_PER_GB`` is zero.
+    """
+    if settings.NODE_RATE_PER_GB <= 0:
+        logger.warning(
+            "SR_NODE_RATE_PER_GB=%d — all Leg 2 receipts will be zero-value "
+            "and skipped. Set a non-zero rate to earn payouts.",
+            settings.NODE_RATE_PER_GB,
+        )
+
+    if not settings.ESCROW_CHAIN_RPC or not settings.ESCROW_CONTRACT_ADDRESS:
+        return  # Escrow disabled; nothing to verify.
+
+    def _sync_check() -> dict:
+        out: dict = {"chain_id": None, "registered": None, "error": None}
+        try:
+            from web3 import Web3
+            from eth_utils import to_bytes, to_checksum_address
+            import json as _json
+            from pathlib import Path as _Path
+
+            w3 = Web3(Web3.HTTPProvider(
+                settings.ESCROW_CHAIN_RPC, request_kwargs={"timeout": 10},
+            ))
+            if not w3.is_connected():
+                out["error"] = f"RPC unreachable: {settings.ESCROW_CHAIN_RPC}"
+                return out
+
+            out["chain_id"] = int(w3.eth.chain_id)
+
+            abi_path = _Path(__file__).parent / "payment" / "escrow_abi.json"
+            with open(abi_path) as f:
+                abi_data = _json.load(f)
+            abi = abi_data["escrow"] if isinstance(abi_data, dict) else abi_data
+
+            contract = w3.eth.contract(
+                address=Web3.to_checksum_address(settings.ESCROW_CONTRACT_ADDRESS),
+                abi=abi,
+            )
+            node_b32 = to_bytes(hexstr="0x" + node_wallet.lower().removeprefix("0x").zfill(64))
+            try:
+                mapped = contract.functions.getNodeWallet(node_b32).call()
+                out["registered"] = (
+                    mapped != "0x0000000000000000000000000000000000000000"
+                )
+            except Exception as e:
+                # Older contract revisions may not have getNodeWallet;
+                # don't fail the check. Default to "unknown".
+                out["registered"] = None
+                logger.debug("getNodeWallet call failed: %s", e)
+        except Exception as e:
+            out["error"] = str(e)
+        return out
+
+    info = await asyncio.to_thread(_sync_check)
+
+    if info.get("error"):
+        logger.error(
+            "Escrow config check: RPC/ABI error — %s. Leg 2 claims will "
+            "likely fail until this is fixed.",
+            info["error"],
+        )
+        return
+
+    # S8: chain_id mismatch guard
+    expected_chain = getattr(settings, "ESCROW_CHAIN_ID", 0)
+    actual_chain = info.get("chain_id")
+    if expected_chain and actual_chain and expected_chain != actual_chain:
+        logger.error(
+            "ESCROW CHAIN ID MISMATCH: SR_ESCROW_CHAIN_ID=%d but "
+            "SR_ESCROW_CHAIN_RPC reports chain_id=%d. Your claim "
+            "transactions will be rejected or go to the wrong chain. "
+            "Fix the config before running --claim.",
+            expected_chain, actual_chain,
+        )
+
+    # P1: registerNode guard
+    if info.get("registered") is False:
+        logger.error(
+            "NODE NOT REGISTERED in escrow contract: node_wallet=%s on "
+            "chain_id=%s. Payouts will silently fail until engineering "
+            "calls registerNode(). Receipts will still sign but "
+            "--claim will not transfer tokens.",
+            node_wallet, actual_chain,
+        )
+
+    # P2: collection-address-changed-mid-lifetime guard
+    try:
+        from app.payment.receipt_store import get_store
+        store = get_store(settings.RECEIPT_STORE_PATH)
+        await store.initialize()
+        # Query directly via a helper that returns distinct node_address
+        # values across unclaimed rows.
+        import sqlite3 as _sqlite3
+        def _do():
+            with _sqlite3.connect(store.path) as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT node_address FROM signed_receipts "
+                    "WHERE claimed_at IS NULL AND locked = 0"
+                ).fetchall()
+            return [r[0] for r in rows]
+        existing_addrs = await asyncio.to_thread(_do)
+        expected_b32 = "0x" + node_wallet.lower().removeprefix("0x").zfill(64)
+        orphans = [a for a in existing_addrs if a.lower() != expected_b32]
+        if orphans:
+            logger.warning(
+                "COLLECTION ADDRESS CHANGED: %d unclaimed receipt(s) "
+                "reference a different node_address than the current "
+                "SR_COLLECTION_ADDRESS=%s. They will pay out to the "
+                "previous collection wallet if that wallet is still "
+                "registered. Run --receipts --json to inspect.",
+                len(orphans), node_wallet,
+            )
+    except Exception:
+        logger.debug("Collection-address drift check failed", exc_info=True)
+
 
 def _upgrade_mtls(ctx: _NodeContext) -> None:
     """Attempt mTLS upgrade (non-fatal on failure)."""
@@ -883,6 +1018,120 @@ async def _dashboard_loop(
 
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 
+def _check_disk_space(settings) -> None:
+    """Warn / ERROR when the receipt-store filesystem is filling up.
+
+    SQLite writes silently fail at ENOSPC. Daemon continues running but
+    drops every receipt it tries to persist. Surfacing this at startup
+    (and after each tick would be nice but is too noisy) lets operators
+    act before data is lost.
+    """
+    import shutil
+    from pathlib import Path
+
+    store_path = Path(settings.RECEIPT_STORE_PATH).expanduser()
+    target = store_path.parent if store_path.parent.exists() else Path.home()
+    try:
+        stat = shutil.disk_usage(target)
+    except OSError as exc:
+        logger.debug("disk_usage(%s) failed: %s", target, exc)
+        return
+
+    free_mb = stat.free / (1024 * 1024)
+    total_mb = stat.total / (1024 * 1024)
+    pct_free = (stat.free / stat.total * 100) if stat.total else 0.0
+
+    if free_mb < 50:
+        logger.error(
+            "Receipt-store disk almost full: %.1f MB free of %.0f MB "
+            "(%.1f%%) on %s. SQLite writes will start failing — clear "
+            "space immediately or receipts will be lost silently.",
+            free_mb, total_mb, pct_free, target,
+        )
+    elif free_mb < 500 or pct_free < 5:
+        logger.warning(
+            "Receipt-store disk low: %.1f MB free (%.1f%%) on %s",
+            free_mb, pct_free, target,
+        )
+
+
+# Module-level references to the open lock files. Keeping the objects
+# alive for the whole process lifetime is what keeps the flock held —
+# the moment Python GCs the file object, the fd is closed and the
+# kernel drops the lock. Keyed by lock path so repeated calls in tests
+# can inspect state.
+_daemon_lock_handles: dict[str, "object"] = {}
+
+
+def _acquire_daemon_lock(settings) -> int:
+    """Acquire an exclusive flock on the daemon lock file.
+
+    Keyed on the receipts-store directory so dev setups with separate DBs
+    can run multiple daemons, but a double-start on the same store
+    refuses rather than silently corrupting the receipt lifecycle.
+
+    On conflict, exits with a clear message instead of continuing. The
+    lock file handle is stashed in a module-level dict so the OS keeps
+    the flock held for the process's lifetime.
+    """
+    import fcntl
+    from pathlib import Path
+
+    store_path = Path(settings.RECEIPT_STORE_PATH).expanduser()
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = store_path.parent / "daemon.lock"
+    key = str(lock_path)
+
+    if key in _daemon_lock_handles:
+        # Already held by this process — idempotent. Return the cached fd.
+        return _daemon_lock_handles[key].fileno()
+
+    try:
+        fd = open(lock_path, "w")
+    except OSError as exc:
+        logger.error(
+            "Cannot open daemon lock file %s: %s — continuing without "
+            "single-instance protection.",
+            lock_path, exc,
+        )
+        return -1
+
+    try:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fd.close()
+        print(
+            f"Another space-router-node daemon is already running against "
+            f"{store_path}. Refusing to start to avoid receipt corruption. "
+            f"Lock: {lock_path}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except OSError as exc:
+        fd.close()
+        logger.error(
+            "flock() on %s failed: %s — continuing without "
+            "single-instance protection.",
+            lock_path, exc,
+        )
+        return -1
+
+    # Write our PID for diagnostic purposes; the lock itself is the source
+    # of truth, but a pid is handy for `ps | grep` debugging.
+    try:
+        fd.seek(0)
+        fd.truncate()
+        fd.write(f"{os.getpid()}\n")
+        fd.flush()
+    except Exception:
+        pass
+
+    # Hold the handle for the process lifetime.
+    _daemon_lock_handles[key] = fd
+    logger.info("Acquired daemon lock at %s", lock_path)
+    return fd.fileno()
+
+
 async def _run(
     settings_override=None,  # noqa: ANN001
     stop_event: asyncio.Event | None = None,
@@ -910,6 +1159,17 @@ async def _run(
 
     # Configure logging from settings (updates both logger and handler levels)
     setup_cli_logging(s.LOG_LEVEL)
+
+    # Single-instance daemon lock — keyed on the receipts DB path so two
+    # daemons pointing at different stores can run (dev use case), but a
+    # double-start on the same store refuses immediately instead of
+    # corrupting the receipt state. Released on process exit (OS-level).
+    _daemon_lock_fd = _acquire_daemon_lock(s)
+
+    # Pre-flight: warn if the receipt-store filesystem is almost full.
+    # SQLite writes silently fail at ENOSPC; better to flag it at startup
+    # than accumulate receipt loss over days.
+    _check_disk_space(s)
 
     own_stop_event = stop_event is None
     if stop_event is None:
