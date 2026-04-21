@@ -512,27 +512,36 @@ class Api:
 def _claim_runner(only_uuid: str | None, include_retryable: bool) -> dict:
     """Background claim job.
 
-    Serialised across CLI / GUI / double-clicks via a ``fcntl.flock``
-    on ``~/.spacerouter/claim.lock``. If the lock is already held,
+    Serialised across CLI / GUI / double-clicks via a cross-platform
+    file lock on ``~/.spacerouter/claim.lock`` (``fcntl.flock`` on
+    POSIX, ``msvcrt.locking`` on Windows). If the lock is already held,
     returns ``{noop: True}`` so the UI stays calm rather than showing
     an error when a second concurrent click comes in.
     """
-    import fcntl
+    import sys as _sys
     from pathlib import Path
 
     from app.main import load_settings
     from app.payment.settlement import claim_all
     from app.identity import load_or_create_identity, KeystorePassphraseRequired
 
+    is_windows = _sys.platform == "win32"
+
     settings = load_settings()
     lock_path = Path(settings.RECEIPT_STORE_PATH).expanduser().parent / "claim.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fd = open(lock_path, "w")
+    fd = open(lock_path, "a+" if is_windows else "w")
     try:
         try:
-            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            if is_windows:
+                import msvcrt
+                fd.seek(0)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
             return {"noop": True, "reason": "claim_in_progress"}
 
         # Use identity key as settlement key unless operator overrides.
@@ -574,7 +583,13 @@ def _claim_runner(only_uuid: str | None, include_retryable: bool) -> dict:
         return {"ok": True, "summary": summary}
     finally:
         try:
-            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+            if is_windows:
+                import msvcrt
+                fd.seek(0)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
         except Exception:
             pass
         fd.close()
