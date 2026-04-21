@@ -1438,11 +1438,42 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     claim_group = parser.add_argument_group("payment settlement")
     claim_group.add_argument(
         "--receipts", action="store_true",
-        help="List outstanding (unclaimed) Leg 2 receipts and exit",
+        help="List outstanding Leg 2 receipts and exit. Adds --failed to "
+             "show failed/retryable/locked rows with their reason; --json "
+             "for machine-readable output; --reap to run the claim reaper.",
+    )
+    claim_group.add_argument(
+        "--failed", action="store_true",
+        help="With --receipts: show only rows in failed_retryable or "
+             "failed_terminal state, including the full error reason.",
+    )
+    claim_group.add_argument(
+        "--json", action="store_true", dest="output_json",
+        help="With --receipts: emit a stable JSON payload instead of the "
+             "rich table. Schema documented in docs/cli-receipts.md.",
+    )
+    claim_group.add_argument(
+        "--reap", action="store_true",
+        help="With --receipts: run one claim-reaper tick before the "
+             "listing so stuck CLAIM_TX_TIMEOUT rows are resolved.",
     )
     claim_group.add_argument(
         "--claim", action="store_true",
-        help="Submit all unclaimed Leg 2 receipts on-chain via claimBatch() and exit",
+        help="Submit all claimable Leg 2 receipts on-chain via claimBatch() "
+             "and exit. Combine with --include-retryable to also settle "
+             "rows that previously reverted but are still under the "
+             "attempt cap, or --uuid to settle a single receipt.",
+    )
+    claim_group.add_argument(
+        "--include-retryable", action="store_true",
+        help="With --claim: also submit rows in failed_retryable state. "
+             "Default off so scheduled cron runs don't snowball into "
+             "retry storms on terminally broken receipts.",
+    )
+    claim_group.add_argument(
+        "--uuid", metavar="UUID",
+        help="With --claim: settle only the receipt with this UUID. "
+             "Refuses if the row is locked (failed_terminal).",
     )
 
     return parser
@@ -1570,36 +1601,225 @@ def _run_node(settings_override=None) -> None:  # noqa: ANN001
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
 
-async def _cmd_receipts() -> None:
-    """List outstanding (unclaimed) Leg 2 receipts from the local store."""
-    from app.payment.settlement import list_unclaimed
+async def _cmd_receipts(
+    failed_only: bool = False,
+    as_json: bool = False,
+    run_reaper: bool = False,
+) -> None:
+    """List Leg 2 receipts from the local store.
+
+    Default output preserves the pre-v1.5 one-line summary + table for
+    the common case (no failures, no flags). Failure columns only appear
+    once there's at least one non-zero ``attempts`` or a ``last_error_code``
+    somewhere, so the happy path looks identical to what operators know.
+    """
+    import json as json_mod
+    from app.payment.receipt_store import get_store
+    from app.payment import reasons
 
     s = load_settings()
-    count, total_wei, preview = await list_unclaimed(s)
-    print(f"Receipt store: {s.RECEIPT_STORE_PATH}")
-    print(f"Unclaimed: {count} receipt(s), total owed = {total_wei} wei ({total_wei / 10**18:.6f} tokens)")
-    if not preview:
+
+    if run_reaper:
+        from app.payment.reaper import ClaimReaper
+        reaper = ClaimReaper(settings=s)
+        if reaper.enabled:
+            summary = await reaper.tick()
+            if not as_json:
+                print(
+                    f"Reaper: checked={summary['checked']} "
+                    f"reconciled={summary['reconciled']} "
+                    f"cleared={summary['cleared']}"
+                )
+
+    store = get_store(s.RECEIPT_STORE_PATH)
+    await store.initialize()
+    summary = await store.summary()
+
+    if failed_only:
+        rows = await store.list_by_view("failed_retryable", limit=500)
+        rows += await store.list_by_view("failed_terminal", limit=500)
+    else:
+        # Claimable first (most actionable), then retryable, then pending.
+        rows = await store.list_by_view("claimable", limit=500)
+        rows += await store.list_by_view("failed_retryable", limit=500)
+        rows += await store.list_by_view("pending_sign", limit=500)
+        # Locked rows at the end so they don't dominate the top of the
+        # list when the interesting data is further down.
+        rows += await store.list_by_view("failed_terminal", limit=500)
+
+    if as_json:
+        print(json_mod.dumps({
+            "store_path": str(s.RECEIPT_STORE_PATH),
+            "summary": summary,
+            "receipts": [_receipt_to_json(sr) for sr in rows],
+        }, indent=2))
         return
-    print()
-    print(f"  {'UUID':<38} {'bytes':>12} {'price (wei)':>22} {'age (s)':>8}")
-    now = int(time.time())
-    for sr in preview[:20]:
-        age = now - sr.created_at
+
+    print(f"Receipt store: {s.RECEIPT_STORE_PATH}")
+    print(
+        f"Claimable: {summary['claimable']} receipt(s), "
+        f"total = {summary['claimable_total_price']} wei "
+        f"({summary['claimable_total_price'] / 10**18:.6f} tokens)"
+    )
+    if summary["failed_retryable"] or summary["failed_terminal"]:
         print(
-            f"  {sr.receipt.request_uuid:<38} "
-            f"{sr.receipt.data_amount:>12d} "
-            f"{sr.receipt.total_price:>22d} "
-            f"{age:>8d}"
+            f"Needs attention: {summary['failed_retryable']} retryable, "
+            f"{summary['failed_terminal']} locked"
         )
-    if len(preview) > 20:
-        print(f"  ... ({len(preview) - 20} more)")
+    if summary["pending_sign"]:
+        print(f"Pending signing: {summary['pending_sign']}")
+
+    if not rows:
+        return
+
+    try:
+        from rich.console import Console
+        from rich.table import Table
+        console = Console()
+        use_rich = True
+    except Exception:
+        use_rich = False
+
+    if use_rich:
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("UUID", style="dim", no_wrap=True)
+        table.add_column("Bytes", justify="right")
+        table.add_column("Price (wei)", justify="right")
+        table.add_column("Age", justify="right")
+        table.add_column("Try")
+        table.add_column("Status")
+        now = int(time.time())
+        for sr in rows[:100]:
+            age = now - sr.created_at
+            tries = _tries_cell(sr)
+            status, style = _status_cell(sr)
+            uuid_display = sr.receipt.request_uuid
+            if sr.view == "failed_terminal":
+                uuid_display = f"[strike]{uuid_display}[/]"
+            table.add_row(
+                uuid_display,
+                f"{sr.receipt.data_amount:,}",
+                f"{sr.receipt.total_price:,}",
+                _humanize_age(age),
+                tries,
+                f"[{style}]{status}[/]",
+            )
+        console.print(table)
+        if len(rows) > 100:
+            console.print(f"[dim]... ({len(rows) - 100} more — use --json for full set)[/]")
+    else:
+        # Plain-text fallback for environments without rich.
+        print()
+        print(f"  {'UUID':<38} {'bytes':>12} {'price (wei)':>22} {'age':>8} {'try':>5}  status")
+        now = int(time.time())
+        for sr in rows[:50]:
+            age = now - sr.created_at
+            print(
+                f"  {sr.receipt.request_uuid:<38} "
+                f"{sr.receipt.data_amount:>12d} "
+                f"{sr.receipt.total_price:>22d} "
+                f"{_humanize_age(age):>8} "
+                f"{_tries_cell(sr):>5}  {_status_cell(sr)[0]}"
+            )
+            if sr.last_error_code:
+                msg = reasons.message_for(sr.last_error_code)
+                print(f"      {sr.last_error_code}: {msg}")
 
 
-async def _cmd_claim() -> None:
-    """Submit all unclaimed Leg 2 receipts on-chain."""
+def _humanize_age(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def _tries_cell(sr) -> str:
+    """Show sign vs claim attempts only when non-zero — the default
+    happy-path output stays clean."""
+    from app.payment import reasons
+    if sr.claim_attempts:
+        return f"{sr.claim_attempts}/{reasons.MAX_CLAIM_ATTEMPTS}"
+    if sr.sign_attempts:
+        return f"{sr.sign_attempts}/{reasons.MAX_SIGN_ATTEMPTS}"
+    return "—"
+
+
+def _status_cell(sr) -> tuple[str, str]:
+    from app.payment import reasons
+    view = sr.view
+    if view == "claimable":
+        return ("ready to claim", "cyan")
+    if view == "pending_sign":
+        return ("pending signing", "dim")
+    if view == "failed_retryable":
+        msg = reasons.message_for(sr.last_error_code) or "retryable"
+        return (f"retry: {msg}", "yellow")
+    if view == "failed_terminal":
+        msg = reasons.message_for(sr.last_error_code) or "locked"
+        return (f"locked: {msg}", "red dim")
+    if view == "claimed":
+        return ("claimed", "green dim")
+    return (view, "")
+
+
+def _receipt_to_json(sr) -> dict:
+    from app.payment import reasons as reasons_mod
+    return {
+        "request_uuid": sr.receipt.request_uuid,
+        "tunnel_request_id": sr.tunnel_request_id,
+        "client_address": sr.receipt.client_address,
+        "node_address": sr.receipt.node_address,
+        "data_amount": int(sr.receipt.data_amount),
+        "total_price": int(sr.receipt.total_price),
+        "view": sr.view,
+        "signature_present": bool(sr.signature),
+        "created_at": sr.created_at,
+        "claimed_at": sr.claimed_at,
+        "claim_tx_hash": sr.claim_tx_hash,
+        "sign_attempts": sr.sign_attempts,
+        "claim_attempts": sr.claim_attempts,
+        "max_sign_attempts": reasons_mod.MAX_SIGN_ATTEMPTS,
+        "max_claim_attempts": reasons_mod.MAX_CLAIM_ATTEMPTS,
+        "last_error_code": sr.last_error_code,
+        "last_error_detail": sr.last_error_detail,
+        "last_error_message": reasons_mod.message_for(sr.last_error_code),
+        "last_attempt_at": sr.last_attempt_at,
+        "locked": sr.locked,
+    }
+
+
+async def _cmd_claim(
+    include_retryable: bool = False, only_uuid: str | None = None,
+) -> None:
+    """Submit claimable Leg 2 receipts on-chain.
+
+    Default scope is ``claimable`` only, matching pre-v1.5 behaviour.
+    ``include_retryable=True`` picks up ``failed_retryable`` rows for
+    explicit retry. ``only_uuid`` restricts the run to a single row and
+    refuses if that row is locked.
+    """
     from app.payment.settlement import claim_all
+    from app.payment.receipt_store import get_store
 
     s = load_settings()
+
+    if only_uuid:
+        store = get_store(s.RECEIPT_STORE_PATH)
+        await store.initialize()
+        existing = await store.get_by_uuid(only_uuid)
+        if existing is None:
+            print(f"No receipt found with uuid {only_uuid}", file=sys.stderr)
+            sys.exit(1)
+        if existing.locked:
+            print(
+                f"Receipt {only_uuid} is locked (failed_terminal) — refusing "
+                f"to claim. Use --unlock to reset if you're sure.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     # Use identity key by default — operator can override with SR_SETTLEMENT_KEY if they want
     # a separate settlement wallet. Both paths require the key file on disk.
@@ -1641,23 +1861,51 @@ async def _cmd_claim() -> None:
             sys.exit(0)
 
     try:
-        results = await claim_all(s, settlement_key_hex)
+        results = await claim_all(
+            s, settlement_key_hex,
+            include_retryable=include_retryable,
+            only_uuids=[only_uuid] if only_uuid else None,
+        )
     except ValueError as e:
         print(f"Cannot claim: {e}", file=sys.stderr)
         sys.exit(1)
 
     if not results:
-        print("No unclaimed receipts to submit.")
+        print("No receipts to submit.")
         return
 
     total_submitted = sum(r.submitted for r in results)
     total_failed = sum(1 for r in results if r.error)
-    print(f"Submitted {len(results)} batch(es), {total_submitted} receipt(s) total.")
+    total_reconciled = sum(r.skipped_as_already_claimed for r in results)
+    total_locked = sum(r.locked_after_failure for r in results)
+
+    print(
+        f"Submitted {len(results)} batch(es), {total_submitted} receipt(s) total."
+    )
+    if total_reconciled:
+        print(
+            f"Reconciled {total_reconciled} receipt(s) as already-claimed on-chain."
+        )
     for i, r in enumerate(results, 1):
+        if r.skipped_as_already_claimed and not r.submitted:
+            # The reconciliation pseudo-batch — already surfaced above.
+            continue
         if r.error:
-            print(f"  Batch {i}: FAILED ({r.submitted} receipts) — {r.error}")
+            tail = f"tx={r.tx_hash}" if r.tx_hash else ""
+            print(
+                f"  Batch {i}: FAILED ({r.submitted} receipts, "
+                f"reason={r.reason_code}) {tail}"
+            )
         else:
-            print(f"  Batch {i}: OK ({r.submitted} receipts) tx={r.tx_hash} gas={r.gas_used}")
+            print(
+                f"  Batch {i}: OK ({r.submitted} receipts) "
+                f"tx={r.tx_hash} gas={r.gas_used}"
+            )
+    if total_locked:
+        print(
+            f"{total_locked} receipt(s) hit the retry cap and are now "
+            f"locked — run --receipts --failed to inspect."
+        )
     if total_failed:
         sys.exit(1)
 
@@ -1680,10 +1928,17 @@ def main() -> None:
 
     # Settlement commands — read outstanding receipts or submit them on-chain, then exit.
     if args.receipts:
-        asyncio.run(_cmd_receipts())
+        asyncio.run(_cmd_receipts(
+            failed_only=args.failed,
+            as_json=args.output_json,
+            run_reaper=args.reap,
+        ))
         return
     if args.claim:
-        asyncio.run(_cmd_claim())
+        asyncio.run(_cmd_claim(
+            include_retryable=args.include_retryable,
+            only_uuid=args.uuid,
+        ))
         return
 
     # --reset: clear everything, then re-run wizard and start
