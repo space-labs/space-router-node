@@ -42,6 +42,46 @@ async def test_fresh_db_is_v3(store, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_partial_v2_to_v3_migration_is_self_healing(tmp_path):
+    """If a previous migration run added the columns but failed to bump
+    user_version (e.g. concurrent writer scenario seen on seethis during
+    PR 1 E2E), a subsequent initialize() must not crash with "duplicate
+    column name" — it must detect the existing columns and just fix the
+    version pragma."""
+    db_path = tmp_path / "receipts.db"
+
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE signed_receipts (
+                request_uuid      TEXT PRIMARY KEY,
+                tunnel_request_id TEXT,
+                client_address    TEXT NOT NULL,
+                node_address      TEXT NOT NULL,
+                data_amount       INTEGER NOT NULL,
+                total_price       INTEGER NOT NULL,
+                signature         TEXT,
+                created_at        INTEGER NOT NULL,
+                claimed_at        INTEGER,
+                claim_tx_hash     TEXT,
+                sign_attempts     INTEGER NOT NULL DEFAULT 0,
+                claim_attempts    INTEGER NOT NULL DEFAULT 0,
+                last_error_code   TEXT,
+                last_error_detail TEXT,
+                last_attempt_at   INTEGER,
+                locked            INTEGER NOT NULL DEFAULT 0
+            );
+        """)
+        # Deliberately leave user_version at 2 to simulate partial state.
+        conn.execute("PRAGMA user_version = 2")
+
+    store = ReceiptStore(db_path)
+    await store.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+@pytest.mark.asyncio
 async def test_v2_to_v3_migration_preserves_rows(tmp_path):
     """Simulate a v2 DB with real data, then run initialize and check columns."""
     db_path = tmp_path / "receipts.db"
