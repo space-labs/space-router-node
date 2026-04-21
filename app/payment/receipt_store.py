@@ -336,9 +336,23 @@ class ReceiptStore:
         under the attempt cap) are excluded — callers must opt in via
         ``include_retryable=True`` so the default ``--claim`` run preserves
         its pre-v1.5 behaviour of only picking up fresh signed receipts.
+
+        Rows currently in ``CLAIM_TX_TIMEOUT`` state are **always**
+        excluded regardless of ``include_retryable`` — the tx is
+        ambiguous (may still land on-chain), and re-broadcasting before
+        the reaper reconciles risks silent double-submit revert loops.
+        The reaper clears the error once it resolves via ``isNonceUsed``.
         """
-        retryable_clause = "" if include_retryable else \
-            "AND (last_error_code IS NULL OR last_error_code = '')"
+        if include_retryable:
+            retryable_clause = (
+                "AND (last_error_code IS NULL OR last_error_code != ?)"
+            )
+            params = [reasons.CLAIM_TX_TIMEOUT, int(limit)]
+        else:
+            retryable_clause = (
+                "AND (last_error_code IS NULL OR last_error_code = '')"
+            )
+            params = [int(limit)]
 
         def _do() -> list[StoredReceipt]:
             with self._connect() as conn:
@@ -353,7 +367,7 @@ class ReceiptStore:
                     ORDER BY created_at ASC
                     LIMIT ?
                     """,
-                    (int(limit),),
+                    params,
                 ).fetchall()
             return [self._row_to_stored(r) for r in rows]
 
@@ -683,6 +697,60 @@ class ReceiptStore:
             }
 
         return await asyncio.to_thread(_do)
+
+    async def list_recently_claimed(
+        self, younger_than_seconds: int, limit: int = 50,
+    ) -> list[StoredReceipt]:
+        """Rows marked ``claimed`` within the last ``younger_than_seconds``
+        — used by the reaper's reorg-reconciliation pass. Excludes rows
+        with the synthetic ``tx_hash="external"`` (already reconciled).
+        """
+        cutoff = int(time.time()) - int(younger_than_seconds)
+
+        def _do() -> list[StoredReceipt]:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT {self._STORED_COLUMNS}
+                      FROM signed_receipts
+                     WHERE claimed_at IS NOT NULL
+                       AND claimed_at >= ?
+                       AND (claim_tx_hash IS NULL OR claim_tx_hash != 'external')
+                     ORDER BY claimed_at ASC
+                     LIMIT ?
+                    """,
+                    (cutoff, int(limit)),
+                ).fetchall()
+            return [self._row_to_stored(r) for r in rows]
+
+        return await asyncio.to_thread(_do)
+
+    async def revert_claimed(self, request_uuid: str) -> bool:
+        """Undo a claim because the chain says the nonce isn't used anymore.
+
+        Used by the reaper's reorg-reconciliation. Clears ``claimed_at``
+        and ``claim_tx_hash`` so the row re-enters the claim queue. Does
+        NOT increment ``claim_attempts`` — reorg isn't the operator's
+        fault and shouldn't burn their retry budget.
+        """
+        def _do() -> int:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE signed_receipts
+                       SET claimed_at = NULL,
+                           claim_tx_hash = NULL,
+                           last_error_code = NULL,
+                           last_error_detail = NULL
+                     WHERE request_uuid = ?
+                       AND claimed_at IS NOT NULL
+                       AND locked = 0
+                    """,
+                    (request_uuid,),
+                )
+                return cur.rowcount
+
+        return (await asyncio.to_thread(_do)) > 0
 
     async def list_timed_out_claims(self, older_than_seconds: int) -> list[StoredReceipt]:
         """Rows with ``CLAIM_TX_TIMEOUT`` last error whose last_attempt_at
