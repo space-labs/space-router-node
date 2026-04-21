@@ -344,6 +344,7 @@ class _NodeContext:
         self.gateway_ca_cert: str | None = None
         self.version_check = None  # VersionCheckResult | None
         self.receipt_poller = None  # ReceiptPoller | None
+        self.claim_reaper = None  # ClaimReaper | None
 
 
 async def _phase_init(ctx: _NodeContext) -> None:
@@ -535,9 +536,20 @@ async def _init_receipt_submitter(ctx: _NodeContext) -> None:
     await poller.start()
     ctx.receipt_poller = poller
 
+    # Reaper resolves stuck CLAIM_TX_TIMEOUT rows by re-querying the chain.
+    # Only runs when escrow RPC + contract are configured — safe on dev
+    # setups that don't have on-chain settlement enabled.
+    from app.payment.reaper import ClaimReaper
+    reaper = ClaimReaper(settings=ctx.s)
+    if reaper.enabled:
+        await reaper.start()
+        ctx.claim_reaper = reaper
+
     logger.info(
-        "Leg 2 submitter ready — payer=%s node_wallet=%s rate=%d/GB (poller every 10s)",
-        gateway_payer, node_wallet[:12] + "...", ctx.s.NODE_RATE_PER_GB,
+        "Leg 2 submitter ready — payer=%s node_wallet=%s rate=%d/GB "
+        "(poller every 10s, reaper enabled=%s)",
+        gateway_payer, node_wallet[:12] + "...",
+        ctx.s.NODE_RATE_PER_GB, reaper.enabled,
     )
 
 
@@ -1299,6 +1311,13 @@ async def _run(
                     await ctx.receipt_poller.stop()
                 except Exception:
                     logger.debug("Receipt poller stop errored", exc_info=True)
+
+            # Stop claim reaper
+            if ctx.claim_reaper is not None:
+                try:
+                    await ctx.claim_reaper.stop()
+                except Exception:
+                    logger.debug("Claim reaper stop errored", exc_info=True)
 
             # Remove UPnP mapping
             if ctx.upnp_endpoint:
