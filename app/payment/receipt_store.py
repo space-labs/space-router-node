@@ -166,26 +166,57 @@ class ReceiptStore:
                                 ON signed_receipts (created_at) WHERE signature IS NULL;
                         """)
                     if current < 3:
-                        # v2 → v3: failure tracking columns. ALTER TABLE ADD COLUMN
-                        # is safe for nullable / default-value columns in SQLite.
-                        conn.executescript("""
-                            ALTER TABLE signed_receipts
-                                ADD COLUMN sign_attempts INTEGER NOT NULL DEFAULT 0;
-                            ALTER TABLE signed_receipts
-                                ADD COLUMN claim_attempts INTEGER NOT NULL DEFAULT 0;
-                            ALTER TABLE signed_receipts
-                                ADD COLUMN last_error_code TEXT;
-                            ALTER TABLE signed_receipts
-                                ADD COLUMN last_error_detail TEXT;
-                            ALTER TABLE signed_receipts
-                                ADD COLUMN last_attempt_at INTEGER;
-                            ALTER TABLE signed_receipts
-                                ADD COLUMN locked INTEGER NOT NULL DEFAULT 0;
-                            CREATE INDEX IF NOT EXISTS idx_signed_receipts_failed
-                                ON signed_receipts (last_attempt_at)
-                                WHERE last_error_code IS NOT NULL AND claimed_at IS NULL;
-                        """)
-                conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+                        # v2 → v3: failure tracking columns. Add each column
+                        # only if it's missing so a half-finished previous
+                        # run (e.g. concurrent writer blocked the version
+                        # bump) is self-healing instead of crashing with
+                        # "duplicate column name".
+                        existing = {
+                            row[1] for row in conn.execute(
+                                "PRAGMA table_info(signed_receipts)"
+                            )
+                        }
+                        v3_columns = [
+                            ("sign_attempts",
+                             "INTEGER NOT NULL DEFAULT 0"),
+                            ("claim_attempts",
+                             "INTEGER NOT NULL DEFAULT 0"),
+                            ("last_error_code", "TEXT"),
+                            ("last_error_detail", "TEXT"),
+                            ("last_attempt_at", "INTEGER"),
+                            ("locked",
+                             "INTEGER NOT NULL DEFAULT 0"),
+                        ]
+                        for name, ddl in v3_columns:
+                            if name not in existing:
+                                conn.execute(
+                                    f"ALTER TABLE signed_receipts "
+                                    f"ADD COLUMN {name} {ddl}"
+                                )
+                        conn.execute(
+                            "CREATE INDEX IF NOT EXISTS "
+                            "idx_signed_receipts_failed "
+                            "ON signed_receipts (last_attempt_at) "
+                            "WHERE last_error_code IS NOT NULL "
+                            "AND claimed_at IS NULL"
+                        )
+                # Persist the version bump. Read it back to verify the
+                # write actually stuck — a previous bug surfaced when a
+                # concurrent writer caused the pragma to silently fail
+                # after the schema changes had already applied.
+                conn.execute(
+                    f"PRAGMA user_version = {_SCHEMA_VERSION}"
+                )
+                new_version = conn.execute(
+                    "PRAGMA user_version"
+                ).fetchone()[0]
+                if new_version != _SCHEMA_VERSION:
+                    raise sqlite3.OperationalError(
+                        f"schema migration completed but user_version "
+                        f"stuck at {new_version} (expected "
+                        f"{_SCHEMA_VERSION}) — likely a concurrent "
+                        f"writer. Retry after stopping other processes."
+                    )
 
         await asyncio.to_thread(_do)
         self._initialized = True
