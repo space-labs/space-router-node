@@ -1064,17 +1064,24 @@ _daemon_lock_handles: dict[str, "object"] = {}
 
 
 def _acquire_daemon_lock(settings) -> int:
-    """Acquire an exclusive flock on the daemon lock file.
+    """Acquire an exclusive lock on the daemon lock file.
 
-    Keyed on the receipts-store directory so dev setups with separate DBs
-    can run multiple daemons, but a double-start on the same store
+    Cross-platform:
+    - POSIX (Linux / macOS): ``fcntl.flock`` — kernel-backed advisory lock
+      that releases on process exit regardless of how the process dies.
+    - Windows: ``msvcrt.locking`` on the first byte of the file. Same
+      process-lifetime semantics; the kernel releases the lock when the
+      handle is closed.
+
+    Keyed on the receipts-store directory so dev setups with separate
+    DBs can run multiple daemons, but a double-start on the same store
     refuses rather than silently corrupting the receipt lifecycle.
 
-    On conflict, exits with a clear message instead of continuing. The
-    lock file handle is stashed in a module-level dict so the OS keeps
-    the flock held for the process's lifetime.
+    On conflict, exits with a clear message. The lock file handle is
+    stashed in a module-level dict so the OS keeps the lock held for
+    the process's lifetime (see PR #50 post-mortem — early impl lost
+    the fd to GC and the lock evaporated).
     """
-    import fcntl
     from pathlib import Path
 
     store_path = Path(settings.RECEIPT_STORE_PATH).expanduser()
@@ -1083,11 +1090,15 @@ def _acquire_daemon_lock(settings) -> int:
     key = str(lock_path)
 
     if key in _daemon_lock_handles:
-        # Already held by this process — idempotent. Return the cached fd.
         return _daemon_lock_handles[key].fileno()
 
+    is_windows = sys.platform == "win32"
+
     try:
-        fd = open(lock_path, "w")
+        # Windows needs the file to exist before msvcrt.locking can set
+        # a lock range on it, and "w" truncates — use "a+" to ensure the
+        # file exists without nuking an existing pid line.
+        fd = open(lock_path, "a+" if is_windows else "w")
     except OSError as exc:
         logger.error(
             "Cannot open daemon lock file %s: %s — continuing without "
@@ -1097,8 +1108,20 @@ def _acquire_daemon_lock(settings) -> int:
         return -1
 
     try:
-        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+        if is_windows:
+            import msvcrt
+            # LK_NBLCK = non-blocking exclusive lock on 1 byte at offset 0.
+            # Raises OSError(EDEADLK/EACCES) if another process already
+            # holds the region.
+            fd.seek(0)
+            msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError) as exc:
+        # On POSIX the "already held" error is BlockingIOError (EWOULDBLOCK).
+        # On Windows msvcrt.locking raises OSError with errno=EDEADLK or
+        # EACCES. Treat any of these as "another instance".
         fd.close()
         print(
             f"Another space-router-node daemon is already running against "
@@ -1107,26 +1130,23 @@ def _acquire_daemon_lock(settings) -> int:
             file=sys.stderr,
         )
         sys.exit(1)
-    except OSError as exc:
-        fd.close()
-        logger.error(
-            "flock() on %s failed: %s — continuing without "
-            "single-instance protection.",
-            lock_path, exc,
-        )
-        return -1
 
-    # Write our PID for diagnostic purposes; the lock itself is the source
-    # of truth, but a pid is handy for `ps | grep` debugging.
+    # Write our PID for diagnostic purposes. Lock itself is the source
+    # of truth, but `ps`-side tooling benefits from having a PID in the
+    # file. On Windows we reserved the first byte with msvcrt.locking;
+    # append the PID after that so it doesn't overwrite the locked byte.
     try:
-        fd.seek(0)
-        fd.truncate()
-        fd.write(f"{os.getpid()}\n")
+        if is_windows:
+            fd.seek(0, 2)  # end-of-file
+            fd.write(f"\n{os.getpid()}\n")
+        else:
+            fd.seek(0)
+            fd.truncate()
+            fd.write(f"{os.getpid()}\n")
         fd.flush()
     except Exception:
         pass
 
-    # Hold the handle for the process lifetime.
     _daemon_lock_handles[key] = fd
     logger.info("Acquired daemon lock at %s", lock_path)
     return fd.fileno()
