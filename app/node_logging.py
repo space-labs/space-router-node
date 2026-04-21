@@ -145,6 +145,19 @@ def setup_cli_logging(log_level: str = "INFO") -> None:
     """
     global _recent_handler
 
+    # Force stdout/stderr to UTF-8 so log messages containing non-ASCII
+    # characters (e.g. `→`, `…`, emojis) don't blow up on Windows where
+    # the default console code page is cp1252 and the handler emits
+    # `UnicodeEncodeError: 'charmap' codec can't encode character`.
+    # ``errors='replace'`` so a truly unmappable terminal shows `?`
+    # instead of crashing the logger. Requires Python 3.7+.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     root = logging.getLogger()
     # Remove only stream handlers — preserve file handlers (GUI log persistence)
     for h in root.handlers[:]:
