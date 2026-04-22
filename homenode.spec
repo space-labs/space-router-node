@@ -61,14 +61,18 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        # TokenPaymentEscrow ABI — read at runtime by app/payment/settlement.py
-        # via ``Path(__file__).parent / "escrow_abi.json"``. PyInstaller
-        # flattens ``app/`` onto the bundle root for onefile builds with
-        # this entry point, so the runtime path becomes
-        # ``_MEIPASS/payment/escrow_abi.json`` (no ``app/`` prefix). Ship
-        # the JSON at the corresponding destination or the binary logs
-        # ``RPC/ABI error`` and ``--claim`` hard-fails.
+        # TokenPaymentEscrow ABI — the file is read from two different
+        # runtime paths because PyInstaller flattens the entry-point
+        # module's package root onto ``_MEIPASS`` *and* keeps sibling
+        # packages at their imported path:
+        #   - app/main.py               → _MEIPASS/main.py, so the startup
+        #     check at app/main.py:604 resolves to _MEIPASS/payment/…
+        #   - app/payment/settlement.py → _MEIPASS/app/payment/..., so its
+        #     _ABI_PATH resolves to _MEIPASS/app/payment/…
+        # Ship the JSON at BOTH destinations or one of the two paths
+        # fails on ``--claim``/startup with FileNotFoundError.
         ("app/payment/escrow_abi.json", "payment"),
+        ("app/payment/escrow_abi.json", "app/payment"),
     ],
     hiddenimports=hiddenimports,
     hookspath=[],
