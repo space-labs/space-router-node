@@ -60,7 +60,12 @@ a = Analysis(
     ["app/main.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        # TokenPaymentEscrow ABI — read at runtime by app/payment/settlement.py
+        # and the startup config check. PyInstaller doesn't bundle non-.py
+        # files unless listed here, and the fallback is a hard fail on claim.
+        ("app/payment/escrow_abi.json", "app/payment"),
+    ],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
