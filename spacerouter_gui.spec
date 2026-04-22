@@ -89,6 +89,10 @@ a = Analysis(
     binaries=[],
     datas=[
         ("gui/assets", "gui/assets"),
+        # TokenPaymentEscrow ABI — read at runtime by app/payment/settlement.py
+        # and the GUI's Claim-All handler. Without this, the "Claim All"
+        # button surfaces a red error banner in the happy path.
+        ("app/payment/escrow_abi.json", "app/payment"),
     ],
     hiddenimports=hiddenimports,
     hookspath=[],
