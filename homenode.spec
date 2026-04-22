@@ -62,9 +62,13 @@ a = Analysis(
     binaries=[],
     datas=[
         # TokenPaymentEscrow ABI — read at runtime by app/payment/settlement.py
-        # and the startup config check. PyInstaller doesn't bundle non-.py
-        # files unless listed here, and the fallback is a hard fail on claim.
-        ("app/payment/escrow_abi.json", "app/payment"),
+        # via ``Path(__file__).parent / "escrow_abi.json"``. PyInstaller
+        # flattens ``app/`` onto the bundle root for onefile builds with
+        # this entry point, so the runtime path becomes
+        # ``_MEIPASS/payment/escrow_abi.json`` (no ``app/`` prefix). Ship
+        # the JSON at the corresponding destination or the binary logs
+        # ``RPC/ABI error`` and ``--claim`` hard-fails.
+        ("app/payment/escrow_abi.json", "payment"),
     ],
     hiddenimports=hiddenimports,
     hookspath=[],
