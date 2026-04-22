@@ -89,12 +89,12 @@ a = Analysis(
     binaries=[],
     datas=[
         ("gui/assets", "gui/assets"),
-        # TokenPaymentEscrow ABI — read at runtime by app/payment/settlement.py
-        # and the GUI's Claim-All handler. PyInstaller flattens ``app/`` on
-        # the onefile bundle root, so the runtime path is
-        # ``_MEIPASS/payment/escrow_abi.json``. Mac .app also expects the
-        # file under ``Contents/Frameworks/payment/`` (not ``app/payment/``).
+        # TokenPaymentEscrow ABI — ship at both bundle paths because the
+        # GUI entry point (gui/app.py) lands at the bundle root while
+        # app/payment/settlement.py keeps its package path. See homenode.spec
+        # for the full explanation.
         ("app/payment/escrow_abi.json", "payment"),
+        ("app/payment/escrow_abi.json", "app/payment"),
     ],
     hiddenimports=hiddenimports,
     hookspath=[],
