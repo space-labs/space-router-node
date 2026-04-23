@@ -18,6 +18,16 @@ _PROD_URL = "https://spacerouter-coordination-api.fly.dev"
 _TEST_URL = "https://spacerouter-coordination-api-test.fly.dev"
 _STAGING_URL = "https://spacerouter-coordination-api-staging.fly.dev"
 
+# TokenPaymentEscrow deployment on Creditcoin testnet (CC3, chainId 102031).
+# Baked in so QA and test-variant users don't have to hand-edit the env
+# file — which risked being wiped by Fresh Restart and was the v1.5 QA
+# footgun ("Payment/Escrow settings manually added to env are deleted on
+# restart"). Mainnet escrow is not yet deployed; prod variant leaves the
+# fields empty so operators configure them explicitly at rollout time.
+_TEST_ESCROW_CONTRACT = "0xC5740e4e9175301a24FB6d22bA184b8ec0762852"
+_TEST_ESCROW_CHAIN_RPC = "https://rpc.cc3-testnet.creditcoin.network"
+_TEST_ESCROW_CHAIN_ID = "102031"
+
 # Pre-configured environments for easy switching (test builds only)
 ENVIRONMENTS = {
     "production": {
@@ -49,6 +59,18 @@ def _default_coordination_url() -> str:
     return _PROD_URL
 
 
+def _default_escrow_contract() -> str:
+    return _TEST_ESCROW_CONTRACT if BUILD_VARIANT == "test" else ""
+
+
+def _default_escrow_chain_rpc() -> str:
+    return _TEST_ESCROW_CHAIN_RPC if BUILD_VARIANT == "test" else ""
+
+
+def _default_escrow_chain_id() -> str:
+    return _TEST_ESCROW_CHAIN_ID if BUILD_VARIANT == "test" else ""
+
+
 _DEFAULTS = {
     "SR_COORDINATION_API_URL": _default_coordination_url(),
     "SR_STAKING_ADDRESS": "",
@@ -61,6 +83,12 @@ _DEFAULTS = {
     "SR_LOG_LEVEL": "INFO",
     "SR_REGISTRATION_MODE": "auto",
     "SR_IDENTITY_PASSPHRASE": "",
+    # Escrow settings — test variant ships with testnet defaults so QA
+    # never has to hand-edit; Fresh Restart preserves them because they
+    # live in _DEFAULTS now. Prod leaves them empty (operator-configured).
+    "SR_ESCROW_CONTRACT_ADDRESS": _default_escrow_contract(),
+    "SR_ESCROW_CHAIN_RPC": _default_escrow_chain_rpc(),
+    "SR_ESCROW_CHAIN_ID": _default_escrow_chain_id(),
 }
 
 
@@ -248,3 +276,23 @@ class ConfigStore:
             ("SR_IDENTITY_KEY_PATH", "node-identity.key"),
         ):
             os.environ[key] = str(certs_dir / filename)
+
+        # Receipts DB path: unify with the rest of the GUI-writable config
+        # directory so the CLI (``space-router-node --receipts``) and GUI
+        # reference the same file. Pre-fix the GUI used the pydantic default
+        # ``~/.spacerouter/receipts.db`` while certs/identity lived under
+        # ``~/Library/Application Support/SpaceRouter[-Test]/``, so QA saw
+        # "env specifies one path, DB created at another". Migration: if
+        # the legacy file exists and the new target doesn't, move it so
+        # pre-v1.5 receipts aren't orphaned.
+        receipts_db = self._dir / "receipts.db"
+        legacy_db = Path.home() / ".spacerouter" / "receipts.db"
+        if legacy_db.is_file() and not receipts_db.exists():
+            receipts_db.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                legacy_db.replace(receipts_db)
+            except OSError:
+                # Best-effort — fall back to copy if rename across devices fails.
+                import shutil as _shutil
+                _shutil.copy2(legacy_db, receipts_db)
+        os.environ["SR_RECEIPT_STORE_PATH"] = str(receipts_db)

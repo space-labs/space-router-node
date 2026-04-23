@@ -103,3 +103,82 @@ class TestApplyToEnv:
             os.environ.pop("SR_TLS_KEY_PATH", None)
             os.environ.pop("SR_GATEWAY_CA_CERT_PATH", None)
             os.environ.pop("SR_IDENTITY_KEY_PATH", None)
+
+    def test_receipts_db_path_unified_under_config_dir(self, store, tmp_path):
+        """apply_to_env must pin SR_RECEIPT_STORE_PATH to the same writable
+        config dir the GUI uses, so the CLI and GUI share one DB."""
+        os.environ.pop("SR_RECEIPT_STORE_PATH", None)
+        try:
+            store.apply_to_env()
+            assert os.environ["SR_RECEIPT_STORE_PATH"] == str(tmp_path / "receipts.db")
+        finally:
+            os.environ.pop("SR_RECEIPT_STORE_PATH", None)
+
+
+# ---------------------------------------------------------------------------
+# _DEFAULTS — per-variant escrow config
+# ---------------------------------------------------------------------------
+
+
+class TestEscrowDefaults:
+    def test_test_variant_ships_testnet_escrow_defaults(self, monkeypatch, tmp_path):
+        """QA-surface fix: Fresh Restart wiping the env file must not
+        strand test-variant users without escrow config. The test variant
+        bakes in the Creditcoin testnet contract/RPC/chain-id."""
+        import importlib
+
+        import app.variant as variant_mod
+        monkeypatch.setattr(variant_mod, "BUILD_VARIANT", "test")
+
+        import gui.config_store as cs
+        cs = importlib.reload(cs)
+
+        assert cs._DEFAULTS["SR_ESCROW_CONTRACT_ADDRESS"].startswith("0x")
+        assert "testnet.creditcoin.network" in cs._DEFAULTS["SR_ESCROW_CHAIN_RPC"]
+        assert cs._DEFAULTS["SR_ESCROW_CHAIN_ID"] == "102031"
+
+    def test_prod_variant_leaves_escrow_empty(self, monkeypatch):
+        """Prod keeps the fields empty so operators configure them at
+        rollout — mainnet escrow isn't a deployed constant yet."""
+        import importlib
+
+        import app.variant as variant_mod
+        monkeypatch.setattr(variant_mod, "BUILD_VARIANT", "production")
+
+        import gui.config_store as cs
+        cs = importlib.reload(cs)
+
+        assert cs._DEFAULTS["SR_ESCROW_CONTRACT_ADDRESS"] == ""
+        assert cs._DEFAULTS["SR_ESCROW_CHAIN_RPC"] == ""
+        assert cs._DEFAULTS["SR_ESCROW_CHAIN_ID"] == ""
+
+
+# ---------------------------------------------------------------------------
+# reset() + _DEFAULTS — Fresh Restart preserves escrow keys now that they
+# live in _DEFAULTS. This is the fix for the v1.5 QA "Payment/Escrow
+# settings manually added to env are deleted on restart" finding.
+# ---------------------------------------------------------------------------
+
+
+class TestFreshRestartPreservesEscrow:
+    def test_reset_rewrites_with_variant_defaults_not_blank(self, monkeypatch, tmp_path):
+        import importlib
+
+        import app.variant as variant_mod
+        monkeypatch.setattr(variant_mod, "BUILD_VARIANT", "test")
+
+        import gui.config_store as cs
+        cs = importlib.reload(cs)
+
+        with patch.object(cs, "_config_dir", return_value=tmp_path):
+            store = cs.ConfigStore()
+            # Seed the config with an escrow value (simulating QA having
+            # set it manually — this was the pain point).
+            store.save_wallets("0x" + "a" * 40)
+            store.reset()
+
+        rewritten = dotenv_values(str(tmp_path / "spacerouter.env"))
+        # After reset, the file is written from _DEFAULTS. Because the
+        # escrow contract is now in _DEFAULTS for test builds, it
+        # survives the rewrite — QA no longer has to re-add it.
+        assert rewritten.get("SR_ESCROW_CONTRACT_ADDRESS", "").startswith("0x")
