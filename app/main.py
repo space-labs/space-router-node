@@ -1834,8 +1834,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     claim_group.add_argument(
         "--uuid", metavar="UUID",
-        help="With --claim: settle only the receipt with this UUID. "
-             "Refuses if the row is locked (failed_terminal).",
+        help="With --claim or --qa-inject: target this specific UUID. "
+             "--claim refuses if the row is locked (failed_terminal).",
+    )
+
+    # Test-only fixture harness — ships in the binary so QA can exercise
+    # failure paths without a source checkout. Gated by
+    # SR_ALLOW_TEST_FIXTURES=1 and a non-mainnet RPC at runtime.
+    from app.qa_fixtures import all_scenarios
+
+    qa_group = parser.add_argument_group("QA fixtures (test builds only)")
+    qa_group.add_argument(
+        "--qa-inject", metavar="SCENARIO",
+        choices=all_scenarios(),
+        help=(
+            "Inject a failure-state fixture into the local receipt store, "
+            "then exit. Requires SR_ALLOW_TEST_FIXTURES=1 and a testnet "
+            f"SR_ESCROW_CHAIN_RPC. Scenarios: {', '.join(all_scenarios())}."
+        ),
     )
 
     return parser
@@ -2302,6 +2318,9 @@ def main() -> None:
             only_uuid=args.uuid,
         ))
         return
+    if args.qa_inject:
+        from app.qa_fixtures import run_cli as _qa_run
+        sys.exit(_qa_run(args.qa_inject, args.uuid))
 
     # --reset: clear everything, then re-run wizard and start
     if args.reset:
