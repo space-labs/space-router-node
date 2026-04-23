@@ -723,6 +723,57 @@ async def _rebind_server_mtls(ctx: _NodeContext) -> None:
     )
 
 
+async def _upnp_renewal_loop(
+    renew_fn,  # noqa: ANN001 — async callable returning bool
+    long_interval: int,
+    short_interval: int = 60,
+    escalate_after: int = 3,
+) -> None:
+    """Keep the UPnP port mapping alive across its lease lifetime.
+
+    ``renew_fn`` is a full re-discovery + re-add, so on success the
+    mapping is good for another ``LEASE_DURATION`` seconds. We wake
+    every ``long_interval`` seconds for the normal refresh, but on
+    failure we shrink to ``short_interval`` so transient router /
+    network blips don't leave the mapping expired for up to a full
+    half-lease gap — that was the "ENDPOINT_UNREACHABLE at ~1h15m"
+    symptom QA saw on a default 3600s lease.
+
+    Factored out of ``_run`` so it can be tested without standing up
+    the whole node.
+    """
+    consecutive_failures = 0
+    while True:
+        interval = short_interval if consecutive_failures > 0 else long_interval
+        await asyncio.sleep(interval)
+        ok = await renew_fn()
+        if ok:
+            if consecutive_failures:
+                logger.info(
+                    "UPnP lease recovered after %d failed attempt(s)",
+                    consecutive_failures,
+                )
+            consecutive_failures = 0
+            logger.debug("UPnP lease renewed")
+        else:
+            consecutive_failures += 1
+            # Escalate tone once we've burned through the natural grace
+            # window (short_interval retries cover a few minutes; past
+            # that the original mapping is probably already expired).
+            if consecutive_failures >= escalate_after:
+                logger.error(
+                    "UPnP lease renewal has failed %d consecutive "
+                    "attempts — node may be ENDPOINT_UNREACHABLE until "
+                    "the router accepts a re-mapping.",
+                    consecutive_failures,
+                )
+            else:
+                logger.warning(
+                    "UPnP lease renewal failed (attempt %d); retrying in %ds",
+                    consecutive_failures, short_interval,
+                )
+
+
 async def _version_check_loop(
     ctx: _NodeContext,
     stop_event: asyncio.Event,
@@ -1451,19 +1502,19 @@ async def _run(
             if ctx.upnp_endpoint and s.UPNP_LEASE_DURATION > 0:
                 from app.upnp import renew_upnp_mapping
 
-                async def _renew_loop() -> None:
-                    interval = max(s.UPNP_LEASE_DURATION // 2, 60)
-                    while True:
-                        await asyncio.sleep(interval)
-                        ok = await renew_upnp_mapping(
-                            s.NODE_PORT, ctx.upnp_endpoint[1], s.UPNP_LEASE_DURATION,
-                        )
-                        if ok:
-                            logger.debug("UPnP lease renewed")
-                        else:
-                            logger.warning("UPnP lease renewal failed")
+                async def _renew_tick() -> bool:
+                    return await renew_upnp_mapping(
+                        s.NODE_PORT, ctx.upnp_endpoint[1],
+                        s.UPNP_LEASE_DURATION,
+                    )
 
-                renewal_task = asyncio.create_task(_renew_loop())
+                renewal_task = asyncio.create_task(
+                    _upnp_renewal_loop(
+                        _renew_tick,
+                        long_interval=max(s.UPNP_LEASE_DURATION // 2, 60),
+                        short_interval=60,
+                    )
+                )
 
             # Start health monitoring
             health_task = asyncio.create_task(_health_loop(ctx, sm, stop_event))
