@@ -45,6 +45,46 @@ def test_create_plaintext_no_passphrase(key_path):
     assert addr == addr2
 
 
+def test_generation_logs_diagnostic_breadcrumbs(tmp_path, caplog):
+    """Identity generation logs the context that lets us root-cause
+    "Node ID rotates every restart" from a user's log file alone:
+    the key_path it looked for, whether the parent dir existed, what
+    else was already in the directory, and the current build variant."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="app.identity")
+    key_path = str(tmp_path / "subdir" / "node-identity.key")
+
+    load_or_create_identity(key_path)
+
+    gen_records = [
+        r for r in caplog.records
+        if r.name == "app.identity" and "generating a new one" in r.getMessage()
+    ]
+    assert gen_records, [r.getMessage() for r in caplog.records]
+    msg = gen_records[0].getMessage()
+    assert "parent_dir=" in msg
+    assert "exists=" in msg
+    assert "parent_contents=" in msg
+    assert "build_variant=" in msg
+
+
+def test_reload_logs_load_path_and_variant(key_path, caplog):
+    import logging
+    load_or_create_identity(key_path)  # first-run creates
+    caplog.clear()
+    caplog.set_level(logging.INFO, logger="app.identity")
+
+    load_or_create_identity(key_path)  # reload
+
+    loaded = [
+        r for r in caplog.records
+        if r.name == "app.identity"
+        and "Loaded node identity" in r.getMessage()
+    ]
+    assert loaded
+    assert "build_variant=" in loaded[0].getMessage()
+
+
 # ---------------------------------------------------------------------------
 # 2. Keystore JSON (with passphrase) — create and round-trip
 # ---------------------------------------------------------------------------
