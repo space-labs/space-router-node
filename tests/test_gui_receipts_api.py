@@ -124,6 +124,51 @@ def test_receipts_list_filters_by_view(api_with_store):
     assert resp["receipts"][0]["view"] == "failed_retryable"
 
 
+def test_receipts_list_exposes_claim_history_fields(api_with_store):
+    """The Earnings screen's Claim history card depends on the API
+    returning ``view="claimed"``, ``claimed_at`` and ``claim_tx_hash``
+    for claimed rows — lock the contract down with a test."""
+    api, db, _ = api_with_store
+    _seed_sync(db)
+
+    resp = api.receipts_list(view="all")
+    claimed = [r for r in resp["receipts"] if r["view"] == "claimed"]
+    assert len(claimed) == 1
+    row = claimed[0]
+    assert row["claimed_at"] is not None
+    assert row["claim_tx_hash"] == "0xtx"
+
+
+def test_receipts_list_distinguishes_external_reconciled(api_with_store):
+    """``tx_hash="external"`` is the synthetic marker the reaper writes
+    when the gateway auto-settled on our behalf — the GUI uses that
+    string to distinguish "reconciled" rows from rows claimed by a tx
+    this node submitted. Pin the convention in a test."""
+    import asyncio
+
+    api, db, _ = api_with_store
+    reconciled_receipt = _mk(price=77)
+
+    async def _prep():
+        store = get_store(str(db))
+        await store.initialize()
+        await store.store(reconciled_receipt, signature="0xs")
+        await store.mark_claimed(
+            [reconciled_receipt.request_uuid], tx_hash="external",
+        )
+
+    asyncio.new_event_loop().run_until_complete(_prep())
+
+    resp = api.receipts_list(view="all")
+    match = [
+        r for r in resp["receipts"]
+        if r["request_uuid"] == reconciled_receipt.request_uuid
+    ]
+    assert len(match) == 1
+    assert match[0]["view"] == "claimed"
+    assert match[0]["claim_tx_hash"] == "external"
+
+
 def test_receipts_detail_returns_known_uuid(api_with_store):
     api, db, _ = api_with_store
     seeded = _seed_sync(db)
