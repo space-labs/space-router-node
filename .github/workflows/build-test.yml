@@ -158,26 +158,41 @@ jobs:
         run: .\tests\e2e\gui_smoke_test.ps1 -Binary "dist\SpaceRouter.exe"
         timeout-minutes: 3
 
-      # Package macOS DMG (unsigned — test builds skip code signing)
+      - name: Install create-dmg
+        if: runner.os == 'macOS'
+        run: brew install create-dmg
+
+      # Package macOS DMG (unsigned — test builds skip code signing).
+      # Drag-to-Applications layout with branded chevron background.
       - name: Package macOS DMG
         if: runner.os == 'macOS'
         shell: bash
         run: |
           if [ -d "dist/SpaceRouter.app" ]; then
+            DMG="dist/${{ matrix.artifact }}.dmg"
+            rm -f "$DMG"
             for attempt in 1 2 3; do
-              if hdiutil create -volname "SpaceRouter" \
-                   -srcfolder "dist/SpaceRouter.app" \
-                   -ov -format UDZO \
-                   "dist/${{ matrix.artifact }}.dmg"; then
+              if create-dmg \
+                   --volname "SpaceRouter" \
+                   --background "packaging/macos/dmg/background.tiff" \
+                   --window-size 600 400 \
+                   --icon-size 110 \
+                   --icon "SpaceRouter.app" 150 185 \
+                   --app-drop-link 450 185 \
+                   --hide-extension "SpaceRouter.app" \
+                   --no-internet-enable \
+                   "$DMG" \
+                   "dist/SpaceRouter.app"; then
                 break
               fi
               if [ "$attempt" -lt 3 ]; then
-                echo "hdiutil failed (attempt $attempt/3), retrying in 5s..."
+                echo "create-dmg failed (attempt $attempt/3), retrying in 5s..."
+                rm -f "$DMG"
                 sleep 5
               fi
             done
-            if [ ! -f "dist/${{ matrix.artifact }}.dmg" ]; then
-              echo "All hdiutil attempts failed"
+            if [ ! -f "$DMG" ]; then
+              echo "All create-dmg attempts failed"
               exit 1
             fi
           fi
