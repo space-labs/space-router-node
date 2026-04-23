@@ -1203,22 +1203,77 @@ async function refreshReceipts() {
   const retryable = rows.filter(r => r.view === "failed_retryable");
   const pending = rows.filter(r => r.view === "pending_sign");
   const locked = rows.filter(r => r.view === "failed_terminal");
+  // Claimed rows stay visible as an audit record (most recent first).
+  const history = rows
+    .filter(r => r.view === "claimed")
+    .sort((a, b) => (b.claimed_at || 0) - (a.claimed_at || 0));
 
   renderClaimableCard(summary, claimable);
   renderRowList("receipts-retryable-list", retryable, "failed_retryable");
   renderRowList("receipts-pending-list", pending, "pending_sign");
   renderRowList("receipts-locked-list", locked, "failed_terminal");
+  renderHistoryList("receipts-history-list", history);
 
   $("#receipts-retryable-card").style.display = retryable.length ? "block" : "none";
   $("#receipts-retryable-title").textContent =
     "Needs attention · " + retryable.length;
   $("#receipts-pending-card").style.display = pending.length ? "block" : "none";
   $("#receipts-locked-card").style.display = locked.length ? "block" : "none";
+  $("#receipts-history-card").style.display = history.length ? "block" : "none";
+  $("#receipts-history-title").textContent =
+    "Claim history · " + history.length;
 
   const empty =
     claimable.length === 0 && retryable.length === 0 &&
-    pending.length === 0 && locked.length === 0;
+    pending.length === 0 && locked.length === 0 && history.length === 0;
   $("#receipts-empty").style.display = empty ? "block" : "none";
+}
+
+function renderHistoryList(containerId, rows) {
+  const container = $("#" + containerId);
+  container.innerHTML = "";
+  const now = Math.floor(Date.now() / 1000);
+
+  for (const r of rows) {
+    const row = document.createElement("div");
+    row.className = "receipt-row";
+
+    const header = document.createElement("div");
+    header.className = "receipt-row-header";
+    const uuid = document.createElement("span");
+    uuid.className = "uuid";
+    uuid.textContent = r.request_uuid.slice(0, 8) + "…";
+    const price = document.createElement("span");
+    price.textContent = formatSpace(r.total_price) + " SPACE";
+    header.appendChild(uuid);
+    header.appendChild(price);
+    row.appendChild(header);
+
+    const meta = document.createElement("div");
+    meta.className = "receipt-meta";
+    const when = r.claimed_at
+      ? humanAge(now - r.claimed_at) + " ago"
+      : "just now";
+    // ``external`` is the synthetic tx_hash the reaper writes when the
+    // gateway auto-settled on our behalf — no on-chain tx was sent from
+    // this node. Call that out so users don't look for a Blockscout row.
+    const source = r.claim_tx_hash === "external"
+      ? "Gateway auto-settled (no local tx)"
+      : "On-chain tx";
+    meta.textContent = formatBytes(r.data_amount) + " · " + when + " · " + source;
+    row.appendChild(meta);
+
+    const actions = document.createElement("div");
+    actions.className = "receipt-actions";
+    const detailBtn = document.createElement("button");
+    detailBtn.className = "btn-text-subtle";
+    detailBtn.textContent = "Details";
+    detailBtn.addEventListener("click", () => showReceiptDetail(r.request_uuid));
+    actions.appendChild(detailBtn);
+    row.appendChild(actions);
+
+    container.appendChild(row);
+  }
 }
 
 function renderClaimableCard(summary, claimable) {
@@ -1408,8 +1463,12 @@ function renderClaimOutcome(result) {
   }
   const s = result.summary || {};
   const parts = [];
-  if (s.submitted) parts.push(s.submitted + " claimed");
-  if (s.reconciled) parts.push(s.reconciled + " reconciled");
+  if (s.submitted) parts.push(s.submitted + " claimed on-chain");
+  // "reconciled" = the gateway had already auto-settled these receipts
+  // before our node submitted a claim tx, so the reaper just marks them
+  // as landed without a local tx. Spell this out so the user doesn't
+  // look for a Blockscout entry that doesn't exist.
+  if (s.reconciled) parts.push(s.reconciled + " already settled by gateway");
   if (s.failed_batches) parts.push(s.failed_batches + " failed");
   if (s.locked_after_failure) parts.push(s.locked_after_failure + " locked");
   if (parts.length === 0) parts.push("Nothing to claim");
@@ -1447,7 +1506,12 @@ async function showReceiptDetail(uuid) {
     rows.push(["Last error", r.last_error_code]);
     rows.push(["Details", r.last_error_detail || r.last_error_message]);
   }
-  if (r.claim_tx_hash && r.claim_tx_hash !== "external") {
+  if (r.claim_tx_hash === "external") {
+    rows.push([
+      "Settlement",
+      "Gateway auto-settled on-chain; no local tx was submitted.",
+    ]);
+  } else if (r.claim_tx_hash) {
     rows.push(["Tx hash", r.claim_tx_hash]);
   }
 
