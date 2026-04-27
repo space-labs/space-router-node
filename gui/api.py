@@ -376,6 +376,12 @@ class Api:
             "environment": env,
             "api_url": api_url,
             "staking_status": ns.staking_status,
+            # Coord-side probe state (populated by daemon's self-probe loop)
+            "coord_status": ns.coord_status,
+            "coord_health_score": ns.coord_health_score,
+            "last_probe_attempt_at": ns.last_probe_attempt_at,
+            "last_probe_outcome": ns.last_probe_outcome,
+            "next_probe_attempt_at": ns.next_probe_attempt_at,
             # Error reporting
             "error_report_available": self._node._error_report_available,
             # Version check
