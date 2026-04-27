@@ -18,6 +18,8 @@ All authenticated calls are signed with the node's identity private key.
 
 import logging
 import os
+import re
+from typing import Literal, NamedTuple
 
 import httpx
 
@@ -268,18 +270,46 @@ def _effective_wallet(settings: Settings) -> str:
     return settings.STAKING_ADDRESS.lower()
 
 
+class ProbeRequestResult(NamedTuple):
+    """Outcome of a request_probe() call.
+
+    - ``outcome="ok"``       → probe accepted (200) or node already online (400).
+    - ``outcome="rate_limited"`` → server returned 429; ``retry_after_seconds``
+      carries the server's hint (parsed from the ``detail`` field) so the
+      caller can honour it instead of guessing a backoff.
+    - ``outcome="failed"``   → other 4xx/5xx or network/parse exception.
+    """
+
+    outcome: Literal["ok", "rate_limited", "failed"]
+    retry_after_seconds: int | None  # only set when outcome == "rate_limited"
+
+
+# Default retry-after when the server's detail string can't be parsed.
+_DEFAULT_RATE_LIMIT_RETRY_S = 300
+
+# Server detail format: "Probe already requested recently. Try again in {N}s."
+_RETRY_AFTER_RE = re.compile(r"Try again in (\d+)s")
+
+
 async def request_probe(
     http_client: httpx.AsyncClient,
     settings: Settings,
     node_id: str,
     *,
     identity_key: str,
-) -> bool:
+) -> ProbeRequestResult:
     """Request a health probe from the Coordination API (signed).
 
-    Returns ``True`` when the probe was accepted (200) or the node is
-    already online (400).  Returns ``False`` on rate-limit (429), server
-    error, or network failure — callers can use this to back off.
+    Returns a :class:`ProbeRequestResult` describing the outcome:
+
+    - ``ok``           on 200 (probe queued) or 400 (already online).
+    - ``rate_limited`` on 429, with ``retry_after_seconds`` parsed from the
+      server's ``detail`` field (defaults to 300s when parsing fails).
+    - ``failed``       on any other status or exception.
+
+    The structured return lets the caller respect the server's retry hint
+    rather than applying a blind exponential backoff that compounds with
+    the server's own rate limit.
     """
     signature, timestamp = sign_request(identity_key, "request_probe", node_id)
 
@@ -292,18 +322,30 @@ async def request_probe(
         }, timeout=10.0)
         if resp.status_code == 200:
             logger.info("Health probe requested for node %s — waiting for verification", node_id)
-            return True
+            return ProbeRequestResult("ok", None)
         if resp.status_code == 400:
             logger.info("Probe request returned 400 (node may already be online): %s", resp.text)
-            return True
+            return ProbeRequestResult("ok", None)
         if resp.status_code == 429:
-            logger.warning("Probe request rate-limited (429) for node %s", node_id)
-            return False
+            retry_after = _DEFAULT_RATE_LIMIT_RETRY_S
+            try:
+                detail = resp.json().get("detail", "")
+                m = _RETRY_AFTER_RE.search(detail or "")
+                if m:
+                    retry_after = int(m.group(1))
+            except Exception:
+                # Body wasn't JSON or didn't contain detail — fall back to default.
+                pass
+            logger.warning(
+                "Probe request rate-limited (429) for node %s — retry in %ds",
+                node_id, retry_after,
+            )
+            return ProbeRequestResult("rate_limited", retry_after)
         logger.warning("Probe request failed: %s %s", resp.status_code, resp.text)
-        return False
+        return ProbeRequestResult("failed", None)
     except Exception as exc:
         logger.warning("Failed to request probe for node %s: %s", node_id, exc)
-        return False
+        return ProbeRequestResult("failed", None)
 
 
 async def check_node_status(
