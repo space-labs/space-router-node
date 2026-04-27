@@ -481,9 +481,42 @@ async def _phase_register(ctx: _NodeContext) -> None:
     # after registration since node_id isn't known before.
     if ctx.s.PAYMENT_ENABLED and ctx.s.NODE_RATE_PER_GB > 0:
         await _init_receipt_submitter(ctx)
+    else:
+        _log_leg2_gated_off(ctx.s)
 
     # Upgrade to mTLS if enabled
     _upgrade_mtls(ctx)
+
+
+def _log_leg2_gated_off(s) -> None:
+    """Surface why Leg 2 is disabled. test.95 silently skipped this path
+    when escrow.enabled=false slipped through Fresh Restart, leaving the
+    user wondering why no receipts ever materialised. Make the gate
+    decision explicit in the log so the next misconfiguration shows up
+    immediately instead of via a quiet Earnings-card spam.
+    """
+    from app.variant import BUILD_VARIANT
+
+    if not s.PAYMENT_ENABLED:
+        msg = (
+            "Leg 2 disabled — settings.escrow.enabled=false. "
+            "Receipts will not be signed or claimed. "
+            "Set escrow.enabled=true in ~/.spacerouter/settings.json "
+            "(or SR_PAYMENT_ENABLED=true) to participate in escrow payments."
+        )
+    else:
+        msg = (
+            "Leg 2 disabled — settings.escrow.leg2_rate_per_gb=%d (must be > 0). "
+            "Set a non-zero rate (the coord TOFU sync will overwrite it on first /config call)."
+        ) % int(getattr(s, "NODE_RATE_PER_GB", 0) or 0)
+
+    if BUILD_VARIANT == "test":
+        # On test builds, escrow OFF is almost always misconfiguration —
+        # escalate to WARNING so it shows up in the GUI status panel
+        # alongside other startup warnings.
+        logger.warning(msg)
+    else:
+        logger.info(msg)
 
 
 async def _init_receipt_submitter(ctx: _NodeContext) -> None:
