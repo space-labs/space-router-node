@@ -122,3 +122,36 @@ def test_all_errors_reported_together(parser, capsys):
     assert "--port must be in 1..65535" in err
     assert "--public-port must be in 1..65535" in err
     assert "--staking-address" in err
+
+
+# ── load_settings() in cwd-restricted contexts ────────────────────
+
+
+def test_load_settings_does_not_probe_cwd_dotenv(tmp_path, monkeypatch):
+    """Phase A E2E surfaced this: ``--reset`` crashed under
+    ``sudo -u spacerouter`` from ``/root`` because pydantic-settings
+    called ``Path('.env').is_file()`` which raised ``PermissionError``
+    when ``/root`` was 0700. The fix passes ``_env_file=None`` so the
+    explicit-kwargs construction skips dotenv probing entirely.
+    """
+    from app.config import _settings_from_provider_settings
+    from app.settings_v2 import Settings as V2Settings
+
+    # Create a directory we can chdir into that contains a `.env` we
+    # cannot read — simulate the /root scenario without needing root.
+    bad_dir = tmp_path / "no-read"
+    bad_dir.mkdir()
+    bad_env = bad_dir / ".env"
+    bad_env.write_text("SR_NODE_PORT=99\n")
+    bad_env.chmod(0o000)
+
+    try:
+        monkeypatch.chdir(bad_dir)
+
+        v = V2Settings()
+        s = _settings_from_provider_settings(v)
+
+        # Default port from the v2 settings, not the unreadable .env.
+        assert s.NODE_PORT == 9090
+    finally:
+        bad_env.chmod(0o600)  # make tmp_path teardown happy

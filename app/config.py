@@ -215,7 +215,14 @@ def _settings_from_provider_settings(new) -> Settings:
     # a boolean indicating whether one is set. Keep that contract.
     passphrase = os.environ.get("SR_IDENTITY_PASSPHRASE", "")
 
+    # ``_env_file=None`` skips pydantic-settings' default ``.env`` probe.
+    # Every field below is set explicitly from the v1.5 provider settings,
+    # so there is nothing left for a .env to override. Probing the cwd
+    # also crashed under sudo from /root: pathlib.is_file('.env') raised
+    # PermissionError when /root was 0700, taking out --reset on Linux
+    # boxes installed via the .deb (Phase A E2E finding).
     return Settings(
+        _env_file=None,
         NODE_PORT=new.node.port,
         COORDINATION_API_URL=new.coordination.url,
         NODE_LABEL=new.node.label or "",
