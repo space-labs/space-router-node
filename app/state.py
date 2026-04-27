@@ -113,6 +113,14 @@ class NodeStatus:
     cert_expiry_warning: bool = False
     staking_status: str = "—"
     error_report_available: bool = False
+    # Coordination-side health (populated by _self_probe_loop). Lets the GUI
+    # surface the divergence between local "running" and coord-reported state
+    # so an operator can see recovery in flight.
+    coord_status: str = "—"
+    coord_health_score: float = 0.0
+    last_probe_attempt_at: float | None = None  # unix timestamp
+    last_probe_outcome: str | None = None  # "ok"|"rate_limited"|"failed"|"cooldown"|"escalated"
+    next_probe_attempt_at: float | None = None  # unix timestamp
 
     def to_dict(self) -> dict:
         return {
@@ -127,6 +135,11 @@ class NodeStatus:
             "cert_expiry_warning": self.cert_expiry_warning,
             "staking_status": self.staking_status,
             "error_report_available": self.error_report_available,
+            "coord_status": self.coord_status,
+            "coord_health_score": self.coord_health_score,
+            "last_probe_attempt_at": self.last_probe_attempt_at,
+            "last_probe_outcome": self.last_probe_outcome,
+            "next_probe_attempt_at": self.next_probe_attempt_at,
         }
 
 
