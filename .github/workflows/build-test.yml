@@ -241,6 +241,28 @@ jobs:
         run: .\tests\e2e\gui_smoke_test.ps1 -Binary "dist\SpaceRouter.exe"
         timeout-minutes: 3
 
+      # Belt-and-suspenders: confirm the embedded CLI is still in the
+      # bundle right before we package the DMG. test.95 shipped a .app
+      # missing space-router-node despite earlier embed/smoke steps —
+      # something between embed and DMG was stripping it. Hard-fail so
+      # the next regression doesn't get to QA undetected.
+      - name: Assert embedded CLI is present pre-DMG (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -e
+          BUNDLE_CLI="dist/SpaceRouter.app/Contents/MacOS/space-router-node"
+          if [ ! -f "$BUNDLE_CLI" ]; then
+            echo "::error::Embedded CLI missing from app bundle before DMG packaging: $BUNDLE_CLI"
+            ls -la dist/SpaceRouter.app/Contents/MacOS/ || true
+            exit 1
+          fi
+          if [ ! -x "$BUNDLE_CLI" ]; then
+            echo "::error::Embedded CLI is not executable: $BUNDLE_CLI"
+            exit 1
+          fi
+          echo "OK: $BUNDLE_CLI present and executable"
+
       # Package macOS DMG (unsigned — test builds skip code signing)
       - name: Package macOS DMG
         if: runner.os == 'macOS'
@@ -264,6 +286,28 @@ jobs:
               exit 1
             fi
           fi
+
+      # Mount the DMG we just produced and verify the embedded CLI is
+      # actually in the shipping artifact — guards against hdiutil
+      # silently dropping files (we suspect a re-seal / signature step
+      # interaction caused the test.95 regression). Detach when done.
+      - name: Assert embedded CLI is in shipping DMG (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -e
+          DMG="dist/${{ matrix.artifact }}.dmg"
+          MOUNT_POINT=$(mktemp -d)
+          hdiutil attach "$DMG" -mountpoint "$MOUNT_POINT" -nobrowse -readonly -quiet
+          BUNDLE_CLI="$MOUNT_POINT/SpaceRouter.app/Contents/MacOS/space-router-node"
+          if [ ! -f "$BUNDLE_CLI" ]; then
+            echo "::error::Embedded CLI missing from DMG: $BUNDLE_CLI"
+            ls -la "$MOUNT_POINT/SpaceRouter.app/Contents/MacOS/" || true
+            hdiutil detach "$MOUNT_POINT" -quiet || true
+            exit 1
+          fi
+          echo "OK: CLI present in DMG ($BUNDLE_CLI)"
+          hdiutil detach "$MOUNT_POINT" -quiet
 
       # Rename Windows artifact (onefile mode produces dist/SpaceRouter.exe directly)
       - name: Rename artifact (Windows)
