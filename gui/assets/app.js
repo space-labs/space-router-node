@@ -527,6 +527,70 @@ function updateSettingsVersionStatus(vc) {
 
 // ── Status Dashboard ──
 
+// Coord-recovery sub-line — surfaces the daemon's self-probe loop state so
+// the operator can see recovery progress when local says "running" but
+// coord considers the node offline/draining/unknown. Only renders while
+// the local state is "running"; cleared on every tick by updateStatus().
+function _coordHintEl() {
+  let el = document.getElementById("coord-recovery-hint");
+  if (!el) {
+    const card = document.getElementById("status-card");
+    const detail = document.getElementById("status-detail");
+    if (!card || !detail) return null;
+    el = document.createElement("div");
+    el.id = "coord-recovery-hint";
+    el.className = "status-detail text-muted";
+    // Smaller, dimmer than the main detail line.
+    el.style.fontSize = "11px";
+    el.style.marginTop = "2px";
+    detail.parentNode.insertBefore(el, detail.nextSibling);
+  }
+  return el;
+}
+
+function clearCoordRecoveryHint() {
+  const el = _coordHintEl();
+  if (el) {
+    el.textContent = "";
+    el.style.display = "none";
+  }
+}
+
+function renderCoordRecoveryHint(status) {
+  const el = _coordHintEl();
+  if (!el) return;
+
+  const cs = status.coord_status;
+  // Coord agrees, no payload yet, or coord is happy — nothing to show.
+  if (!cs || cs === "—" || cs === "online" || cs === "active") {
+    el.textContent = "";
+    el.style.display = "none";
+    return;
+  }
+
+  let suffix;
+  const outcome = status.last_probe_outcome;
+  const nextAt = status.next_probe_attempt_at;
+  if (outcome === "rate_limited") {
+    suffix = "last probe rate-limited";
+  } else if (outcome === "escalated") {
+    suffix = "escalating to reconnect";
+  } else if (typeof nextAt === "number" && nextAt > 0) {
+    const secs = Math.max(0, Math.round(nextAt - Date.now() / 1000));
+    suffix = "next probe in " + secs + "s";
+  } else if (outcome === "cooldown") {
+    suffix = "probe in cooldown";
+  } else {
+    // Default fallback — coord_status only.
+    el.textContent = "Coord sees: " + cs;
+    el.style.display = "block";
+    return;
+  }
+
+  el.textContent = "Coord sees: " + cs + " · " + suffix;
+  el.style.display = "block";
+}
+
 function showStatus() {
   show("screen-status");
   updateStatus();
@@ -578,6 +642,10 @@ async function updateStatus() {
     // State-based display
     const state = status.state || "idle";
 
+    // Clear the coord-recovery hint by default; the running branch
+    // re-renders it when coord disagrees with the local state.
+    clearCoordRecoveryHint();
+
     // Passphrase required — show unlock dialog immediately
     if (state === "passphrase_required") {
       showUnlockDialog();
@@ -621,6 +689,10 @@ async function updateStatus() {
         dot.className = "dot dot-running";
         text.textContent = "SpaceRouter is running";
         detail.textContent = status.detail || "";
+        // Surface the gap between local "running" and coord-side state so an
+        // operator can see the daemon's self-probe recovery in flight. Only
+        // render when coord disagrees (offline/draining/unknown/etc).
+        renderCoordRecoveryHint(status);
         errorReportShownForKey = null;
         break;
       case "reconnecting":
