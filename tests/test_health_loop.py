@@ -9,7 +9,7 @@ import respx
 from httpx import Response
 
 from app.config import Settings
-from app.registration import request_probe
+from app.registration import ProbeRequestResult, request_probe
 
 # Reuse identity fixtures from existing tests
 from eth_account import Account
@@ -38,11 +38,11 @@ def probe_settings():
 
 
 class TestRequestProbeReturnValues:
-    """Verify request_probe returns bool indicating acceptance."""
+    """Verify request_probe returns a ProbeRequestResult."""
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_request_probe_returns_true_on_200(self, probe_settings):
+    async def test_request_probe_ok_on_200(self, probe_settings):
         respx.post(f"{COORDINATION_URL}/nodes/{TEST_NODE_ID}/request-probe").mock(
             return_value=Response(200, json={"ok": True}),
         )
@@ -50,11 +50,11 @@ class TestRequestProbeReturnValues:
             result = await request_probe(
                 client, probe_settings, TEST_NODE_ID, identity_key=TEST_IDENTITY_KEY,
             )
-        assert result is True
+        assert result == ProbeRequestResult("ok", None)
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_request_probe_returns_true_on_400(self, probe_settings):
+    async def test_request_probe_ok_on_400(self, probe_settings):
         respx.post(f"{COORDINATION_URL}/nodes/{TEST_NODE_ID}/request-probe").mock(
             return_value=Response(400, text="already online"),
         )
@@ -62,11 +62,11 @@ class TestRequestProbeReturnValues:
             result = await request_probe(
                 client, probe_settings, TEST_NODE_ID, identity_key=TEST_IDENTITY_KEY,
             )
-        assert result is True
+        assert result == ProbeRequestResult("ok", None)
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_request_probe_returns_false_on_429(self, probe_settings):
+    async def test_request_probe_rate_limited_on_429(self, probe_settings):
         respx.post(f"{COORDINATION_URL}/nodes/{TEST_NODE_ID}/request-probe").mock(
             return_value=Response(429, text="rate limited"),
         )
@@ -74,11 +74,40 @@ class TestRequestProbeReturnValues:
             result = await request_probe(
                 client, probe_settings, TEST_NODE_ID, identity_key=TEST_IDENTITY_KEY,
             )
-        assert result is False
+        # Plain text body — falls back to default 300s.
+        assert result.outcome == "rate_limited"
+        assert result.retry_after_seconds == 300
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_request_probe_returns_false_on_500(self, probe_settings):
+    async def test_request_probe_429_parses_retry_hint(self, probe_settings):
+        respx.post(f"{COORDINATION_URL}/nodes/{TEST_NODE_ID}/request-probe").mock(
+            return_value=Response(
+                429,
+                json={"detail": "Probe already requested recently. Try again in 247s."},
+            ),
+        )
+        async with httpx.AsyncClient() as client:
+            result = await request_probe(
+                client, probe_settings, TEST_NODE_ID, identity_key=TEST_IDENTITY_KEY,
+            )
+        assert result == ProbeRequestResult("rate_limited", 247)
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_request_probe_429_unparseable_detail_uses_default(self, probe_settings):
+        respx.post(f"{COORDINATION_URL}/nodes/{TEST_NODE_ID}/request-probe").mock(
+            return_value=Response(429, json={"detail": "rate limited (no hint)"}),
+        )
+        async with httpx.AsyncClient() as client:
+            result = await request_probe(
+                client, probe_settings, TEST_NODE_ID, identity_key=TEST_IDENTITY_KEY,
+            )
+        assert result == ProbeRequestResult("rate_limited", 300)
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_request_probe_failed_on_500(self, probe_settings):
         respx.post(f"{COORDINATION_URL}/nodes/{TEST_NODE_ID}/request-probe").mock(
             return_value=Response(500, text="server error"),
         )
@@ -86,11 +115,11 @@ class TestRequestProbeReturnValues:
             result = await request_probe(
                 client, probe_settings, TEST_NODE_ID, identity_key=TEST_IDENTITY_KEY,
             )
-        assert result is False
+        assert result == ProbeRequestResult("failed", None)
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_request_probe_returns_false_on_exception(self, probe_settings):
+    async def test_request_probe_failed_on_exception(self, probe_settings):
         respx.post(f"{COORDINATION_URL}/nodes/{TEST_NODE_ID}/request-probe").mock(
             side_effect=httpx.ConnectError("connection refused"),
         )
@@ -98,7 +127,7 @@ class TestRequestProbeReturnValues:
             result = await request_probe(
                 client, probe_settings, TEST_NODE_ID, identity_key=TEST_IDENTITY_KEY,
             )
-        assert result is False
+        assert result == ProbeRequestResult("failed", None)
 
 
 # ---------------------------------------------------------------------------
@@ -333,11 +362,11 @@ class TestSelfProbeLoopCooldown:
 
 
 class TestSelfProbeLoopBackoff:
-    """Verify _self_probe_loop applies exponential backoff on rate-limited responses."""
+    """Verify _self_probe_loop honours the server's retry-after hint on 429."""
 
     @pytest.mark.asyncio
-    async def test_backoff_on_rejected_probe(self, probe_settings):
-        """When request_probe returns False (429), probe_result should be 'rate_limited'."""
+    async def test_rate_limited_surfaces_to_dashboard(self, probe_settings):
+        """When request_probe returns rate_limited, dashboard sees 'rate_limited'."""
         from app.main import _self_probe_loop
 
         ctx = _make_ctx(probe_settings)
@@ -356,22 +385,15 @@ class TestSelfProbeLoopBackoff:
                 stop_event.set()
             raise asyncio.TimeoutError()
 
-        init_time = 100.0
-        _time_call = [0]
-        def _fake_time():
-            _time_call[0] += 1
-            return init_time if _time_call[0] == 1 else init_time + 300
-
         with patch("asyncio.wait_for", side_effect=_fake_wait_for), \
-             patch("time.time", side_effect=_fake_time), \
+             patch("time.time", return_value=400.0), \
              patch("app.registration.check_node_status", new_callable=AsyncMock,
                    return_value={"status": "offline", "health_score": 0.1, "staking_status": "qualifying"}), \
-             patch("app.registration.request_probe", new_callable=AsyncMock, return_value=False):
+             patch("app.registration.request_probe", new_callable=AsyncMock,
+                   return_value=ProbeRequestResult("rate_limited", 120)):
 
             await _self_probe_loop(ctx, sm, stop_event, dashboard)
 
-            # The first iteration's dashboard update should show "rate_limited"
-            # (second iteration sees doubled cooldown and reports "cooldown")
             probe_results = [
                 call.kwargs["last_probe_result"]
                 for call in dashboard.update.call_args_list
