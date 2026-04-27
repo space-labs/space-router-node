@@ -971,11 +971,11 @@ async def _health_loop(
                 and now - last_global >= _SELF_PROBE_REQUEST_COOLDOWN):
             last_probe_request = now
             try:
-                accepted = await request_probe(
+                result = await request_probe(
                     ctx.http, ctx.s, ctx.node_id,
                     identity_key=ctx.identity_key,
                 )
-                if accepted:
+                if result.outcome == "ok":
                     ctx._last_probe_request_time = now
             except Exception:
                 pass  # non-critical
@@ -1012,7 +1012,12 @@ async def _status_summary_loop(
 # Self-probe interval — more frequent than health checks to catch bore disconnects fast
 _SELF_PROBE_INTERVAL = 60  # 1 minute
 _SELF_PROBE_REQUEST_COOLDOWN = 300  # 5 min — matches server rate limit
-_SELF_PROBE_BACKOFF_CAP = 1800  # 30 min max backoff on consecutive 429s
+_SELF_PROBE_BACKOFF_CAP = 600  # 10 min max backoff on persistent failures
+# After this many consecutive offline polls (≈6 min at 60s each), give up on
+# self-probe recovery and force RECONNECTING — that path retries UPnP and
+# re-registers, which is the only thing that can override offline status
+# without a consecutive-success threshold.
+_SELF_PROBE_OFFLINE_ESCALATION_THRESHOLD = 6
 
 
 async def _self_probe_loop(
@@ -1025,7 +1030,21 @@ async def _self_probe_loop(
 
     Runs every 60s (vs 5min for health checks) to catch bore tunnel
     disconnects and other reachability issues quickly.  Also feeds
-    staking_status, health_score, and probe results to the dashboard.
+    staking_status, health_score, and probe results to the dashboard
+    and to ``sm.status`` for GUI consumption.
+
+    Recovery flow (the bug this exists to fix):
+      - On the first online→offline transition, we fire a probe request
+        immediately, ignoring the client-side cooldown (the server's
+        own rate limit still applies).
+      - On 429 we honour the server's ``Try again in {N}s`` hint exactly
+        instead of blindly doubling the cooldown.
+      - On other failures we double the cooldown up to
+        ``_SELF_PROBE_BACKOFF_CAP``.
+      - After ``_SELF_PROBE_OFFLINE_ESCALATION_THRESHOLD`` consecutive
+        offline polls we transition to RECONNECTING, since persistent
+        offline status almost always means the tunnel/UPnP lease is
+        dead and only re-registration can recover it.
     """
     import time as _time
 
@@ -1033,10 +1052,13 @@ async def _self_probe_loop(
 
     # Run first check almost immediately (5s delay for registration to settle)
     first_run = True
-    # Start at current time so first cooldown respects the registration probe
-    # (which already fired during _phase_register).
-    last_probe_request_time = _time.time()
+    # Start at 0.0 so the first attempt can fire immediately if the loop is
+    # created into an already-offline state — the server's own rate limit
+    # is still respected via the 429 path.
+    last_probe_request_time = 0.0
     current_cooldown = _SELF_PROBE_REQUEST_COOLDOWN
+    previous_status: str | None = None
+    consecutive_offline = 0
     while not stop_event.is_set():
         delay = 5 if first_run else _SELF_PROBE_INTERVAL
         first_run = False
@@ -1053,62 +1075,127 @@ async def _self_probe_loop(
             node_data = await check_node_status(
                 ctx.http, ctx.s, ctx.node_id, identity_key=ctx.identity_key,
             )
-            status = node_data.get("status", "unknown")
-            health_score = node_data.get("health_score", 0)
-            staking_status = node_data.get("staking_status", "—")
-
-            probe_result = status
-            if status not in ("online", "active"):
-                logger.warning(
-                    "Self-probe: coordination reports status='%s' health_score=%.1f — requesting probe",
-                    status, health_score,
-                )
-                now = _time.time()
-                if now - last_probe_request_time >= current_cooldown:
-                    try:
-                        accepted = await request_probe(
-                            ctx.http, ctx.s, ctx.node_id,
-                            identity_key=ctx.identity_key,
-                        )
-                        if accepted:
-                            last_probe_request_time = now
-                            probe_result = "probe_requested"
-                            current_cooldown = _SELF_PROBE_REQUEST_COOLDOWN
-                            ctx._last_probe_request_time = now
-                        else:
-                            # 429 or server error — exponential backoff
-                            probe_result = "rate_limited"
-                            current_cooldown = min(
-                                current_cooldown * 2,
-                                _SELF_PROBE_BACKOFF_CAP,
-                            )
-                            logger.info(
-                                "Probe request not accepted — backing off to %ds",
-                                current_cooldown,
-                            )
-                    except Exception:
-                        probe_result = "probe_failed"
-                else:
-                    probe_result = "cooldown"
-
-            # Update state machine so GUI can read staking_status
-            sm.status.staking_status = staking_status
-
-            if dashboard:
-                dashboard.update(
-                    last_probe_result=probe_result,
-                    last_probe_time=_time.time(),
-                    health_status=status,
-                    health_score=str(health_score),
-                    staking_status=staking_status,
-                )
         except Exception as exc:
-            logger.debug("Self-probe check failed: %s", exc)
+            # Promoted DEBUG → INFO: a swallowed status check is the kind of
+            # thing operators need to see when the node is silently stuck.
+            logger.info("Self-probe check failed: %s", exc)
+            sm.status.last_probe_outcome = "failed"
             if dashboard:
                 dashboard.update(
                     last_probe_result="error",
                     last_probe_time=_time.time(),
                 )
+            continue
+
+        status = node_data.get("status", "unknown")
+        health_score = float(node_data.get("health_score", 0.0))
+        staking_status = node_data.get("staking_status", "—")
+
+        # Plumb coord-side observations through to GUI / dashboard.
+        sm.status.coord_status = status
+        sm.status.coord_health_score = health_score
+        sm.status.staking_status = staking_status
+
+        if status in ("online", "active"):
+            consecutive_offline = 0
+            previous_status = status
+            sm.status.next_probe_attempt_at = None
+            if dashboard:
+                dashboard.update(
+                    last_probe_result=status,
+                    last_probe_time=_time.time(),
+                    health_status=status,
+                    health_score=str(health_score),
+                    staking_status=staking_status,
+                )
+            continue
+
+        # ---- Offline branch ------------------------------------------------
+        consecutive_offline += 1
+        # Online→offline transition: force an immediate probe request
+        # (subject only to the server's rate limit, not the client cooldown).
+        is_first_transition = (
+            previous_status in ("online", "active") and consecutive_offline == 1
+        )
+        previous_status = status
+
+        logger.warning(
+            "Self-probe: coord reports status=%s health_score=%.1f (consecutive_offline=%d)",
+            status, health_score, consecutive_offline,
+        )
+
+        now = _time.time()
+        cooldown_ok = (now - last_probe_request_time) >= current_cooldown
+        probe_result = "cooldown"
+
+        if is_first_transition or cooldown_ok:
+            # Always advance last_probe_request_time so the client-side gate
+            # is honest about when we actually reached out.
+            last_probe_request_time = now
+            sm.status.last_probe_attempt_at = now
+            ctx._last_probe_request_time = now
+
+            result = await request_probe(
+                ctx.http, ctx.s, ctx.node_id,
+                identity_key=ctx.identity_key,
+            )
+            if result.outcome == "ok":
+                current_cooldown = _SELF_PROBE_REQUEST_COOLDOWN
+                sm.status.last_probe_outcome = "ok"
+                sm.status.next_probe_attempt_at = now + current_cooldown
+                probe_result = "probe_requested"
+                logger.info(
+                    "Probe requested for node %s — next attempt in %ds",
+                    ctx.node_id, current_cooldown,
+                )
+            elif result.outcome == "rate_limited":
+                # Honour the server's retry hint exactly — no exponential
+                # doubling. +5s jitter buffer to avoid racing the rate limit.
+                wait = (result.retry_after_seconds or _SELF_PROBE_REQUEST_COOLDOWN) + 5
+                current_cooldown = wait
+                sm.status.last_probe_outcome = "rate_limited"
+                sm.status.next_probe_attempt_at = now + wait
+                probe_result = "rate_limited"
+                logger.info("Probe rate-limited by coord (retry in %ds)", wait)
+            else:  # failed
+                current_cooldown = min(current_cooldown * 2, _SELF_PROBE_BACKOFF_CAP)
+                sm.status.last_probe_outcome = "failed"
+                sm.status.next_probe_attempt_at = now + current_cooldown
+                probe_result = "probe_failed"
+                logger.info(
+                    "Probe request failed — backing off to %ds", current_cooldown,
+                )
+        else:
+            # Cooldown active — don't hit the server, but surface when we
+            # plan to try next so the GUI can render a countdown.
+            sm.status.last_probe_outcome = "cooldown"
+            sm.status.next_probe_attempt_at = last_probe_request_time + current_cooldown
+
+        if dashboard:
+            dashboard.update(
+                last_probe_result=probe_result,
+                last_probe_time=_time.time(),
+                health_status=status,
+                health_score=str(health_score),
+                staking_status=staking_status,
+            )
+
+        # Escalation: persistent offline despite probe attempts → force
+        # RECONNECTING.  The orchestrator's RECONNECTING path retries UPnP
+        # and re-registers; re-registration enqueues a REGISTRATION-priority
+        # probe which is the only class that can override offline status
+        # without a consecutive-success threshold on the coord side.
+        if consecutive_offline >= _SELF_PROBE_OFFLINE_ESCALATION_THRESHOLD:
+            logger.warning(
+                "Coord reports offline for %d consecutive polls — escalating to RECONNECTING",
+                consecutive_offline,
+            )
+            sm.status.last_probe_outcome = "escalated"
+            sm.transition(
+                NodeState.RECONNECTING,
+                "Persistent offline status from coord — retrying registration",
+            )
+            return  # exit loop; orchestrator handles reconnect
 
 
 async def _dashboard_loop(
