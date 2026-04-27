@@ -37,6 +37,10 @@ _STAGING_URL = "https://spacerouter-coordination-api-staging.fly.dev"
 _TEST_ESCROW_CONTRACT = "0xC5740e4e9175301a24FB6d22bA184b8ec0762852"
 _TEST_ESCROW_CHAIN_RPC = "https://rpc.cc3-testnet.creditcoin.network"
 _TEST_ESCROW_CHAIN_ID = "102031"
+# Bootstrap value so the receipt submitter has a non-zero rate at first
+# boot and starts. Provider's coord TOFU sync (PR #76, c9aa6e8) overwrites
+# this with the gateway-canonical rate on the first /config call.
+_TEST_LEG2_RATE_PER_GB = "1000000000000000"
 
 # Pre-configured environments for easy switching (test builds only)
 ENVIRONMENTS = {
@@ -81,6 +85,18 @@ def _default_escrow_chain_id() -> str:
     return _TEST_ESCROW_CHAIN_ID if BUILD_VARIANT == "test" else ""
 
 
+def _default_payment_enabled() -> str:
+    # Test variant opts in by default — the alternative is "fresh test
+    # builds silently never sign Leg 2 receipts because escrow is off,"
+    # which is the bug shipped in test.95. Prod stays opt-in until the
+    # mainnet escrow rollout flips this.
+    return "true" if BUILD_VARIANT == "test" else "false"
+
+
+def _default_leg2_rate_per_gb() -> str:
+    return _TEST_LEG2_RATE_PER_GB if BUILD_VARIANT == "test" else ""
+
+
 _DEFAULTS = {
     "SR_COORDINATION_API_URL": _default_coordination_url(),
     "SR_STAKING_ADDRESS": "",
@@ -96,6 +112,8 @@ _DEFAULTS = {
     # Escrow settings — test variant ships with testnet defaults so QA
     # never has to hand-edit; Fresh Restart preserves them because they
     # live in _DEFAULTS now. Prod leaves them empty (operator-configured).
+    "SR_PAYMENT_ENABLED": _default_payment_enabled(),
+    "SR_NODE_RATE_PER_GB": _default_leg2_rate_per_gb(),
     "SR_ESCROW_CONTRACT_ADDRESS": _default_escrow_contract(),
     "SR_ESCROW_CHAIN_RPC": _default_escrow_chain_rpc(),
     "SR_ESCROW_CHAIN_ID": _default_escrow_chain_id(),
@@ -400,11 +418,17 @@ class ConfigStore:
         if certs_dir.is_dir():
             shutil.rmtree(certs_dir)
 
-        # Reset settings.json to a fresh defaults instance for the
-        # current build variant. Anything previously persisted (wallet,
-        # coord URL, etc.) is wiped intentionally — that's what reset
-        # promises.
-        defaults = _SettingsV2(build_variant=BUILD_VARIANT)
+        # Reset settings.json to defaults for the current build variant.
+        # Anything previously persisted (wallet, coord URL, etc.) is wiped
+        # intentionally — that's what reset promises. We feed _DEFAULTS
+        # through from_env_mapping so the test variant's escrow opt-in
+        # (PAYMENT_ENABLED + leg2 rate + contract addrs) survives Fresh
+        # Restart. test.95 shipped a bare `_SettingsV2()` here, which
+        # wiped escrow.enabled to false and left the receipt submitter
+        # dead until the user hand-edited settings.json.
+        env_defaults = {k: v for k, v in _DEFAULTS.items() if v}
+        env_defaults["SR_BUILD_VARIANT"] = BUILD_VARIANT
+        defaults = _SettingsV2.from_env_mapping(env_defaults)
         self._save_settings_v2(defaults)
 
     def apply_to_env(self) -> None:

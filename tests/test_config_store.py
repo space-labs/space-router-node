@@ -155,6 +155,11 @@ class TestEscrowDefaults:
         assert cs._DEFAULTS["SR_ESCROW_CONTRACT_ADDRESS"].startswith("0x")
         assert "testnet.creditcoin.network" in cs._DEFAULTS["SR_ESCROW_CHAIN_RPC"]
         assert cs._DEFAULTS["SR_ESCROW_CHAIN_ID"] == "102031"
+        # test.95 receipt-bug fix: escrow must be ON by default on test
+        # builds, with a non-zero leg2 rate so the receipt submitter
+        # actually starts. Coord TOFU sync overwrites the rate later.
+        assert cs._DEFAULTS["SR_PAYMENT_ENABLED"] == "true"
+        assert cs._DEFAULTS["SR_NODE_RATE_PER_GB"] == "1000000000000000"
 
     def test_prod_variant_leaves_escrow_empty(self, monkeypatch):
         """Prod keeps the fields empty so operators configure them at
@@ -170,6 +175,10 @@ class TestEscrowDefaults:
         assert cs._DEFAULTS["SR_ESCROW_CONTRACT_ADDRESS"] == ""
         assert cs._DEFAULTS["SR_ESCROW_CHAIN_RPC"] == ""
         assert cs._DEFAULTS["SR_ESCROW_CHAIN_ID"] == ""
+        # Prod stays opt-in until mainnet escrow is rolled out — operators
+        # must explicitly flip the flag for now.
+        assert cs._DEFAULTS["SR_PAYMENT_ENABLED"] == "false"
+        assert cs._DEFAULTS["SR_NODE_RATE_PER_GB"] == ""
 
 
 # ---------------------------------------------------------------------------
@@ -211,3 +220,53 @@ class TestFreshRestartPreservesEscrow:
         data = json.loads(settings_path.read_text())
         assert data["build_variant"] == "test"
         assert data["wallet"]["staking_address"] in (None, "")
+
+    def test_reset_preserves_escrow_on_test_variant(self, monkeypatch, tmp_path):
+        """Regression for the test.95 ship-stopper: Fresh Restart used to
+        wipe escrow.enabled to false, leaving the receipt submitter dead
+        and Earnings spamming `no such table: signed_receipts`. After
+        reset, escrow must still be on with the testnet contract addrs.
+        """
+        import importlib
+        import json
+
+        import app.variant as variant_mod
+        monkeypatch.setattr(variant_mod, "BUILD_VARIANT", "test")
+
+        import gui.config_store as cs
+        cs = importlib.reload(cs)
+
+        with patch.object(cs, "_config_dir", return_value=tmp_path):
+            store = cs.ConfigStore()
+            store.reset()
+
+        data = json.loads((tmp_path / "settings.json").read_text())
+        assert data["escrow"]["enabled"] is True
+        assert data["escrow"]["contract_address"].lower().startswith("0xc5740e4e")
+        assert "testnet.creditcoin.network" in data["escrow"]["chain_rpc"]
+        assert data["escrow"]["chain_id"] == 102031
+        assert data["escrow"]["leg2_rate_per_gb"] == "1000000000000000"
+
+    def test_reset_does_not_force_escrow_on_prod_variant(self, monkeypatch, tmp_path):
+        """Prod must NOT auto-opt-into escrow until mainnet rollout —
+        operators decide. Reset on prod yields escrow.enabled=false and
+        no testnet contract addrs.
+        """
+        import importlib
+        import json
+
+        import app.variant as variant_mod
+        monkeypatch.setattr(variant_mod, "BUILD_VARIANT", "production")
+
+        import gui.config_store as cs
+        cs = importlib.reload(cs)
+
+        with patch.object(cs, "_config_dir", return_value=tmp_path):
+            store = cs.ConfigStore()
+            store.reset()
+
+        data = json.loads((tmp_path / "settings.json").read_text())
+        assert data["escrow"]["enabled"] is False
+        # Empty/None — operator hasn't configured prod escrow yet.
+        assert not data["escrow"]["contract_address"]
+        assert not data["escrow"]["chain_rpc"]
