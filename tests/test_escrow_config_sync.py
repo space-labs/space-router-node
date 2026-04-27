@@ -106,19 +106,42 @@ def test_sync_skipped_when_already_synced():
     assert out.escrow.gateway_payer_address == GATEWAY_PAYER
 
 
-def test_sync_skipped_when_rate_present_no_timestamp():
-    """Operator pinned the rate manually (no sync stamp) → don't overwrite."""
-    settings = _make_settings(
-        leg2_rate_per_gb="999999999999999999999",  # operator-pinned
-        synced_from_coord_at=None,
+@respx.mock
+def test_sync_overrides_unstamped_rate():
+    """Stale rate without sync stamp gets overridden by coord.
+
+    PR #94 changed the heuristic: previously a rate set without a sync
+    timestamp was treated as "operator-pinned" and skipped. In practice
+    that branch trapped the test.97 backfill (PR #93) which left the
+    rate at the bootstrap value (1e15) and the timestamp null — every
+    receipt then got rejected as SIGN_REJECTED_UNKNOWN_REQUEST.
+
+    Coord is now authoritative whenever the timestamp is null. An
+    operator who genuinely wants to pin a non-coord rate must also
+    set ``synced_from_coord_at`` (e.g. via a fixed timestamp such as
+    ``"2099-01-01T00:00:00+00:00"``) so the sync skip-when-both-set
+    rule fires.
+    """
+    respx.get(CONFIG_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "gatewayLeg2RatePerGb": LEG2_RATE_WEI,
+                "gatewayPayerAddress": GATEWAY_PAYER,
+            },
+        )
     )
 
-    with patch("app.escrow_config_sync.httpx.get") as mock_get:
-        out = sync_escrow_config_from_coord(settings)
-        mock_get.assert_not_called()
+    settings = _make_settings(
+        leg2_rate_per_gb="1000000000000000",  # bootstrap stale value
+        synced_from_coord_at=None,
+    )
+    out = sync_escrow_config_from_coord(settings)
 
-    assert out.escrow.leg2_rate_per_gb == "999999999999999999999"
-    assert out.escrow.synced_from_coord_at is None
+    # Coord rate clobbered the bootstrap value.
+    assert out.escrow.leg2_rate_per_gb == str(LEG2_RATE_WEI)
+    # Timestamp now stamped — so future syncs short-circuit.
+    assert out.escrow.synced_from_coord_at is not None
 
 
 # ---------------------------------------------------------------------------

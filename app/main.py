@@ -1544,31 +1544,49 @@ async def _run(
     # We do this BEFORE ``load_settings()`` builds the legacy ``Settings``
     # shape so the rate populated below is visible via ``s.NODE_RATE_PER_GB``
     # downstream (in ``_phase_register`` → ``_init_receipt_submitter``).
-    # When ``settings_override`` is supplied (GUI subprocess path, tests),
-    # we skip the sync entirely — the override is the source of truth.
-    if settings_override is None:
-        try:
-            from app.escrow_config_sync import sync_escrow_config_from_coord
-            from app.settings_loader import load_provider_settings, settings_path
-            s_path = settings_path()
-            v2_before = load_provider_settings()
-            had_stamp = bool(v2_before.escrow.synced_from_coord_at)
-            had_rate = bool(v2_before.escrow.leg2_rate_per_gb)
-            v2_after = sync_escrow_config_from_coord(v2_before)
-            # Persist only if the sync actually populated something new.
-            # ``sync_escrow_config_from_coord`` returns the same instance
-            # on the no-op paths; we detect a real change by comparing
-            # the relevant fields against the pre-sync snapshot.
-            now_has_stamp = bool(v2_after.escrow.synced_from_coord_at)
-            now_has_rate = bool(v2_after.escrow.leg2_rate_per_gb)
-            if (now_has_stamp and not had_stamp) or (now_has_rate and not had_rate):
-                v2_after.save(s_path)
-        except Exception:
-            # Never let escrow sync block the daemon. Logged inside the
-            # function for the expected error paths; a true blow-up here
-            # (e.g. settings.json gone read-only) gets swallowed with a
-            # warning so the rest of startup still happens.
-            logger.warning("escrow config sync failed unexpectedly — continuing", exc_info=True)
+    #
+    # The sync runs on EVERY launch, including the GUI path (which passes
+    # ``settings_override=load_settings()`` from a snapshot taken before
+    # this point).  Earlier versions skipped the sync when an override
+    # was supplied — that meant GUI users never re-synced, and the
+    # bootstrap rate from PRs #88 / #93 stayed stuck at 1e15 wei/GB
+    # forever.  After sync, if anything changed, we drop the stale
+    # override and re-load from disk so downstream code sees the synced
+    # values rather than the snapshot.
+    settings_changed_on_disk = False
+    try:
+        from app.escrow_config_sync import sync_escrow_config_from_coord
+        from app.settings_loader import load_provider_settings, settings_path
+        s_path = settings_path()
+        v2_before = load_provider_settings()
+        had_stamp = bool(v2_before.escrow.synced_from_coord_at)
+        had_rate = bool(v2_before.escrow.leg2_rate_per_gb)
+        rate_before = v2_before.escrow.leg2_rate_per_gb
+        v2_after = sync_escrow_config_from_coord(v2_before)
+        # Persist when the sync actually populated something new OR
+        # overwrote a stale rate (the test.97 backfill scenario).
+        now_has_stamp = bool(v2_after.escrow.synced_from_coord_at)
+        now_has_rate = bool(v2_after.escrow.leg2_rate_per_gb)
+        rate_changed = v2_after.escrow.leg2_rate_per_gb != rate_before
+        if (
+            (now_has_stamp and not had_stamp)
+            or (now_has_rate and not had_rate)
+            or rate_changed
+        ):
+            v2_after.save(s_path)
+            settings_changed_on_disk = True
+    except Exception:
+        # Never let escrow sync block the daemon. Logged inside the
+        # function for the expected error paths; a true blow-up here
+        # (e.g. settings.json gone read-only) gets swallowed with a
+        # warning so the rest of startup still happens.
+        logger.warning("escrow config sync failed unexpectedly — continuing", exc_info=True)
+
+    if settings_changed_on_disk and settings_override is not None:
+        # GUI passed us a stale snapshot. Disk state is now authoritative;
+        # reload so the rest of the boot uses the synced rate.
+        logger.info("escrow sync wrote new settings — reloading from disk")
+        settings_override = None
 
     s = settings_override or load_settings()
 

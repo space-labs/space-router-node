@@ -161,7 +161,6 @@ def load_provider_settings(directory: Path | None = None) -> Settings:
 _TEST_ESCROW_CONTRACT_ADDRESS = "0xC5740e4e9175301a24FB6d22bA184b8ec0762852"
 _TEST_ESCROW_CHAIN_RPC = "https://rpc.cc3-testnet.creditcoin.network"
 _TEST_ESCROW_CHAIN_ID = 102031
-_TEST_LEG2_RATE_PER_GB = "1000000000000000"
 
 
 def _backfill_test_escrow_in_place(s: Settings) -> bool:
@@ -176,10 +175,15 @@ def _backfill_test_escrow_in_place(s: Settings) -> bool:
     already has a contract address (operator-set or future mainnet
     configuration), nor non-test variants.
 
-    The receipt-submitter coord-TOFU sync (PR #76, c9aa6e8) will
-    overwrite ``leg2_rate_per_gb`` on the first /config call once the
-    submitter starts; the value here is a non-zero bootstrap so the
-    submitter actually runs.
+    NOTE: ``leg2_rate_per_gb`` is INTENTIONALLY not seeded here. The
+    daemon's TOFU sync (PR #76 + #94 fix) fetches the canonical rate
+    from the coord's /config endpoint at boot and overwrites whatever
+    is on disk. Pre-seeding a placeholder caused test.101's
+    SIGN_REJECTED_UNKNOWN_REQUEST regression — the bootstrap value
+    (1e15) was 500,000× too low vs the canonical 5e20 wei/GB. The
+    receipt submitter init gate (``NODE_RATE_PER_GB > 0``) will keep
+    the submitter idle until TOFU sync populates the rate, which is
+    the safe behavior when the coord is unreachable.
     """
     bv = (s.build_variant or "").lower()
     if bv != "test":
@@ -192,6 +196,4 @@ def _backfill_test_escrow_in_place(s: Settings) -> bool:
     s.escrow.contract_address = _TEST_ESCROW_CONTRACT_ADDRESS
     s.escrow.chain_rpc = _TEST_ESCROW_CHAIN_RPC
     s.escrow.chain_id = _TEST_ESCROW_CHAIN_ID
-    if not s.escrow.leg2_rate_per_gb:
-        s.escrow.leg2_rate_per_gb = _TEST_LEG2_RATE_PER_GB
     return True

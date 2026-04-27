@@ -156,10 +156,12 @@ class TestEscrowDefaults:
         assert "testnet.creditcoin.network" in cs._DEFAULTS["SR_ESCROW_CHAIN_RPC"]
         assert cs._DEFAULTS["SR_ESCROW_CHAIN_ID"] == "102031"
         # test.95 receipt-bug fix: escrow must be ON by default on test
-        # builds, with a non-zero leg2 rate so the receipt submitter
-        # actually starts. Coord TOFU sync overwrites the rate later.
+        # builds. The leg2 rate is NOT pre-seeded — the canonical rate
+        # comes from the gateway's /config endpoint via TOFU sync at
+        # boot. Pre-seeding caused test.101's SIGN_REJECTED_UNKNOWN_REQUEST
+        # regression. See PR #94.
         assert cs._DEFAULTS["SR_PAYMENT_ENABLED"] == "true"
-        assert cs._DEFAULTS["SR_NODE_RATE_PER_GB"] == "1000000000000000"
+        assert "SR_NODE_RATE_PER_GB" not in cs._DEFAULTS
 
     def test_prod_variant_leaves_escrow_empty(self, monkeypatch):
         """Prod keeps the fields empty so operators configure them at
@@ -178,7 +180,8 @@ class TestEscrowDefaults:
         # Prod stays opt-in until mainnet escrow is rolled out — operators
         # must explicitly flip the flag for now.
         assert cs._DEFAULTS["SR_PAYMENT_ENABLED"] == "false"
-        assert cs._DEFAULTS["SR_NODE_RATE_PER_GB"] == ""
+        # Same as test variant: rate comes from coord, not from defaults.
+        assert "SR_NODE_RATE_PER_GB" not in cs._DEFAULTS
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +248,8 @@ class TestFreshRestartPreservesEscrow:
         assert data["escrow"]["contract_address"].lower().startswith("0xc5740e4e")
         assert "testnet.creditcoin.network" in data["escrow"]["chain_rpc"]
         assert data["escrow"]["chain_id"] == 102031
-        assert data["escrow"]["leg2_rate_per_gb"] == "1000000000000000"
+        # Rate is left null after reset; TOFU sync at boot fills it.
+        assert data["escrow"]["leg2_rate_per_gb"] is None
 
     def test_reset_does_not_force_escrow_on_prod_variant(self, monkeypatch, tmp_path):
         """Prod must NOT auto-opt-into escrow until mainnet rollout —

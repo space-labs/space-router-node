@@ -37,10 +37,6 @@ _STAGING_URL = "https://spacerouter-coordination-api-staging.fly.dev"
 _TEST_ESCROW_CONTRACT = "0xC5740e4e9175301a24FB6d22bA184b8ec0762852"
 _TEST_ESCROW_CHAIN_RPC = "https://rpc.cc3-testnet.creditcoin.network"
 _TEST_ESCROW_CHAIN_ID = "102031"
-# Bootstrap value so the receipt submitter has a non-zero rate at first
-# boot and starts. Provider's coord TOFU sync (PR #76, c9aa6e8) overwrites
-# this with the gateway-canonical rate on the first /config call.
-_TEST_LEG2_RATE_PER_GB = "1000000000000000"
 
 # Pre-configured environments for easy switching (test builds only)
 ENVIRONMENTS = {
@@ -93,10 +89,6 @@ def _default_payment_enabled() -> str:
     return "true" if BUILD_VARIANT == "test" else "false"
 
 
-def _default_leg2_rate_per_gb() -> str:
-    return _TEST_LEG2_RATE_PER_GB if BUILD_VARIANT == "test" else ""
-
-
 _DEFAULTS = {
     "SR_COORDINATION_API_URL": _default_coordination_url(),
     "SR_STAKING_ADDRESS": "",
@@ -112,8 +104,13 @@ _DEFAULTS = {
     # Escrow settings — test variant ships with testnet defaults so QA
     # never has to hand-edit; Fresh Restart preserves them because they
     # live in _DEFAULTS now. Prod leaves them empty (operator-configured).
+    # NOTE: leg2_rate_per_gb is INTENTIONALLY not seeded here. The
+    # canonical rate lives on the gateway's /config endpoint; the daemon's
+    # TOFU sync at boot fetches it. Pre-seeding a placeholder rate
+    # caused test.101's SIGN_REJECTED_UNKNOWN_REQUEST regression — the
+    # bootstrap value (1e15) was 500,000× too low vs the gateway's
+    # canonical 5e20 wei/GB.
     "SR_PAYMENT_ENABLED": _default_payment_enabled(),
-    "SR_NODE_RATE_PER_GB": _default_leg2_rate_per_gb(),
     "SR_ESCROW_CONTRACT_ADDRESS": _default_escrow_contract(),
     "SR_ESCROW_CHAIN_RPC": _default_escrow_chain_rpc(),
     "SR_ESCROW_CHAIN_ID": _default_escrow_chain_id(),

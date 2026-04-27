@@ -51,7 +51,9 @@ def test_backfills_unconfigured_test_variant(tmp_path):
     assert s.escrow.contract_address.lower().startswith("0xc5740e4e")
     assert "testnet.creditcoin.network" in s.escrow.chain_rpc
     assert s.escrow.chain_id == 102031
-    assert s.escrow.leg2_rate_per_gb == "1000000000000000"
+    # leg2_rate_per_gb is left null on backfill — TOFU sync at boot
+    # is the authoritative source. See PR #94 (TOFU rate sync fix).
+    assert s.escrow.leg2_rate_per_gb is None
 
 
 def test_backfill_persists_to_disk(tmp_path):
@@ -112,10 +114,12 @@ def test_helper_idempotent_on_already_backfilled(tmp_path):
     assert _backfill_test_escrow_in_place(s) is False
 
 
-def test_helper_skips_when_leg2_rate_already_set(tmp_path):
-    """If only the rate is set (e.g. operator partially-configured the
-    section without a contract), we still backfill the missing
-    contract address but preserve their rate."""
+def test_helper_preserves_existing_rate_when_present(tmp_path):
+    """If the operator has set a rate (e.g. via env-var seed or hand-edit),
+    backfill leaves it alone and just fills in the contract addresses.
+    The TOFU sync (settings_loader -> escrow_config_sync) is what
+    decides whether to override it later.
+    """
     s = Settings(build_variant="test")
     s.escrow.leg2_rate_per_gb = "999"
     assert _backfill_test_escrow_in_place(s) is True

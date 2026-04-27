@@ -73,20 +73,17 @@ def sync_escrow_config_from_coord(settings_v2: Settings) -> Settings:
         )
         return settings_v2
 
-    # If the rate is set without a sync timestamp it came from one of:
-    # (a) the operator hand-edited settings.json,
-    # (b) an env-var seed (SR_NODE_RATE_PER_GB on a v1.4 .deb upgrade),
-    # (c) the wizard wrote it but didn't stamp the timestamp.
-    # We can't tell which from here, so we conservatively keep the
-    # local value rather than clobbering an operator-set rate. Logged
-    # at DEBUG — the previous "operator-pinned" wording at INFO was
-    # confusing in case (b) where the operator never pinned anything.
-    if escrow.leg2_rate_per_gb and not escrow.synced_from_coord_at:
-        logger.debug(
-            "escrow.leg2_rate_per_gb is set without sync timestamp — "
-            "keeping local value, skipping coord sync",
-        )
-        return settings_v2
+    # We previously skipped sync when the rate was set without a sync
+    # timestamp on the heuristic that the operator (or a v1.4 env-var
+    # seed) had pinned it.  In practice that branch trapped both the
+    # test.97 backfill (PR #93) and any future install path that
+    # bootstraps a placeholder rate before TOFU completes — the local
+    # rate stayed at the bootstrap value (1e15) while the gateway's
+    # canonical Leg 2 rate is 500 SPACE/GB (5e20), and every receipt
+    # got rejected as SIGN_REJECTED_UNKNOWN_REQUEST.  The coord is the
+    # canonical source for the rate; if a real operator wants to pin a
+    # different value they should also set ``synced_from_coord_at``
+    # (e.g. by editing both fields in settings.json).
 
     coord_url = (settings_v2.coordination.url or "").rstrip("/")
     if not coord_url:
@@ -142,30 +139,42 @@ def sync_escrow_config_from_coord(settings_v2: Settings) -> Settings:
                 "escrow config sync: coord returned empty/missing gatewayPayerAddress — skipping",
             )
 
-    # leg2_rate_per_gb — only set if currently empty AND coord gave a non-zero value.
-    if not escrow.leg2_rate_per_gb:
-        if raw_rate is None:
+    # leg2_rate_per_gb — apply coord's value whenever we got past the
+    # early-skip (which only fires when BOTH timestamp AND rate are
+    # already set). Reaching here means at least one of the two is
+    # missing, so the coord's value is authoritative. This also covers
+    # the test.97 backfill scenario: rate=1e15 (bootstrap stale value),
+    # timestamp=null → must be overridden.
+    if raw_rate is None:
+        logger.warning(
+            "escrow config sync: coord response is missing gatewayLeg2RatePerGb — skipping",
+        )
+    else:
+        try:
+            rate_int = int(raw_rate)
+        except (TypeError, ValueError):
             logger.warning(
-                "escrow config sync: coord response is missing gatewayLeg2RatePerGb — skipping",
+                "escrow config sync: coord returned non-integer "
+                "gatewayLeg2RatePerGb=%r — skipping",
+                raw_rate,
             )
         else:
-            try:
-                rate_int = int(raw_rate)
-            except (TypeError, ValueError):
+            if rate_int <= 0:
                 logger.warning(
-                    "escrow config sync: coord returned non-integer "
-                    "gatewayLeg2RatePerGb=%r — skipping",
-                    raw_rate,
+                    "escrow config sync: coord returned gatewayLeg2RatePerGb=%d "
+                    "(treated as not-yet-configured) — skipping",
+                    rate_int,
                 )
             else:
-                if rate_int <= 0:
-                    logger.warning(
-                        "escrow config sync: coord returned gatewayLeg2RatePerGb=%d "
-                        "(treated as not-yet-configured) — skipping",
-                        rate_int,
-                    )
-                else:
-                    escrow.leg2_rate_per_gb = str(rate_int)
+                old_rate = escrow.leg2_rate_per_gb
+                new_rate_str = str(rate_int)
+                if old_rate != new_rate_str:
+                    if old_rate:
+                        logger.info(
+                            "escrow config sync: overriding stale leg2_rate_per_gb=%s with coord value %s",
+                            old_rate, new_rate_str,
+                        )
+                    escrow.leg2_rate_per_gb = new_rate_str
                     rate_applied = True
 
     # Stamp the timestamp only if we actually wrote something. If neither
