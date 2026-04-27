@@ -213,6 +213,37 @@ def _run_async(coro):
         loop.close()
 
 
+def _claim_wallet_address(settings) -> str | None:
+    """Best-effort lookup of the identity wallet that broadcasts claimBatch.
+
+    Returns a checksummed 0x... address, or None if the keystore is
+    encrypted (and we don't have the passphrase) or the file is missing.
+    Never raises — the receipts_summary status poll fires every ~10s
+    and any noise here would dominate the log.
+
+    The identity wallet is auto-derived from
+    ``~/.spacerouter/certs/node-identity.key``; users have no obvious
+    way to discover it without us surfacing it. test.105's
+    "Claim All silently failed" was caused by that wallet having 0 CTC
+    for gas and the user not knowing where to send funds.
+    """
+    try:
+        from app.identity import (
+            load_or_create_identity,
+            KeystorePassphraseRequired,
+        )
+        _, address = load_or_create_identity(
+            settings.IDENTITY_KEY_PATH,
+            settings.IDENTITY_PASSPHRASE,
+        )
+        return address
+    except KeystorePassphraseRequired:
+        return None
+    except Exception:  # noqa: BLE001
+        logger.debug("claim wallet address lookup failed", exc_info=True)
+        return None
+
+
 class Api:
     """Methods callable from JavaScript via ``window.pywebview.api.<method>()``."""
 
@@ -520,6 +551,11 @@ class Api:
                 settings.ESCROW_CHAIN_RPC
                 and settings.ESCROW_CONTRACT_ADDRESS
             ),
+            # Claim transactions are broadcast from the identity key's
+            # address. Surface it here so the GUI can render a "send
+            # CTC here for gas" hint — the test.105 flow surfaced that
+            # users have no obvious way to discover this address.
+            "claim_wallet_address": _claim_wallet_address(settings),
         }
 
     def receipts_list(
@@ -551,6 +587,7 @@ class Api:
                 "view": view,
                 "summary": dict(self._ZERO_SUMMARY),
                 "receipts": [],
+                "claim_wallet_address": _claim_wallet_address(settings),
             }
         except Exception as exc:
             logger.exception("receipts_list failed")
@@ -561,6 +598,7 @@ class Api:
             "view": view,
             "summary": summary,
             "receipts": [_receipt_to_json(sr) for sr in rows],
+            "claim_wallet_address": _claim_wallet_address(settings),
         }
 
     def receipts_detail(self, request_uuid: str) -> dict:
@@ -593,6 +631,25 @@ class Api:
         _claim_tasks.gc()
         try:
             task_id = _claim_tasks.start(lambda: _claim_runner(None, False))
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "task_id": task_id}
+
+    def receipts_retry_all(self) -> dict:
+        """Retry every failed_retryable + claimable receipt in one batched run.
+
+        Replaces the per-row ``receipts_retry(uuid)`` flow that used to
+        emit one ``claimBatch`` tx per receipt — wasteful and the cause
+        of the test.105 "5 separate retry txs" UX bug. The settlement
+        layer chunks the queue into ``CLAIM_BATCH_SIZE`` (default 50)
+        groups internally, so a single user click here results in one
+        chain tx for up to 50 receipts at a time.
+        """
+        _claim_tasks.gc()
+        try:
+            task_id = _claim_tasks.start(
+                lambda: _claim_runner(None, True),
+            )
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "task_id": task_id}

@@ -69,6 +69,30 @@ def _load_abi() -> list[dict]:
     return data  # already a flat list
 
 
+def _is_insufficient_funds_error(exc: BaseException) -> bool:
+    """Sniff a web3 broadcast exception for "wallet has no CTC for gas".
+
+    The CC3 testnet RPC returns this as a JSON-RPC error with code -32603
+    and message ``insufficient funds for gas * price + value``. Other
+    EVM RPCs use slight phrasing variants (``insufficient funds for
+    intrinsic transaction cost``, ``gas required exceeds allowance``,
+    etc.). We match on the canonical "insufficient funds" substring
+    case-insensitive — narrow enough to not catch unrelated errors,
+    broad enough to survive minor phrasing changes.
+    """
+    text = str(exc).lower()
+    if "insufficient funds" in text:
+        return True
+    # web3.py wraps some errors in a dict on .args[0]
+    args = getattr(exc, "args", ())
+    for a in args:
+        if isinstance(a, dict):
+            msg = str(a.get("message", "")).lower()
+            if "insufficient funds" in msg:
+                return True
+    return False
+
+
 def _to_contract_tuple(sr: StoredReceipt) -> tuple:
     """Convert a StoredReceipt to the tuple format the contract expects."""
     r = sr.receipt
@@ -146,9 +170,15 @@ async def claim_all(
 
         result = await _submit_batch(settings, settlement_key, batch, store)
         results.append(result)
-        # Only RPC-unreachable stops the whole run — every other failure
-        # (revert, timeout) is a per-batch outcome and we continue.
-        if result.reason_code == reasons.CLAIM_RPC_UNREACHABLE:
+        # RPC-unreachable AND insufficient-gas stop the whole run —
+        # the next batch would just hit the same condition and we'd
+        # spam every receipt's last_error_code with the same noise.
+        # Every other failure (revert, timeout) is a per-batch outcome
+        # and we continue.
+        if result.reason_code in (
+            reasons.CLAIM_RPC_UNREACHABLE,
+            reasons.CLAIM_INSUFFICIENT_GAS,
+        ):
             break
 
     return results
@@ -433,10 +463,19 @@ async def _submit_batch(
         try:
             tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
         except Exception as e:
+            error_text = f"broadcast failed: {e}"
+            # Distinguish "wallet has no CTC for gas" from generic RPC
+            # failures — the resolution is operator-actionable (fund the
+            # identity wallet) and should not look like a transient
+            # network blip in the GUI.
+            if _is_insufficient_funds_error(e):
+                code = reasons.CLAIM_INSUFFICIENT_GAS
+            else:
+                code = reasons.CLAIM_RPC_UNREACHABLE
             return ClaimResult(
                 submitted=len(kept_batch), tx_hash=None, gas_used=None,
-                error=f"broadcast failed: {e}",
-                reason_code=reasons.CLAIM_RPC_UNREACHABLE,
+                error=error_text,
+                reason_code=code,
                 sig_verify_dropped=len(dropped_uuids),
             )
 

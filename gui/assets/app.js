@@ -1763,6 +1763,34 @@ async function refreshReceipts() {
   $("#receipts-retryable-card").style.display = retryable.length ? "block" : "none";
   $("#receipts-retryable-title").textContent =
     "Needs attention · " + retryable.length;
+
+  // Surface a hint above the list if any failed_retryable receipt has
+  // CLAIM_INSUFFICIENT_GAS as its last error — the operator action is
+  // "send CTC to the claim wallet" rather than just "click retry".
+  const hint = $("#receipts-retryable-hint");
+  const gasFailed = retryable.some(
+    (r) => r.last_error_code === "CLAIM_INSUFFICIENT_GAS",
+  );
+  if (gasFailed) {
+    hint.textContent =
+      "Identity wallet has no CTC for gas. Send CTC to the claim wallet " +
+      "shown above, then click Retry all.";
+    hint.style.display = "block";
+  } else {
+    hint.style.display = "none";
+  }
+
+  // Claim wallet — surface the auto-derived identity address so the
+  // operator can fund it for gas. Hidden when we couldn't read the
+  // keystore (encrypted + no passphrase).
+  const claimWallet = resp.claim_wallet_address || null;
+  if (claimWallet) {
+    $("#claim-wallet-address").textContent = claimWallet;
+    $("#claim-wallet-card").style.display = "block";
+  } else {
+    $("#claim-wallet-card").style.display = "none";
+  }
+
   $("#receipts-pending-card").style.display = pending.length ? "block" : "none";
   $("#receipts-locked-card").style.display = locked.length ? "block" : "none";
   $("#receipts-history-card").style.display = history.length ? "block" : "none";
@@ -1905,14 +1933,12 @@ function renderRowList(containerId, rows, view) {
     const actions = document.createElement("div");
     actions.className = "receipt-actions";
 
-    if (view === "failed_retryable") {
-      const retryBtn = document.createElement("button");
-      retryBtn.className = "btn-ghost";
-      retryBtn.textContent = "Retry";
-      retryBtn.disabled = !!currentClaimTaskId;
-      retryBtn.addEventListener("click", () => onRetryRow(r.request_uuid));
-      actions.appendChild(retryBtn);
-    }
+    // Per-row Retry buttons were removed in favor of a single
+    // "Retry All" at the top of the failed-retryable card. Each
+    // per-row click used to fire its own claimBatch tx (one receipt
+    // per tx), wasting gas and causing the test.105 "5 separate retry
+    // txs" bug. The batched retry chunks up to CLAIM_BATCH_SIZE (50)
+    // receipts into a single tx.
 
     const detailBtn = document.createElement("button");
     detailBtn.className = "btn-text-subtle";
@@ -1952,27 +1978,40 @@ async function onClaimAll() {
   pollClaimTask(resp.task_id);
 }
 
-async function onRetryRow(uuid) {
+async function onRetryAll() {
   if (currentClaimTaskId) return;
+  const btn = $("#btn-retry-all");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Retrying...";
+  }
   let resp;
   try {
-    resp = await window.pywebview.api.receipts_retry(uuid);
+    resp = await window.pywebview.api.receipts_retry_all();
   } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = "Retry all"; }
     showToast("Retry failed: " + e, "error");
     return;
   }
   if (!resp.ok) {
+    if (btn) { btn.disabled = false; btn.textContent = "Retry all"; }
     showToast("Retry failed: " + resp.error, "error");
-    return;
-  }
-  if (resp.noop) {
-    showToast("Nothing to retry (" + resp.reason + ")", "warn");
-    refreshReceipts();
     return;
   }
   currentClaimTaskId = resp.task_id;
   refreshReceipts();
   pollClaimTask(resp.task_id);
+}
+
+async function onCopyClaimWallet() {
+  const addr = $("#claim-wallet-address").textContent;
+  if (!addr || addr === "—") return;
+  try {
+    await navigator.clipboard.writeText(addr);
+    showToast("Copied: " + addr, "info");
+  } catch (e) {
+    showToast("Copy failed: " + e, "error");
+  }
 }
 
 async function pollClaimTask(taskId) {
@@ -2157,6 +2196,12 @@ function initReceiptsScreen() {
 
   const claimBtn = $("#btn-claim-all");
   if (claimBtn) claimBtn.addEventListener("click", onClaimAll);
+
+  const retryAllBtn = $("#btn-retry-all");
+  if (retryAllBtn) retryAllBtn.addEventListener("click", onRetryAll);
+
+  const copyClaimBtn = $("#btn-copy-claim-wallet");
+  if (copyClaimBtn) copyClaimBtn.addEventListener("click", onCopyClaimWallet);
 
   const closeDetailBtn = $("#btn-receipt-detail-close");
   if (closeDetailBtn) closeDetailBtn.addEventListener("click", hideReceiptDetail);

@@ -45,6 +45,12 @@ CLAIM_REVERTED = "CLAIM_REVERTED"
 CLAIM_RPC_UNREACHABLE = "CLAIM_RPC_UNREACHABLE"
 CLAIM_TX_TIMEOUT = "CLAIM_TX_TIMEOUT"
 CLAIM_NONCE_ALREADY_USED = "CLAIM_NONCE_ALREADY_USED"
+# Identity wallet (the broadcaster of claimBatch) has no CTC for gas.
+# Surfaced separately from CLAIM_RPC_UNREACHABLE because the resolution
+# is operator-actionable: send CTC to the wallet shown in Earnings.
+# Treated as transient (counts_against_retry_budget=False) so receipts
+# stay retryable until the wallet is funded.
+CLAIM_INSUFFICIENT_GAS = "CLAIM_INSUFFICIENT_GAS"
 
 SIGN_CODES = frozenset({
     SIGN_REJECTED_UNREGISTERED_NODE,
@@ -64,6 +70,7 @@ CLAIM_CODES = frozenset({
     CLAIM_RPC_UNREACHABLE,
     CLAIM_TX_TIMEOUT,
     CLAIM_NONCE_ALREADY_USED,
+    CLAIM_INSUFFICIENT_GAS,
 })
 
 ALL_CODES = SIGN_CODES | CLAIM_CODES
@@ -105,6 +112,9 @@ MESSAGES: dict[str, str] = {
         "The claim transaction took longer than expected to confirm.",
     CLAIM_NONCE_ALREADY_USED:
         "This receipt was already settled on-chain — no further action needed.",
+    CLAIM_INSUFFICIENT_GAS:
+        "Identity wallet has no CTC for gas. Send CTC to the wallet shown "
+        "in Earnings, then retry — receipts stay queued until funded.",
 }
 
 
@@ -135,6 +145,10 @@ TRANSIENT_CODES = frozenset({
     SIGN_REJECTED_CLOCK_SKEW,  # fix NTP, receipt will be retried on next tick
     CLAIM_RPC_UNREACHABLE,
     CLAIM_TX_TIMEOUT,
+    # Operator-actionable: fund the identity wallet with CTC. Receipts
+    # remain retryable indefinitely so they pick up on the next claim
+    # cycle once the wallet has gas.
+    CLAIM_INSUFFICIENT_GAS,
 })
 
 

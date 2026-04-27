@@ -389,6 +389,21 @@
         <h2>Earnings</h2>
       </div>
 
+      <!-- Claim wallet hint — surfaces the auto-derived identity wallet
+           that broadcasts claimBatch(). Users have no other obvious way
+           to discover this address; needs CTC for gas. -->
+      <div id="claim-wallet-card" class="status-card" style="display: none;">
+        <p class="receipts-section-title">Claim wallet</p>
+        <p class="claim-wallet-hint">
+          On-chain claims are sent from this wallet. Send a small amount
+          of CTC to it for gas — receipts won't settle until it's funded.
+        </p>
+        <div class="claim-wallet-row">
+          <code id="claim-wallet-address" class="claim-wallet-addr">—</code>
+          <button id="btn-copy-claim-wallet" class="btn-ghost btn-small">Copy</button>
+        </div>
+      </div>
+
       <!-- Claimable section -->
       <div id="receipts-claimable-card" class="status-card" style="display: none;">
         <p class="receipt-claim-summary">
@@ -401,7 +416,11 @@
 
       <!-- Needs attention section -->
       <div id="receipts-retryable-card" class="status-card" style="display: none;">
-        <p class="receipts-section-title" id="receipts-retryable-title">Needs attention</p>
+        <div class="receipts-retryable-header">
+          <p class="receipts-section-title" id="receipts-retryable-title">Needs attention</p>
+          <button id="btn-retry-all" class="btn-ghost">Retry all</button>
+        </div>
+        <p id="receipts-retryable-hint" class="receipts-hint" style="display: none;"></p>
         <div id="receipts-retryable-list"></div>
       </div>
 
