@@ -403,7 +403,27 @@ class TestLoader:
                 monkeypatch.delenv(key, raising=False)
 
         s = load_provider_settings(directory=tmp_path)
-        assert s == Settings()
+
+        # Cold-start preserves Settings() defaults EXCEPT for the test-
+        # variant escrow backfill (added in the test.95 -> test.97
+        # in-place upgrade fix; same path is used at cold-start so a
+        # CLI-only user on test variant gets escrow enabled by default
+        # without a separate onboarding step). Compare every field
+        # except the backfilled escrow section.
+        bare = Settings()
+        assert s.schema_version == bare.schema_version
+        assert s.build_variant == bare.build_variant
+        assert s.node == bare.node
+        assert s.wallet == bare.wallet
+        assert s.coordination == bare.coordination
+        assert s.claim == bare.claim
+        assert s.receipts == bare.receipts
+        if s.build_variant == "test":
+            # Backfilled — assert the testnet contract addrs are present.
+            assert s.escrow.enabled is True
+            assert s.escrow.contract_address.lower().startswith("0xc5740e4e")
+        else:
+            assert s.escrow == bare.escrow
 
 
 # ── Field validators ─────────────────────────────────────────────────
