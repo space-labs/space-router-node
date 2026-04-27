@@ -840,6 +840,12 @@ class ReceiptStore:
         if where is None:
             raise ValueError(f"unknown view: {view!r}")
 
+        # Lazy-init: GUI may call this before the submitter has had a
+        # chance to bootstrap the schema (e.g. when escrow.enabled was
+        # left false on test.95 but the Earnings card still polls). The
+        # check is idempotent — see initialize() for the short-circuit.
+        await self.initialize()
+
         def _do() -> list[StoredReceipt]:
             with self._connect() as conn:
                 rows = conn.execute(
@@ -857,6 +863,8 @@ class ReceiptStore:
         return await asyncio.to_thread(_do)
 
     async def get_by_uuid(self, request_uuid: str) -> StoredReceipt | None:
+        await self.initialize()
+
         def _do() -> StoredReceipt | None:
             with self._connect() as conn:
                 row = conn.execute(
@@ -870,6 +878,8 @@ class ReceiptStore:
 
     async def summary(self) -> dict:
         """Counts and total-price-sum per view — cheap single-query rollup."""
+        await self.initialize()
+
         def _do() -> dict:
             with self._connect() as conn:
                 row = conn.execute(
@@ -915,6 +925,7 @@ class ReceiptStore:
         — used by the reaper's reorg-reconciliation pass. Excludes rows
         with the synthetic ``tx_hash="external"`` (already reconciled).
         """
+        await self.initialize()
         cutoff = int(time.time()) - int(younger_than_seconds)
 
         def _do() -> list[StoredReceipt]:
