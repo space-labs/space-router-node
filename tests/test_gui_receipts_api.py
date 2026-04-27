@@ -186,6 +186,65 @@ def test_receipts_detail_not_found(api_with_store):
     assert resp["error"] == "not_found"
 
 
+def test_receipts_summary_returns_zero_summary_on_uninitialized_store(api_with_store, monkeypatch, caplog):
+    """Defense-in-depth: if the receipt store can't be opened (e.g. a
+    fresh test build with escrow disabled never bootstrapped the
+    schema), receipts_summary returns zero-counts instead of raising
+    {ok: False, error: ...} every status-poll tick. test.95 spammed
+    the daemon log with stack traces every 10s; this is the floor.
+    """
+    import sqlite3
+    api, _, _ = api_with_store
+
+    def _raise(*a, **kw):
+        raise sqlite3.OperationalError("no such table: signed_receipts")
+
+    monkeypatch.setattr(
+        "app.payment.receipt_store.ReceiptStore.summary", _raise,
+    )
+
+    resp = api.receipts_summary()
+    assert resp["ok"] is True
+    assert resp["summary"]["claimed"] == 0
+    assert resp["summary"]["claimable_total_price"] == 0
+    # No traceback should have been logged at ERROR level — only DEBUG.
+    error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert not error_records, [r.getMessage() for r in error_records]
+
+
+def test_receipts_list_returns_empty_on_uninitialized_store(api_with_store, monkeypatch):
+    import sqlite3
+    api, _, _ = api_with_store
+
+    def _raise(*a, **kw):
+        raise sqlite3.OperationalError("no such table: signed_receipts")
+
+    monkeypatch.setattr(
+        "app.payment.receipt_store.ReceiptStore.list_by_view", _raise,
+    )
+
+    resp = api.receipts_list(view="all")
+    assert resp["ok"] is True
+    assert resp["receipts"] == []
+    assert resp["summary"]["claimed"] == 0
+
+
+def test_receipts_summary_unexpected_error_still_returns_ok_false(api_with_store, monkeypatch):
+    """Non-OperationalError surfaces normally so true bugs aren't masked."""
+    api, _, _ = api_with_store
+
+    def _raise(*a, **kw):
+        raise RuntimeError("unexpected boom")
+
+    monkeypatch.setattr(
+        "app.payment.receipt_store.ReceiptStore.summary", _raise,
+    )
+
+    resp = api.receipts_summary()
+    assert resp["ok"] is False
+    assert "unexpected boom" in resp["error"]
+
+
 def test_receipts_retry_on_locked_is_noop(api_with_store):
     api, db, _ = api_with_store
     seeded = _seed_sync(db)

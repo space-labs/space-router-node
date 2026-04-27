@@ -461,6 +461,15 @@ class Api:
 
     # ── Leg 2 receipts / earnings ──────────────────────────────────
 
+    _ZERO_SUMMARY = {
+        "claimed": 0,
+        "failed_terminal": 0,
+        "claimable": 0,
+        "failed_retryable": 0,
+        "pending_sign": 0,
+        "claimable_total_price": 0,
+    }
+
     def receipts_summary(self) -> dict:
         """Cheap counts + claimable SPACE total. Called on status poll.
 
@@ -468,6 +477,7 @@ class Api:
         the raw per-view counts and ``escrow_configured`` tells the UI
         whether claim actions are available.
         """
+        import sqlite3
         from app.main import load_settings
         from app.payment.receipt_store import get_store
 
@@ -483,6 +493,16 @@ class Api:
 
         try:
             summary = _run_async(_go())
+        except sqlite3.OperationalError as exc:
+            # Receipt store hasn't been bootstrapped yet (e.g. escrow
+            # disabled at startup, fresh-install pre-first-receipt).
+            # Status poll fires every ~10s — quietly return zeros instead
+            # of spamming the log with stack traces. test.95 shipped
+            # without lazy-init and the GUI Earnings card emitted a
+            # full traceback per probe tick. PR 2 lazy-inits the store;
+            # this is the defense-in-depth catch for any residual case.
+            logger.debug("receipts_summary: store not initialized (%s) — returning zeros", exc)
+            summary = dict(self._ZERO_SUMMARY)
         except Exception as exc:
             logger.exception("receipts_summary failed")
             return {"ok": False, "error": str(exc)}
@@ -499,6 +519,7 @@ class Api:
     def receipts_list(
         self, view: str = "all", limit: int = 100, offset: int = 0,
     ) -> dict:
+        import sqlite3
         from app.main import load_settings, _receipt_to_json
         from app.payment.receipt_store import get_store
 
@@ -517,6 +538,14 @@ class Api:
             summary, rows = _run_async(_go())
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
+        except sqlite3.OperationalError as exc:
+            logger.debug("receipts_list: store not initialized (%s) — returning empty", exc)
+            return {
+                "ok": True,
+                "view": view,
+                "summary": dict(self._ZERO_SUMMARY),
+                "receipts": [],
+            }
         except Exception as exc:
             logger.exception("receipts_list failed")
             return {"ok": False, "error": str(exc)}
