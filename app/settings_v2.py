@@ -32,6 +32,23 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
+# SR_* env vars that earlier versions of the daemon read but v1.5 no
+# longer needs. We log these at DEBUG instead of INFO so a v1.4 → v1.5
+# .deb upgrade doesn't paper its journal with "unknown key" warnings
+# for benign carry-over values. Add new entries here when retiring an
+# env var so the operator's spacerouter.env doesn't need pruning by
+# hand. See Phase A finding #4.
+_DEPRECATED_ENV_KEYS: frozenset[str] = frozenset({
+    # macOS Node-ID rotation fix (PR #68): variant now lives in
+    # settings.json, not the environment.
+    "SR_BUILD_VARIANT",
+    # Receipt store path is derived from config_dir() now; the override
+    # was always advisory and is no longer honoured.
+    "SR_RECEIPT_STORE_PATH",
+    # Pre-v1.5 development variant flag.
+    "SR_API_VARIANT",
+})
+
 
 class _Section(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -357,7 +374,14 @@ class Settings(BaseModel):
             node["referral_code"] = v
 
         # ── wallet ───────────────────────────────────────────────────
+        # Accept SR_WALLET_ADDRESS as a back-compat alias for
+        # SR_STAKING_ADDRESS — v1.4 .deb / .rpm installs ship that name
+        # in /etc/spacerouter/spacerouter.env and we want apt upgrade
+        # to "just work" without the operator hand-editing the file.
+        # Mirrors the AliasChoices pair already wired up in app/config.py.
         if (v := take("SR_STAKING_ADDRESS")) is not None:
+            wallet["staking_address"] = v
+        elif (v := take("SR_WALLET_ADDRESS")) is not None:
             wallet["staking_address"] = v
         if (v := take("SR_COLLECTION_ADDRESS")) is not None:
             wallet["collection_address"] = v
@@ -420,9 +444,22 @@ class Settings(BaseModel):
                 logger.info("ignoring non-integer SR_RECEIPT_MAX_CLAIM_ATTEMPTS=%r", v)
 
         # ── unknown-key sweep ────────────────────────────────────────
+        # Known-deprecated keys log at DEBUG (no longer noise on every
+        # upgrade), truly-unrecognised keys stay at INFO so a typo in a
+        # hand-edited env file is still visible. The old single-line
+        # "ignoring unknown key X" was alarming enough that real users
+        # mistook benign migration leftovers for a config problem
+        # (Phase A finding #4).
         unknown = [k for k in env if k.startswith("SR_") and k not in consumed]
         for k in unknown:
-            logger.info("settings migration: ignoring unknown key %s", k)
+            if k in _DEPRECATED_ENV_KEYS:
+                logger.debug("settings: dropping deprecated env key %s (no longer used)", k)
+            else:
+                logger.info(
+                    "settings: ignoring unrecognised env key %s "
+                    "(typo, or moved to settings.json)",
+                    k,
+                )
 
         kwargs: dict[str, Any] = {}
         if build_variant is not None:

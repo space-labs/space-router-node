@@ -73,12 +73,18 @@ def sync_escrow_config_from_coord(settings_v2: Settings) -> Settings:
         )
         return settings_v2
 
-    # Defensive: if the rate is set but the timestamp is missing, assume
-    # the operator pinned it manually. Don't clobber.
+    # If the rate is set without a sync timestamp it came from one of:
+    # (a) the operator hand-edited settings.json,
+    # (b) an env-var seed (SR_NODE_RATE_PER_GB on a v1.4 .deb upgrade),
+    # (c) the wizard wrote it but didn't stamp the timestamp.
+    # We can't tell which from here, so we conservatively keep the
+    # local value rather than clobbering an operator-set rate. Logged
+    # at DEBUG — the previous "operator-pinned" wording at INFO was
+    # confusing in case (b) where the operator never pinned anything.
     if escrow.leg2_rate_per_gb and not escrow.synced_from_coord_at:
-        logger.info(
+        logger.debug(
             "escrow.leg2_rate_per_gb is set without sync timestamp — "
-            "assuming operator-pinned, skipping coord sync",
+            "keeping local value, skipping coord sync",
         )
         return settings_v2
 

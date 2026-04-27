@@ -195,6 +195,23 @@ jobs:
           chmod +x dist/SpaceRouter.app/Contents/MacOS/space-router-node
           ls -la dist/SpaceRouter.app/Contents/MacOS/
 
+      # PyInstaller's per-component ad-hoc signatures invalidate the .app
+      # bundle's outer seal once we drop in the embedded CLI binary above
+      # — `codesign --verify --deep` reports the bundle as broken, which
+      # makes Gatekeeper block first-launch even on test builds where we
+      # accept that the bundle isn't notarized.  Re-sign the whole bundle
+      # ad-hoc so the seal is consistent again. AppTranslocation will
+      # still occur on first launch (test builds aren't notarized) but
+      # the bundle at least loads instead of being rejected as damaged.
+      # Phase A findings #1 / #2.
+      - name: Re-seal macOS bundle (ad-hoc)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          xattr -cr dist/SpaceRouter.app
+          codesign --force --deep --sign - dist/SpaceRouter.app
+          codesign --verify --deep --strict --verbose=2 dist/SpaceRouter.app
+
       - name: Embedded CLI smoke test (macOS)
         if: runner.os == 'macOS'
         shell: bash

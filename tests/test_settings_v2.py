@@ -309,6 +309,51 @@ class TestMigration:
         assert "SR_TOTALLY_UNKNOWN_FIELD" in msg
         assert "SR_LEGACY_FOO" in msg
 
+    def test_migration_deprecated_keys_logged_at_debug(self, tmp_path, caplog):
+        # Phase A finding #4: known-deprecated keys (SR_RECEIPT_STORE_PATH,
+        # SR_API_VARIANT, ...) should not trip an INFO line on every
+        # daemon start. Real users mistook them for an error condition.
+        env_path = tmp_path / "spacerouter.env"
+        env_path.write_text(
+            "SR_RECEIPT_STORE_PATH=/old/path\nSR_API_VARIANT=test\n"
+        )
+        settings_path = tmp_path / "settings.json"
+
+        import logging
+        with caplog.at_level(logging.INFO, logger="app.settings_v2"):
+            Settings.migrate_from_env_file(env_path, settings_path)
+
+        info_lines = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
+        assert not any("SR_RECEIPT_STORE_PATH" in m for m in info_lines), info_lines
+        assert not any("SR_API_VARIANT" in m for m in info_lines), info_lines
+
+    def test_migration_accepts_sr_wallet_address_alias(self, tmp_path):
+        # v1.4 .deb / .rpm installs ship SR_WALLET_ADDRESS in
+        # /etc/spacerouter/spacerouter.env. The v1.5 schema field is
+        # named staking_address; from_env_mapping must accept the old
+        # name as an alias so apt upgrade is seamless. Phase A
+        # follow-up to finding #13.
+        env_path = tmp_path / "spacerouter.env"
+        env_path.write_text("SR_WALLET_ADDRESS=0x" + "ab" * 20 + "\n")
+        settings_path = tmp_path / "settings.json"
+
+        s = Settings.migrate_from_env_file(env_path, settings_path)
+        assert s.wallet.staking_address == "0x" + "ab" * 20
+
+    def test_migration_sr_staking_address_wins_over_alias(self, tmp_path):
+        # Both keys present → the new name wins so an operator who has
+        # already started using SR_STAKING_ADDRESS gets the value they
+        # expect even if a stale SR_WALLET_ADDRESS lingers.
+        env_path = tmp_path / "spacerouter.env"
+        env_path.write_text(
+            "SR_STAKING_ADDRESS=0x" + "ab" * 20 + "\n"
+            "SR_WALLET_ADDRESS=0x" + "cd" * 20 + "\n"
+        )
+        settings_path = tmp_path / "settings.json"
+
+        s = Settings.migrate_from_env_file(env_path, settings_path)
+        assert s.wallet.staking_address == "0x" + "ab" * 20
+
     def test_migration_bool_parsing(self, tmp_path):
         env_path = tmp_path / "spacerouter.env"
         env_path.write_text("SR_UPNP_ENABLED=FALSE\nSR_MTLS_ENABLED=1\n")

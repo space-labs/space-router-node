@@ -8,9 +8,16 @@ Wants=network-online.target
 Type=simple
 User=spacerouter
 Group=spacerouter
-WorkingDirectory=/opt/spacerouter
+WorkingDirectory=/var/lib/spacerouter
 ExecStart=/opt/spacerouter/space-router-node
 EnvironmentFile=-/etc/spacerouter/spacerouter.env
+
+# v1.5 unified all provider state under ~/.spacerouter (settings.json,
+# identity.key, receipts.db, daemon.lock). The systemd `spacerouter`
+# service user has no real $HOME, so we point HOME at /var/lib/spacerouter
+# and grant write access there. ProtectHome=yes keeps /home and /root
+# inaccessible (defence in depth) — it does NOT block /var/lib.
+Environment=HOME=/var/lib/spacerouter
 
 # Restart on failure with increasing backoff
 Restart=on-failure
@@ -30,7 +37,7 @@ SyslogIdentifier=space-router-node
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/opt/spacerouter
+ReadWritePaths=/opt/spacerouter /var/lib/spacerouter
 PrivateTmp=yes
 
 [Install]

@@ -1897,6 +1897,10 @@ def _do_reset() -> bool:
     """Delete all config, identity key, and certificates.
 
     Returns True if reset was performed, False if cancelled.
+
+    All progress prints are flushed so that scripted callers (no TTY) see
+    each step land in their log file as it happens, rather than only at
+    process exit when Python finally flushes its block buffer.
     """
     from app.paths import config_dir
 
@@ -1909,26 +1913,40 @@ def _do_reset() -> bool:
 
     env_file = str(wellknown_env) if wellknown_env.is_file() else cwd_env
     certs_dir = os.path.dirname(os.path.abspath(s.IDENTITY_KEY_PATH)) or "certs"
+    settings_file = cfg_dir / "settings.json"
 
     if sys.stdin.isatty():
-        print("WARNING: This will delete your identity key and all configuration.")
+        print("WARNING: This will delete your identity key and all configuration.", flush=True)
         confirm = input("Type YES to confirm: ").strip()
         if confirm != "YES":
-            print("Reset cancelled.")
+            print("Reset cancelled.", flush=True)
             return False
+    else:
+        # Without a TTY we cannot prompt. Surface what is about to happen
+        # so a scripted operator sees something even if the redirected
+        # stdout buffer wouldn't flush until process exit.
+        print(
+            "Non-interactive --reset: removing all config without confirmation.",
+            flush=True,
+        )
 
-    # Delete .env
+    # Delete settings.json (canonical v1.5 config)
+    if settings_file.is_file():
+        settings_file.unlink()
+        print(f"Removed {settings_file}", flush=True)
+
+    # Delete legacy .env (only present on upgrades from v1.4)
     if os.path.isfile(env_file):
         os.remove(env_file)
-        print(f"Removed {env_file}")
+        print(f"Removed {env_file}", flush=True)
 
     # Delete certs directory (identity key + all certificates)
     if os.path.isdir(certs_dir):
         import shutil
         shutil.rmtree(certs_dir)
-        print(f"Removed {certs_dir}/")
+        print(f"Removed {certs_dir}/", flush=True)
 
-    print("Reset complete.\n")
+    print("Reset complete.\n", flush=True)
     return True
 
 
@@ -1955,7 +1973,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     net = parser.add_argument_group("network")
     net.add_argument(
         "--port", "-p", type=int, metavar="PORT",
-        help="Node listen port (default: 9090)",
+        help="Node listen port, 1-65535 (default: 9090)",
     )
     net.add_argument(
         "--public-url", metavar="HOST",
@@ -1963,7 +1981,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     net.add_argument(
         "--public-port", type=int, metavar="PORT",
-        help="Advertised public port (tunnel mode)",
+        help="Advertised public port, 1-65535 (tunnel mode)",
     )
     net.add_argument(
         "--no-upnp", action="store_true",
@@ -1974,11 +1992,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     wallet = parser.add_argument_group("wallet")
     wallet.add_argument(
         "--staking-address", metavar="ADDR",
-        help="Staking wallet address",
+        help="EVM staking wallet address (0x followed by 40 hex chars)",
     )
     wallet.add_argument(
         "--collection-address", metavar="ADDR",
-        help="Collection wallet address",
+        help="EVM collection wallet address (0x followed by 40 hex chars)",
     )
     wallet.add_argument(
         "--password-file", metavar="PATH",
@@ -2039,6 +2057,48 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _validate_cli_args(args: argparse.Namespace) -> None:
+    """Reject invalid CLI args before the daemon starts.
+
+    The Phase A real-user sweep showed the daemon accepting nonsense like
+    --port 0 or --staking-address bogus and starting anyway, producing
+    receipts that fail much later at claim time. We validate at the CLI
+    boundary so bad input fails fast with a clear message.
+
+    Errors print to stderr and exit with status 2 (argparse-style usage
+    error). Each check is independent so we can surface every problem in
+    a single run rather than playing whack-a-mole.
+    """
+    errors: list[str] = []
+
+    if args.port is not None and not (1 <= args.port <= 65535):
+        errors.append(
+            f"--port must be in 1..65535, got {args.port}"
+        )
+    if args.public_port is not None and not (1 <= args.public_port <= 65535):
+        errors.append(
+            f"--public-port must be in 1..65535, got {args.public_port}"
+        )
+
+    from app.wallet import validate_wallet_address
+    for flag, value in (
+        ("--staking-address", args.staking_address),
+        ("--collection-address", args.collection_address),
+    ):
+        if value is None:
+            continue
+        try:
+            validate_wallet_address(value)
+        except ValueError as exc:
+            errors.append(f"{flag}: {exc}")
+
+    if errors:
+        print("space-router-node: invalid CLI arguments:", file=sys.stderr)
+        for e in errors:
+            print(f"  - {e}", file=sys.stderr)
+        sys.exit(2)
 
 
 def _apply_cli_args(args: argparse.Namespace) -> None:
@@ -2500,6 +2560,20 @@ def main() -> None:
     parser = _build_arg_parser()
     args = parser.parse_args()
 
+    # Validate CLI input before doing any work. Bad --port / --staking-address
+    # used to start the daemon anyway and surface as far-downstream failures
+    # (Phase A findings #6 / #7).
+    _validate_cli_args(args)
+
+    # First-launch on PyInstaller bundles can spend 6-9s on import + crypto
+    # init before any log line lands; without this hint the user thinks the
+    # process hung. Flush so it shows even when stdout is redirected to a
+    # file (Phase A finding #3). --receipts / --claim are short-running
+    # commands with their own output; skip the hint there to keep
+    # machine-readable output clean.
+    if not (args.receipts or args.claim):
+        print("space-router-node: starting...", flush=True)
+
     # Apply CLI args as env var overrides before loading settings
     _apply_cli_args(args)
 
@@ -2530,8 +2604,26 @@ def main() -> None:
             _show_staking_prompt()
             _run_node(settings_override=load_settings())
         else:
-            print("Reset complete. Run again to reconfigure.", file=sys.stderr)
+            print(
+                "Reset complete. Run interactively to reconfigure, or set "
+                "values in ~/.spacerouter/settings.json before next launch.",
+                flush=True,
+            )
         return
+
+    # --setup explicitly requested but no TTY: refuse with a clear error
+    # rather than silently falling through to a default daemon start
+    # (Phase A finding #11). The detect-and-auto-launch wizard path below
+    # is unaffected; only the explicit flag is hard-stopped.
+    if args.setup and not sys.stdin.isatty():
+        print(
+            "Error: --setup requires a TTY (interactive shell).\n"
+            "  - To configure non-interactively, edit ~/.spacerouter/settings.json directly.\n"
+            "  - Or pass values via flags: --staking-address, --port, --label, --log-level, etc.\n",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(2)
 
     # Setup wizard: trigger when --setup is passed, identity key is missing,
     # or config looks unconfigured. Only in interactive TTY.
