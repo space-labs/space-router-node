@@ -3,7 +3,10 @@ name: Build Home Node
 on:
   push:
     branches: [main]
-    tags: ["v*.*.*"]
+    tags:
+      - "v*.*.*"
+      - "!v*-rc.*"
+      - "!v*-test.*"
   workflow_dispatch:
 
 env:
