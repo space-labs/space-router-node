@@ -199,6 +199,13 @@ async def test_reaper_marks_landed_tx_as_claimed(tmp_path):
     await store.store(r_landed, signature="0xsig1")
     await store.store(r_dropped, signature="0xsig2")
     # Both receipts hit CLAIM_TX_TIMEOUT; ages need to be past the grace window.
+    # In production these rows always have ``claim_tx_pending`` set
+    # (settlement.py persists it before broadcast); seed the breadcrumb so
+    # the reaper picks them up via the inflight filter.
+    await store.set_claim_tx_pending(
+        [r_landed.request_uuid, r_dropped.request_uuid],
+        "0x" + "ab" * 32,
+    )
     await store.mark_claim_failed(
         [r_landed.request_uuid, r_dropped.request_uuid],
         reasons.CLAIM_TX_TIMEOUT,

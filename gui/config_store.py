@@ -12,6 +12,7 @@ key names they always have — `get("SR_STAKING_ADDRESS")`,
 keys onto the structured settings.json fields under the hood.
 """
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -22,6 +23,8 @@ from app.identity import write_identity_key
 from app.settings_v2 import Settings as _SettingsV2
 from app.variant import BUILD_VARIANT
 from app.wallet import validate_wallet_address
+
+logger = logging.getLogger(__name__)
 
 # Coordination API URLs per environment
 _PROD_URL = "https://spacerouter-coordination-api.fly.dev"
@@ -405,6 +408,8 @@ class ConfigStore:
         """Fully reset config to defaults, deleting identity key and certificates."""
         import shutil
 
+        from app.paths import wipe_operational_state
+
         # Delete identity key file
         key_path = str(self._dir / "certs" / "node-identity.key")
         if os.path.isfile(key_path):
@@ -414,6 +419,13 @@ class ConfigStore:
         certs_dir = self._dir / "certs"
         if certs_dir.is_dir():
             shutil.rmtree(certs_dir)
+
+        # Wipe operational artefacts — receipts.db, incidents.json,
+        # logs/. Reset Node promises a clean slate, but pre-rc.3 only
+        # touched settings + identity. Stale failed-claim rows and old
+        # incident banners survived a "fresh" restart and confused QA.
+        for note in wipe_operational_state(self._dir):
+            logger.info("reset: %s", note)
 
         # Reset settings.json to defaults for the current build variant.
         # Anything previously persisted (wallet, coord URL, etc.) is wiped

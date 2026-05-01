@@ -974,8 +974,15 @@ class ReceiptStore:
         return (await asyncio.to_thread(_do)) > 0
 
     async def list_timed_out_claims(self, older_than_seconds: int) -> list[StoredReceipt]:
-        """Rows with ``CLAIM_TX_TIMEOUT`` last error whose last_attempt_at
-        is older than ``older_than_seconds``. Used by the reaper.
+        """Inflight rows the reaper should reconcile via ``isNonceUsed``.
+
+        Picks up rows with a non-null ``claim_tx_pending`` breadcrumb whose
+        last error is either ``CLAIM_TX_TIMEOUT`` (broadcast succeeded but
+        confirmation timed out) or ``CLAIM_RPC_UNREACHABLE`` (broadcast
+        raised mid-send so the tx may have leaked to mempool). Both cases
+        require an on-chain check to determine whether the tx actually
+        landed before the row can be safely retried — clearing the
+        breadcrumb without that check risks double-claim.
         """
         cutoff = int(time.time()) - int(older_than_seconds)
 
@@ -987,12 +994,13 @@ class ReceiptStore:
                       FROM signed_receipts
                      WHERE claimed_at IS NULL
                        AND locked = 0
-                       AND last_error_code = ?
+                       AND claim_tx_pending IS NOT NULL
+                       AND last_error_code IN (?, ?)
                        AND last_attempt_at IS NOT NULL
                        AND last_attempt_at <= ?
                      ORDER BY last_attempt_at ASC
                     """,
-                    (reasons.CLAIM_TX_TIMEOUT, cutoff),
+                    (reasons.CLAIM_TX_TIMEOUT, reasons.CLAIM_RPC_UNREACHABLE, cutoff),
                 ).fetchall()
             return [self._row_to_stored(r) for r in rows]
 

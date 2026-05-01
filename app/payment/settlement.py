@@ -523,13 +523,19 @@ async def _submit_batch(
         detail = result.tx_hash or result.error
         await store.mark_claim_failed(kept_uuids, result.reason_code, detail)
 
-        # On a confirmed terminal failure the breadcrumb is no longer
-        # useful — the row is back in the claim queue (or locked).
-        # On CLAIM_TX_TIMEOUT the breadcrumb stays so the in-flight
-        # reconciler can resolve it on next startup if the daemon
-        # crashes before the reaper does.
+        # Only confirmed terminal failures clear the breadcrumb:
+        # - CLAIM_REVERTED: chain executed and reverted; tx is on-chain.
+        # - CLAIM_INSUFFICIENT_GAS: RPC rejected synchronously; tx never
+        #   broadcast.
+        # - SIG_VERIFY: pre-flight; we never reached broadcast.
+        # CLAIM_RPC_UNREACHABLE and CLAIM_TX_TIMEOUT both leave the
+        # breadcrumb in place — in either case the tx may have leaked
+        # to mempool before the network blip, and the reaper /
+        # in-flight reconciler will resolve it via isNonceUsed on the
+        # next pass. Clearing the breadcrumb on RPC_UNREACHABLE
+        # invites a double-claim if the leaked tx eventually mines.
         if result.reason_code in (
-            reasons.CLAIM_REVERTED, reasons.CLAIM_RPC_UNREACHABLE,
+            reasons.CLAIM_REVERTED, reasons.CLAIM_INSUFFICIENT_GAS,
         ):
             for u in kept_uuids:
                 await store.clear_claim_tx_pending(u)

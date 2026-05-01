@@ -14,6 +14,7 @@ right place when we look for it.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 
@@ -29,3 +30,62 @@ def config_dir(variant: str | None = None) -> Path:
     # updated yet; intentionally unused.
     del variant
     return Path.home() / ".spacerouter"
+
+
+def wipe_operational_state(directory: Path) -> list[str]:
+    """Best-effort delete of operational artefacts under *directory*.
+
+    Reset Node / Fresh Restart promises a clean slate, but the v1.5.0-rc.2
+    reset only wiped settings.json + identity keys. Receipts queue,
+    incident banner state, and rotating logs survived — so a "fresh"
+    node still showed stale failed-claim entries and old incidents on
+    next start. This helper closes that gap.
+
+    Each artefact is deleted independently so a failure on one (e.g.
+    Windows holding a log file open) doesn't block the others. Returns
+    a list of human-readable lines describing what happened, for
+    callers that want to surface progress.
+    """
+    notes: list[str] = []
+
+    # Receipt store — pending claims, settled receipts, attempt history.
+    receipts_db = directory / "receipts.db"
+    if receipts_db.is_file():
+        try:
+            receipts_db.unlink()
+            notes.append(f"Removed {receipts_db}")
+        except OSError as e:
+            notes.append(f"Could not remove {receipts_db}: {e}")
+    # SQLite WAL/SHM siblings — leftovers if a connection was open.
+    for sibling in ("receipts.db-wal", "receipts.db-shm"):
+        p = directory / sibling
+        if p.is_file():
+            try:
+                p.unlink()
+                notes.append(f"Removed {p}")
+            except OSError as e:
+                notes.append(f"Could not remove {p}: {e}")
+
+    # Incident banner state — the GUI's sticky operator alerts.
+    incidents = directory / "incidents.json"
+    if incidents.is_file():
+        try:
+            incidents.unlink()
+            notes.append(f"Removed {incidents}")
+        except OSError as e:
+            notes.append(f"Could not remove {incidents}: {e}")
+
+    # Rotating log directory — tree may be open on Windows; ignore_errors
+    # so the rest of the reset still completes.
+    logs_dir = directory / "logs"
+    if logs_dir.is_dir():
+        shutil.rmtree(logs_dir, ignore_errors=True)
+        if not logs_dir.exists():
+            notes.append(f"Removed {logs_dir}/")
+        else:
+            notes.append(
+                f"Could not fully remove {logs_dir}/ — some files may "
+                f"be in use; restart and try again if it persists."
+            )
+
+    return notes

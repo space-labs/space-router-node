@@ -2084,6 +2084,13 @@ def _do_reset() -> bool:
         shutil.rmtree(certs_dir)
         print(f"Removed {certs_dir}/", flush=True)
 
+    # Wipe operational state — receipts.db, incidents.json, logs/.
+    # Pre-rc.3 these survived a CLI --reset, so the next start
+    # surfaced stale failed-claim rows and old incidents.
+    from app.paths import wipe_operational_state
+    for note in wipe_operational_state(cfg_dir):
+        print(note, flush=True)
+
     print("Reset complete.\n", flush=True)
     return True
 

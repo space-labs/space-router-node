@@ -112,6 +112,30 @@ class TestConfigStoreReset:
 
         assert store.get("SR_STAKING_ADDRESS") == ""
 
+    def test_reset_wipes_receipts_db_and_incidents_and_logs(
+        self, store_with_state, tmp_path,
+    ):
+        """reset() must wipe operational state — receipts.db, incidents.json,
+        logs/ — not just settings + identity. Pre-rc.3 these survived a
+        Fresh Restart, so a "fresh" node still showed stale failed-claim
+        rows and old incident banners on next start.
+        """
+        (tmp_path / "receipts.db").write_text("sqlite-bytes")
+        (tmp_path / "receipts.db-wal").write_text("wal-bytes")
+        (tmp_path / "receipts.db-shm").write_text("shm-bytes")
+        (tmp_path / "incidents.json").write_text("[]")
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        (logs_dir / "spacerouter-node.log").write_text("log-line\n")
+
+        store_with_state.reset()
+
+        assert not (tmp_path / "receipts.db").exists()
+        assert not (tmp_path / "receipts.db-wal").exists()
+        assert not (tmp_path / "receipts.db-shm").exists()
+        assert not (tmp_path / "incidents.json").exists()
+        assert not logs_dir.exists()
+
 
 # ---------------------------------------------------------------------------
 # GUI Api.fresh_restart() — full clear through API layer
@@ -211,3 +235,78 @@ class TestCliReset:
         source = inspect.getsource(_do_reset)
         assert "--keep-identity" not in source
         assert "keep_identity" not in source
+
+    def test_do_reset_wipes_operational_state(self, tmp_path):
+        """CLI --reset must wipe receipts.db, incidents.json, logs/ in
+        addition to settings + certs."""
+        certs_dir = tmp_path / "certs"
+        certs_dir.mkdir()
+        (certs_dir / "node-identity.key").write_text("fake\n")
+        (tmp_path / "receipts.db").write_text("sqlite-bytes")
+        (tmp_path / "incidents.json").write_text("[]")
+        (tmp_path / "logs").mkdir()
+        (tmp_path / "logs" / "spacerouter-node.log").write_text("entry\n")
+
+        with patch("app.main.load_settings") as mock_settings, \
+             patch("app.paths.config_dir", return_value=tmp_path), \
+             patch("app.main.sys") as mock_sys:
+            mock_settings.return_value.IDENTITY_KEY_PATH = str(
+                certs_dir / "node-identity.key"
+            )
+            mock_sys.argv = ["prog", "--reset"]
+            mock_sys.stdin.isatty.return_value = False
+            mock_sys.exit = MagicMock(side_effect=SystemExit)
+
+            from app.main import _do_reset
+            _do_reset()
+
+        assert not (tmp_path / "receipts.db").exists()
+        assert not (tmp_path / "incidents.json").exists()
+        assert not (tmp_path / "logs").exists()
+
+
+# ---------------------------------------------------------------------------
+# wipe_operational_state() — pure helper
+# ---------------------------------------------------------------------------
+
+
+class TestWipeOperationalState:
+    def test_wipes_present_artefacts(self, tmp_path):
+        from app.paths import wipe_operational_state
+
+        (tmp_path / "receipts.db").write_text("x")
+        (tmp_path / "receipts.db-wal").write_text("x")
+        (tmp_path / "incidents.json").write_text("[]")
+        (tmp_path / "logs").mkdir()
+        (tmp_path / "logs" / "a.log").write_text("y")
+
+        notes = wipe_operational_state(tmp_path)
+
+        assert not (tmp_path / "receipts.db").exists()
+        assert not (tmp_path / "receipts.db-wal").exists()
+        assert not (tmp_path / "incidents.json").exists()
+        assert not (tmp_path / "logs").exists()
+        assert any("receipts.db" in n for n in notes)
+        assert any("incidents.json" in n for n in notes)
+        assert any("logs" in n for n in notes)
+
+    def test_silent_when_nothing_to_wipe(self, tmp_path):
+        from app.paths import wipe_operational_state
+
+        notes = wipe_operational_state(tmp_path)
+        assert notes == []  # no artefacts, no notes
+
+    def test_does_not_touch_unrelated_files(self, tmp_path):
+        from app.paths import wipe_operational_state
+
+        (tmp_path / "settings.json").write_text("{}")
+        certs = tmp_path / "certs"
+        certs.mkdir()
+        (certs / "node-identity.key").write_text("k")
+
+        wipe_operational_state(tmp_path)
+
+        # The wipe must not touch settings.json or certs/ —
+        # those are owned by the GUI/CLI reset paths.
+        assert (tmp_path / "settings.json").exists()
+        assert (certs / "node-identity.key").exists()

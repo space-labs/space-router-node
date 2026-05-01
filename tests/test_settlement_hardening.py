@@ -422,6 +422,147 @@ async def test_inflight_reconcile_clears_pending_when_nonce_unused(tmp_path):
     # source of truth that explains why the row was last attempted.
 
 
+# ── MAJ-1c: ambiguous-broadcast preserves breadcrumb ──────────────
+
+
+@pytest.mark.asyncio
+async def test_rpc_unreachable_preserves_claim_tx_pending(tmp_path):
+    """When ``send_raw_transaction`` raises a non-funds error, we treat
+    the tx as potentially leaked to mempool and PRESERVE the breadcrumb
+    so the reaper / inflight reconciler can resolve it via
+    ``isNonceUsed`` rather than risk a double-claim. Pre-rc.3 the row
+    cleared its breadcrumb here, which let a follow-up retry double-
+    submit if the leaked tx eventually mined.
+    """
+    from app.payment.settlement import _submit_batch
+
+    db = tmp_path / "r.db"
+    store = get_store(str(db))
+    await store.initialize()
+
+    payer_addr = _gateway_address()
+    settings = _mk_settings(db, payer=payer_addr)
+    domain = _domain_for(settings)
+
+    r = _mk_receipt()
+    sig = sign_receipt(_GATEWAY_KEY, r, domain)
+    await store.store(r, signature=sig)
+    batch = [await store.get_by_uuid(r.request_uuid)]
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    with patch(
+        "app.payment.settlement.asyncio.to_thread", fake_to_thread,
+    ), patch("web3.Web3") as MockWeb3, \
+         patch("eth_account.Account") as MockAccount:
+        inst = MockWeb3.return_value
+        inst.is_connected.return_value = True
+        inst.eth = MagicMock()
+        inst.eth.gas_price = 1
+        inst.eth.get_transaction_count.return_value = 0
+        contract = MagicMock()
+        inst.eth.contract.return_value = contract
+        contract.functions.claimBatch.return_value.estimate_gas.return_value = 100_000
+        contract.functions.claimBatch.return_value.build_transaction.return_value = {
+            "from": payer_addr, "nonce": 0, "gas": 100_000,
+            "gasPrice": 1, "chainId": settings.ESCROW_CHAIN_ID,
+        }
+        MockWeb3.to_checksum_address.side_effect = lambda x: x
+        MockWeb3.HTTPProvider.return_value = MagicMock()
+
+        # Generic transport error — could mean "tx never reached node"
+        # or "node received but response was lost". We can't tell.
+        inst.eth.send_raw_transaction.side_effect = ConnectionError(
+            "connection reset by peer",
+        )
+
+        signed_tx = MagicMock()
+        signed_tx.raw_transaction = b"\x01\x02"
+        signed_tx.hash.hex.return_value = "ab" * 32
+        account_inst = MagicMock()
+        account_inst.address = payer_addr
+        account_inst.sign_transaction.return_value = signed_tx
+        MockAccount.from_key.return_value = account_inst
+
+        result = await _submit_batch(settings, _GATEWAY_KEY, batch, store)
+
+    assert result.reason_code == reasons.CLAIM_RPC_UNREACHABLE
+    final = await store.get_by_uuid(r.request_uuid)
+    assert final.claim_tx_pending is not None, (
+        "Breadcrumb must survive RPC_UNREACHABLE so the reaper can "
+        "verify on-chain status before the row is retried."
+    )
+    assert final.claim_tx_pending == "0x" + "ab" * 32
+
+
+@pytest.mark.asyncio
+async def test_reverted_clears_claim_tx_pending(tmp_path):
+    """Sanity: the on-chain-confirmed terminal failure (revert) DOES
+    clear the breadcrumb — there's nothing left to reconcile, the tx
+    landed and was rejected by the contract.
+    """
+    from app.payment.settlement import _submit_batch
+
+    db = tmp_path / "r.db"
+    store = get_store(str(db))
+    await store.initialize()
+
+    payer_addr = _gateway_address()
+    settings = _mk_settings(db, payer=payer_addr)
+    domain = _domain_for(settings)
+
+    r = _mk_receipt()
+    sig = sign_receipt(_GATEWAY_KEY, r, domain)
+    await store.store(r, signature=sig)
+    batch = [await store.get_by_uuid(r.request_uuid)]
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    with patch(
+        "app.payment.settlement.asyncio.to_thread", fake_to_thread,
+    ), patch("web3.Web3") as MockWeb3, \
+         patch("eth_account.Account") as MockAccount:
+        inst = MockWeb3.return_value
+        inst.is_connected.return_value = True
+        inst.eth = MagicMock()
+        inst.eth.gas_price = 1
+        inst.eth.get_transaction_count.return_value = 0
+        contract = MagicMock()
+        inst.eth.contract.return_value = contract
+        contract.functions.claimBatch.return_value.estimate_gas.return_value = 100_000
+        contract.functions.claimBatch.return_value.build_transaction.return_value = {
+            "from": payer_addr, "nonce": 0, "gas": 100_000,
+            "gasPrice": 1, "chainId": settings.ESCROW_CHAIN_ID,
+        }
+        MockWeb3.to_checksum_address.side_effect = lambda x: x
+        MockWeb3.HTTPProvider.return_value = MagicMock()
+
+        sent_hash = MagicMock()
+        sent_hash.hex.return_value = "0x" + "c" * 64
+        inst.eth.send_raw_transaction.return_value = sent_hash
+        inst.eth.wait_for_transaction_receipt.return_value = MagicMock(
+            status=0, gasUsed=21_000,  # status=0 => reverted
+        )
+
+        signed_tx = MagicMock()
+        signed_tx.raw_transaction = b"\x01\x02"
+        signed_tx.hash.hex.return_value = "cc" * 32
+        account_inst = MagicMock()
+        account_inst.address = payer_addr
+        account_inst.sign_transaction.return_value = signed_tx
+        MockAccount.from_key.return_value = account_inst
+
+        result = await _submit_batch(settings, _GATEWAY_KEY, batch, store)
+
+    assert result.reason_code == reasons.CLAIM_REVERTED
+    final = await store.get_by_uuid(r.request_uuid)
+    assert final.claim_tx_pending is None, (
+        "Reverts are confirmed terminal — breadcrumb is no longer useful."
+    )
+
+
 # ── L6: per-receipt local sig verify ───────────────────────────────
 
 
