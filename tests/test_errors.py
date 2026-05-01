@@ -196,7 +196,8 @@ def test_keystore_wrong_passphrase_classified_as_locked():
     """Wrong passphrase must classify as IDENTITY_KEY_LOCKED so the GUI
     re-prompts — never as IDENTITY_KEY_ERROR ("Try Fresh Restart"),
     which would invite the user to destroy their identity in response
-    to a typo.
+    to a typo. user_message is overridden to surface the "incorrect"
+    distinction in CLI logs too (the GUI dialog reads status.detail).
     """
     from app.identity import KeystoreWrongPassphrase
 
@@ -204,6 +205,7 @@ def test_keystore_wrong_passphrase_classified_as_locked():
     err = classify_error(exc)
     assert err.code == NodeErrorCode.IDENTITY_KEY_LOCKED
     assert "incorrect" in err.detail.lower()
+    assert "incorrect" in err.user_message.lower()
 
 
 def test_keystore_passphrase_required_classified_as_locked():

@@ -130,11 +130,17 @@ def classify_error(exc: Exception) -> NodeError:
     from app.identity import KeystorePassphraseRequired, KeystoreWrongPassphrase
     if isinstance(exc, KeystoreWrongPassphrase):
         logger.warning("Error classified: IDENTITY_KEY_LOCKED (wrong passphrase)")
-        return NodeError(
+        err = NodeError(
             NodeErrorCode.IDENTITY_KEY_LOCKED,
             "Passphrase is incorrect — re-enter your passphrase.",
             cause=exc,
         )
+        # Override the canned IDENTITY_KEY_LOCKED message so the CLI's
+        # "Node failed: …" log surfaces the wrong-passphrase distinction
+        # too (the GUI dialog reads status.detail directly via the state
+        # machine — see app/main.py).
+        err.user_message = "Identity passphrase is incorrect — re-enter your passphrase."
+        return err
     if isinstance(exc, KeystorePassphraseRequired):
         logger.warning("Error classified: IDENTITY_KEY_LOCKED (passphrase required)")
         return NodeError(
