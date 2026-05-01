@@ -56,6 +56,17 @@ class KeystorePassphraseRequired(Exception):
     """Raised when a keystore JSON file is found but no passphrase was supplied."""
 
 
+class KeystoreWrongPassphrase(KeystorePassphraseRequired):
+    """Raised when the keystore is found but the passphrase fails to decrypt it.
+
+    Subclasses :class:`KeystorePassphraseRequired` so existing handlers that
+    route to the ``PASSPHRASE_REQUIRED`` state catch both — the resolution
+    is the same: re-prompt the operator. Distinct class so the GUI / state
+    machine can surface "passphrase is incorrect" instead of the generic
+    "passphrase required" wording.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -177,10 +188,24 @@ def load_or_create_identity(key_path: str, passphrase: str = "") -> tuple[str, s
                 )
             try:
                 private_key_bytes = Account.decrypt(json.loads(content), passphrase)
+            except ValueError as exc:
+                # eth_account raises ValueError("MAC mismatch") specifically
+                # on wrong passphrase. Surface that as a distinct exception
+                # so the state machine can route to PASSPHRASE_REQUIRED with
+                # a "passphrase is incorrect" message — not the generic
+                # "Try Fresh Restart" path used for unrecoverable key errors.
+                logger.error(
+                    "Wrong passphrase for identity keystore at %s",
+                    key_path,
+                )
+                raise KeystoreWrongPassphrase(
+                    f"Identity keystore at {key_path!r} could not be "
+                    f"decrypted — passphrase is incorrect."
+                ) from exc
             except Exception as exc:
                 logger.error(
-                    "Failed to decrypt identity keystore at %s — check SR_IDENTITY_PASSPHRASE",
-                    key_path,
+                    "Failed to decrypt identity keystore at %s: %s",
+                    key_path, exc,
                 )
                 raise ValueError(
                     f"Failed to decrypt identity keystore: {exc}"

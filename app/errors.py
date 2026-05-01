@@ -52,8 +52,12 @@ class NodeErrorCode(enum.Enum):
 _USER_MESSAGES: dict[NodeErrorCode, str] = {
     NodeErrorCode.INVALID_WALLET: "Wallet address is invalid. Check Settings.",
     NodeErrorCode.MISSING_WALLET: "No wallet address configured.",
-    NodeErrorCode.IDENTITY_KEY_ERROR: "Cannot load node identity key. Try Fresh Restart.",
-    NodeErrorCode.IDENTITY_KEY_LOCKED: "Identity key is encrypted. Passphrase required to unlock.",
+    NodeErrorCode.IDENTITY_KEY_ERROR:
+        "Cannot load node identity key — the file may be corrupted. "
+        "Run Fresh Restart to generate a new identity (you'll need to "
+        "re-stake against the new wallet).",
+    NodeErrorCode.IDENTITY_KEY_LOCKED:
+        "Identity key is encrypted. Passphrase required to unlock.",
     NodeErrorCode.TLS_CERT_ERROR: "Cannot create TLS certificates. Check disk permissions.",
     NodeErrorCode.PORT_IN_USE: "Port is already in use. Retrying...",
     NodeErrorCode.PORT_PERMISSION: "Permission denied for port. Try a port above 1024.",
@@ -116,6 +120,28 @@ def _extract_server_detail(exc: httpx.HTTPStatusError) -> str:
 
 def classify_error(exc: Exception) -> NodeError:
     """Map a raw exception to a classified NodeError."""
+
+    # ── Identity keystore passphrase required / incorrect ──
+    # Check BEFORE the generic ValueError branch — KeystoreWrongPassphrase
+    # subclasses KeystorePassphraseRequired, both route to IDENTITY_KEY_LOCKED
+    # so the GUI prompts for the passphrase rather than showing
+    # "Try Fresh Restart". Local import avoids an import cycle —
+    # app.identity transitively imports this module via app.config.
+    from app.identity import KeystorePassphraseRequired, KeystoreWrongPassphrase
+    if isinstance(exc, KeystoreWrongPassphrase):
+        logger.warning("Error classified: IDENTITY_KEY_LOCKED (wrong passphrase)")
+        return NodeError(
+            NodeErrorCode.IDENTITY_KEY_LOCKED,
+            "Passphrase is incorrect — re-enter your passphrase.",
+            cause=exc,
+        )
+    if isinstance(exc, KeystorePassphraseRequired):
+        logger.warning("Error classified: IDENTITY_KEY_LOCKED (passphrase required)")
+        return NodeError(
+            NodeErrorCode.IDENTITY_KEY_LOCKED,
+            "Passphrase required to unlock the identity key.",
+            cause=exc,
+        )
 
     # ── ConnectionRefusedError / ConnectionResetError ──
     # Check BEFORE OSError since these are OSError subclasses but indicate

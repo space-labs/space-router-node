@@ -348,6 +348,14 @@ async def test_list_timed_out_claims(store, monkeypatch):
     await store.store(r_other, signature="0xoth")
 
     # Rewrite last_attempt_at directly to simulate age.
+    # Production settlement.py persists claim_tx_pending BEFORE the
+    # broadcast attempt, so timed-out / RPC-unreachable rows always
+    # carry a breadcrumb. The reaper's filter uses that as a precondition
+    # for picking the row up — seed it here so the test matches real
+    # state.
+    await store.set_claim_tx_pending(
+        [r_old.request_uuid, r_new.request_uuid], "0x" + "ab" * 32,
+    )
     await store.mark_claim_failed([r_old.request_uuid], reasons.CLAIM_TX_TIMEOUT)
     await store.mark_claim_failed([r_new.request_uuid], reasons.CLAIM_TX_TIMEOUT)
     await store.mark_claim_failed([r_other.request_uuid], reasons.CLAIM_REVERTED)

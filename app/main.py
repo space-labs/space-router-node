@@ -25,7 +25,12 @@ from dotenv import get_key, set_key
 # are deferred to first use inside _run() / _phase_*() to keep CLI startup fast.
 from app import constants
 from app.config import load_settings, _default_coordination_url
-from app.identity import KeystorePassphraseRequired, load_or_create_identity, write_identity_key
+from app.identity import (
+    KeystorePassphraseRequired,
+    KeystoreWrongPassphrase,
+    load_or_create_identity,
+    write_identity_key,
+)
 from app.state import NodeState, NodeStateMachine
 from app.version import __version__
 from app.wallet import validate_wallet_address
@@ -38,7 +43,21 @@ _CERT_CHECK_INTERVAL = 86400  # 24 hours
 _PROBE_REQUEST_INTERVAL = 1800  # 30 minutes
 _HEARTBEAT_FAIL_THRESHOLD = 3
 
-_ENV_FILE = ".env"
+def _wizard_env_file() -> str:
+    """Canonical env file the first-run wizard persists into.
+
+    Pre-rc.3 the wizard wrote to ``./.env`` (relative to the cwd), which
+    the daemon's settings_loader never reads — so wallet addresses,
+    network mode, referral code, and the passphrase boolean were
+    silently lost on the first daemon start. Now we write to the
+    canonical ``~/.spacerouter/spacerouter.env`` location so
+    :py:func:`app.settings_loader.load_provider_settings` migrates it
+    into ``settings.json`` on the next read.
+    """
+    from app.settings_loader import env_path
+    p = env_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return str(p)
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +176,8 @@ def _first_run_setup() -> bool:
         # --- Referral Code ---
         wizard_step(step, "Referral Code (optional)")
         step += 1
-        existing_referral = get_key(_ENV_FILE, "SR_REFERRAL_CODE") or ""
+        env_file = _wizard_env_file()
+        existing_referral = get_key(env_file, "SR_REFERRAL_CODE") or ""
         if existing_referral:
             wizard_success(f"Referral code already set: {existing_referral}")
             referral_code = existing_referral
@@ -200,24 +220,32 @@ def _first_run_setup() -> bool:
                 wizard_error("Hostname is required for tunnel mode")
             public_port = wizard_input("Public port", default="9090")
 
-        # --- Persist to .env ---
+        # --- Persist to ~/.spacerouter/spacerouter.env ---
+        # settings_loader migrates this into settings.json on the next
+        # daemon read. The passphrase is intentionally NOT migrated to
+        # settings.json — only the boolean flag is — so the wizard ALSO
+        # exports it to os.environ for the immediate daemon start that
+        # follows. Subsequent restarts re-prompt via the unlock dialog
+        # (GUI) or require SR_IDENTITY_PASSPHRASE to be set externally
+        # (systemd EnvironmentFile, etc.).
         if passphrase:
-            set_key(_ENV_FILE, "SR_IDENTITY_PASSPHRASE", passphrase)
+            set_key(env_file, "SR_IDENTITY_PASSPHRASE", passphrase)
+            os.environ["SR_IDENTITY_PASSPHRASE"] = passphrase
         if staking_address:
-            set_key(_ENV_FILE, "SR_STAKING_ADDRESS", staking_address)
+            set_key(env_file, "SR_STAKING_ADDRESS", staking_address)
         if collection_address:
-            set_key(_ENV_FILE, "SR_COLLECTION_ADDRESS", collection_address)
+            set_key(env_file, "SR_COLLECTION_ADDRESS", collection_address)
         if referral_code:
-            set_key(_ENV_FILE, "SR_REFERRAL_CODE", referral_code)
+            set_key(env_file, "SR_REFERRAL_CODE", referral_code)
 
         # Network mode
-        set_key(_ENV_FILE, "SR_UPNP_ENABLED", str(upnp_enabled).lower())
+        set_key(env_file, "SR_UPNP_ENABLED", str(upnp_enabled).lower())
         if public_ip:
-            set_key(_ENV_FILE, "SR_PUBLIC_IP", public_ip)
+            set_key(env_file, "SR_PUBLIC_IP", public_ip)
         if public_port and public_port != "9090":
-            set_key(_ENV_FILE, "SR_PUBLIC_PORT", public_port)
+            set_key(env_file, "SR_PUBLIC_PORT", public_port)
 
-        wizard_done(_ENV_FILE)
+        wizard_done(env_file)
         return True
 
     except (KeyboardInterrupt, EOFError):
@@ -1682,12 +1710,17 @@ async def _run(
             logger.info("Initializing node (version %s)...", __version__)
             try:
                 await _phase_init(ctx)
-            except KeystorePassphraseRequired:
+            except KeystorePassphraseRequired as exc:
                 if state_machine:
-                    state_machine.transition(
-                        NodeState.PASSPHRASE_REQUIRED,
-                        "Identity key is encrypted — passphrase required",
-                    )
+                    # KeystoreWrongPassphrase is a subclass of
+                    # KeystorePassphraseRequired — surface a distinct
+                    # message so the prompt UI can say "incorrect" rather
+                    # than "required" when the user has already tried.
+                    if isinstance(exc, KeystoreWrongPassphrase):
+                        reason = "Passphrase is incorrect — re-enter your passphrase"
+                    else:
+                        reason = "Identity key is encrypted — passphrase required"
+                    state_machine.transition(NodeState.PASSPHRASE_REQUIRED, reason)
                 raise
             except NodeError:
                 raise
@@ -2246,11 +2279,56 @@ def _validate_cli_args(args: argparse.Namespace) -> None:
         sys.exit(2)
 
 
+def _persist_network_mode_to_settings(
+    public_url: str | None,
+    public_port: int | None,
+    no_upnp: bool,
+) -> None:
+    """Write tunnel-mode network settings to settings.json.
+
+    Pre-rc.3 ``--public-url`` / ``--public-port`` only set os.environ for
+    the running process, so they were silently forgotten on every
+    restart. Headless tunnel-mode operators (CGNAT bypass via bore.pub
+    or similar) expected the values to persist the way the GUI's
+    "Tunnel mode" toggle does. Best-effort: never block startup if the
+    write fails.
+    """
+    if public_url is None and public_port is None and not no_upnp:
+        return
+    try:
+        from app.settings_loader import load_provider_settings, settings_path
+        s = load_provider_settings()
+        if public_url is not None:
+            s.node.public_ip = public_url
+            s.node.upnp_enabled = False
+        if public_port is not None:
+            s.node.public_port = int(public_port)
+        if no_upnp:
+            s.node.upnp_enabled = False
+        s_path = settings_path()
+        s_path.parent.mkdir(parents=True, exist_ok=True)
+        s.save(s_path)
+        logger.info(
+            "Persisted network mode to %s (public_ip=%s, public_port=%s, "
+            "upnp_enabled=%s)",
+            s_path, s.node.public_ip, s.node.public_port, s.node.upnp_enabled,
+        )
+    except Exception as e:  # noqa: BLE001
+        # Non-fatal: the os.environ override below still takes effect for
+        # this run; only the persistence is lost.
+        logger.warning("Could not persist network-mode CLI flags: %s", e)
+
+
 def _apply_cli_args(args: argparse.Namespace) -> None:
     """Override environment variables from CLI arguments.
 
     CLI args take precedence over .env values. We set os.environ so that
     pydantic-settings picks them up when load_settings() is called.
+
+    Network-mode flags (``--public-url``, ``--public-port``, ``--no-upnp``)
+    are also persisted to settings.json so the operator doesn't have to
+    re-pass them on every restart — matching the GUI's "Tunnel mode"
+    toggle semantics.
     """
     if args.port is not None:
         os.environ["SR_NODE_PORT"] = str(args.port)
@@ -2260,6 +2338,9 @@ def _apply_cli_args(args: argparse.Namespace) -> None:
         os.environ["SR_PUBLIC_PORT"] = str(args.public_port)
     if args.no_upnp:
         os.environ["SR_UPNP_ENABLED"] = "false"
+    _persist_network_mode_to_settings(
+        args.public_url, args.public_port, args.no_upnp,
+    )
     if args.staking_address is not None:
         os.environ["SR_STAKING_ADDRESS"] = args.staking_address
     if args.collection_address is not None:

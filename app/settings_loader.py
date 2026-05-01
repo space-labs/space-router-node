@@ -92,6 +92,7 @@ def load_provider_settings(directory: Path | None = None) -> Settings:
     # Step 1 — JSON exists, just load it.
     if s_path.exists():
         s = Settings.load(s_path)
+        dirty = False
         # In-place upgrade for users coming from the test.95 receipt-bug
         # era: their settings.json was wiped to bare defaults by Fresh
         # Restart and never repopulated. test.97/.101's reset() fix only
@@ -100,16 +101,27 @@ def load_provider_settings(directory: Path | None = None) -> Settings:
         # file. Backfill testnet defaults on this load if the section
         # is unconfigured.
         if _backfill_test_escrow_in_place(s):
+            dirty = True
+        # Reconcile ``identity_passphrase_set`` against the actual keystore
+        # on disk. Pre-rc.3 the flag was trusted as written, so a user
+        # who manually deleted ``node-identity.key`` (or ran reset and
+        # re-ran the wizard without a passphrase) would still see the
+        # GUI assume a passphrase was set, which routed startup into
+        # PASSPHRASE_REQUIRED for a key that wasn't there. Settings.json
+        # is the cache; the keystore file is the source of truth.
+        if _reconcile_passphrase_flag_in_place(s):
+            dirty = True
+        if dirty:
             try:
                 s.save(s_path)
                 logger.info(
-                    "Backfilled test-variant escrow defaults into existing %s "
-                    "(receipt-submitter will start on next init).",
+                    "Reconciled %s with on-disk state (escrow defaults / "
+                    "passphrase flag).",
                     s_path,
                 )
             except OSError as e:
                 logger.warning(
-                    "Could not persist backfilled escrow defaults to %s: %s",
+                    "Could not persist reconciled settings to %s: %s",
                     s_path, e,
                 )
         logger.info("settings loaded from: %s", s_path)
@@ -161,6 +173,48 @@ def load_provider_settings(directory: Path | None = None) -> Settings:
 _TEST_ESCROW_CONTRACT_ADDRESS = "0xC5740e4e9175301a24FB6d22bA184b8ec0762852"
 _TEST_ESCROW_CHAIN_RPC = "https://rpc.cc3-testnet.creditcoin.network"
 _TEST_ESCROW_CHAIN_ID = 102031
+
+
+def _reconcile_passphrase_flag_in_place(s: Settings) -> bool:
+    """Refresh ``wallet.identity_passphrase_set`` from the on-disk keystore.
+
+    Returns True if the value changed (caller saves on True). The flag
+    is a derived cache: the truth is whether the keystore at
+    :py:attr:`WalletSection.settlement_key_path` is encrypted JSON. We
+    recompute it on every load so a manual ``rm node-identity.key`` (or
+    a reset that wipes the keystore but somehow leaves settings.json) is
+    self-healing rather than silently routing the daemon into
+    PASSPHRASE_REQUIRED for a missing file.
+
+    A missing keystore file → flag goes False (the wizard will recreate
+    it without a passphrase).
+    A plaintext-hex keystore → flag goes False.
+    An encrypted keystore JSON → flag goes True.
+    """
+    try:
+        from app.identity import _is_keystore_json
+    except Exception:  # noqa: BLE001
+        # Identity module not importable for some reason — leave the
+        # cached flag alone rather than blocking startup.
+        return False
+
+    key_path = Path(s.wallet.settlement_key_path).expanduser()
+    actual = False
+    if key_path.is_file():
+        try:
+            actual = _is_keystore_json(key_path.read_text())
+        except OSError:
+            # Unreadable file: don't change the flag.
+            return False
+
+    if s.wallet.identity_passphrase_set != actual:
+        logger.info(
+            "Reconciled identity_passphrase_set: %s → %s (keystore at %s)",
+            s.wallet.identity_passphrase_set, actual, key_path,
+        )
+        s.wallet.identity_passphrase_set = actual
+        return True
+    return False
 
 
 def _backfill_test_escrow_in_place(s: Settings) -> bool:

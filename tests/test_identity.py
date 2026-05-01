@@ -107,14 +107,32 @@ def test_create_keystore_with_passphrase(key_path):
 
 
 # ---------------------------------------------------------------------------
-# 3. Wrong passphrase raises ValueError
+# 3. Wrong passphrase raises KeystoreWrongPassphrase
 # ---------------------------------------------------------------------------
 
 def test_load_keystore_wrong_passphrase(key_path):
+    """Wrong passphrase must raise the distinct ``KeystoreWrongPassphrase``
+    subclass so the state machine routes to PASSPHRASE_REQUIRED with a
+    "passphrase is incorrect" message — pre-rc.3 raised a generic
+    ValueError that was classified as IDENTITY_KEY_ERROR ("Try Fresh
+    Restart"), which destroys the user's identity if they comply.
+    """
+    from app.identity import KeystoreWrongPassphrase
+
     load_or_create_identity(key_path, passphrase=TEST_PASSPHRASE)
 
-    with pytest.raises(ValueError, match="Failed to decrypt"):
+    with pytest.raises(KeystoreWrongPassphrase, match="incorrect"):
         load_or_create_identity(key_path, passphrase="wrong-passphrase")
+
+
+def test_keystore_wrong_passphrase_is_subclass_of_passphrase_required():
+    """Existing handlers that route to PASSPHRASE_REQUIRED on
+    ``except KeystorePassphraseRequired:`` must also catch the wrong-
+    passphrase case — the resolution is identical (re-prompt), only the
+    surfaced reason differs.
+    """
+    from app.identity import KeystorePassphraseRequired, KeystoreWrongPassphrase
+    assert issubclass(KeystoreWrongPassphrase, KeystorePassphraseRequired)
 
 
 # ---------------------------------------------------------------------------

@@ -646,9 +646,11 @@ async function updateStatus() {
     // re-renders it when coord disagrees with the local state.
     clearCoordRecoveryHint();
 
-    // Passphrase required — show unlock dialog immediately
+    // Passphrase required — show unlock dialog immediately. Surface the
+    // state machine's detail (e.g. "incorrect" after a failed attempt)
+    // so the user knows their previous try landed but wasn't accepted.
     if (state === "passphrase_required") {
-      showUnlockDialog();
+      showUnlockDialog(status.detail || "");
       return;
     }
 
@@ -721,7 +723,7 @@ async function updateStatus() {
         // For codes where the server provides a specific detail (e.g. exact stake
         // amounts), prefer status.error_message over canned text.
         if (status.error_code === "identity_key_locked") {
-          showUnlockDialog();
+          showUnlockDialog(status.error || status.detail || "");
           return;
         } else if (status.error_code === "version_too_old") {
           detail.textContent = status.error_message || "This version is outdated. Please download the latest update.";
@@ -1145,7 +1147,7 @@ function updateTestBannerLabel(url) {
 
 // ── Passphrase Unlock Dialog ──
 
-function showUnlockDialog() {
+function showUnlockDialog(hint) {
   show("dialog-overlay");
   if (statusPollId) {
     clearInterval(statusPollId);
@@ -1155,6 +1157,14 @@ function showUnlockDialog() {
   const btn = $("#btn-unlock");
   const input = $("#unlock-passphrase");
   const errEl = $("#unlock-error");
+
+  // Pre-populate the error label when we re-enter this dialog after a
+  // wrong-passphrase attempt — the state machine's transition reason
+  // contains "incorrect" so the user gets visible feedback that their
+  // prior try landed but didn't decrypt the keystore.
+  if (errEl) {
+    errEl.textContent = hint && /incorrect/i.test(hint) ? hint : "";
+  }
 
   // Prevent duplicate listeners
   const newBtn = btn.cloneNode(true);

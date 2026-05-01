@@ -187,3 +187,46 @@ def test_unexpected_error_fallback():
     err = classify_error(exc)
     assert err.code == NodeErrorCode.UNEXPECTED_ERROR
     assert err.is_transient is False
+
+
+# ── Identity keystore passphrase classification ─────────────────────────
+
+
+def test_keystore_wrong_passphrase_classified_as_locked():
+    """Wrong passphrase must classify as IDENTITY_KEY_LOCKED so the GUI
+    re-prompts — never as IDENTITY_KEY_ERROR ("Try Fresh Restart"),
+    which would invite the user to destroy their identity in response
+    to a typo.
+    """
+    from app.identity import KeystoreWrongPassphrase
+
+    exc = KeystoreWrongPassphrase("passphrase is incorrect")
+    err = classify_error(exc)
+    assert err.code == NodeErrorCode.IDENTITY_KEY_LOCKED
+    assert "incorrect" in err.detail.lower()
+
+
+def test_keystore_passphrase_required_classified_as_locked():
+    """Missing-passphrase case keeps its existing IDENTITY_KEY_LOCKED
+    classification — same dialog, slightly different prompt wording.
+    """
+    from app.identity import KeystorePassphraseRequired
+
+    exc = KeystorePassphraseRequired("passphrase required")
+    err = classify_error(exc)
+    assert err.code == NodeErrorCode.IDENTITY_KEY_LOCKED
+
+
+def test_identity_key_error_message_no_longer_promises_fresh_restart_blindly():
+    """Pre-rc.3 the IDENTITY_KEY_ERROR message read "Try Fresh Restart"
+    with no qualifier — the same text shown for wrong-passphrase cases
+    where Fresh Restart deletes the identity. The new wording calls
+    out the corruption case explicitly and warns about the re-stake
+    consequence so the user makes an informed choice.
+    """
+    from app.errors import _USER_MESSAGES
+    msg = _USER_MESSAGES[NodeErrorCode.IDENTITY_KEY_ERROR]
+    # Must mention the corruption case so the user knows when this fires.
+    assert "corrupt" in msg.lower()
+    # Must warn about losing the wallet (re-stake).
+    assert "stake" in msg.lower() or "wallet" in msg.lower()
