@@ -93,6 +93,44 @@ def _is_insufficient_funds_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_already_known_error(exc: BaseException) -> bool:
+    """Match the "tx is already in the mempool" family of broadcast errors.
+
+    A retried claim deterministically signs the same tx_hash; a prior
+    attempt may have leaked it into the mempool before the RPC blip,
+    so the next ``send_raw_transaction`` rejects with one of:
+
+    * geth: ``already known``
+    * geth (some forks): ``transaction already exists``
+    * besu / nethermind: ``AlreadyKnown`` / ``ALREADY_EXISTS``
+    * generic phrasing: ``already_known``
+
+    All of them mean the tx is in mempool and we should fall through to
+    ``wait_for_transaction_receipt`` rather than treating it as a hard
+    RPC failure (which is what pre-rc.5 did, classifying the retry as
+    CLAIM_RPC_UNREACHABLE forever). Mirrors the case-insensitive
+    substring style of :py:func:`_is_insufficient_funds_error`.
+    """
+    text = str(exc).lower()
+    needles = (
+        "already known",
+        "alreadyknown",
+        "already_known",
+        "already exists",
+        "already_exists",
+        "transaction already exists",
+    )
+    if any(n in text for n in needles):
+        return True
+    args = getattr(exc, "args", ())
+    for a in args:
+        if isinstance(a, dict):
+            msg = str(a.get("message", "")).lower()
+            if any(n in msg for n in needles):
+                return True
+    return False
+
+
 def _to_contract_tuple(sr: StoredReceipt) -> tuple:
     """Convert a StoredReceipt to the tuple format the contract expects."""
     r = sr.receipt
@@ -460,30 +498,59 @@ async def _submit_batch(
     await store.set_claim_tx_pending(kept_uuids, tx_hash_hex)
 
     def _broadcast_and_wait() -> ClaimResult:
+        # Default the tx_hex to the deterministic hash we computed at
+        # build time. ``send_raw_transaction`` returns the same value on
+        # success; on the "already known" path we rely on this fallback
+        # because the broadcast rejected synchronously.
+        tx_hex = tx_hash_hex
+        broadcast_succeeded = False
         try:
             tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            broadcast_succeeded = True
         except Exception as e:
-            error_text = f"broadcast failed: {e}"
-            # Distinguish "wallet has no CTC for gas" from generic RPC
-            # failures — the resolution is operator-actionable (fund the
-            # identity wallet) and should not look like a transient
-            # network blip in the GUI.
-            if _is_insufficient_funds_error(e):
-                code = reasons.CLAIM_INSUFFICIENT_GAS
+            # "Already known" — a prior attempt at this exact deterministic
+            # tx_hash already populated the mempool. Treat as a successful
+            # broadcast and fall through to wait_for_transaction_receipt;
+            # otherwise the retry stays stuck on CLAIM_RPC_UNREACHABLE
+            # forever even though the tx is in fact about to mine.
+            if _is_already_known_error(e):
+                logger.info(
+                    "claim batch broadcast: tx %s already in mempool from a "
+                    "prior attempt — falling through to receipt wait",
+                    tx_hex,
+                )
             else:
-                code = reasons.CLAIM_RPC_UNREACHABLE
-            return ClaimResult(
-                submitted=len(kept_batch), tx_hash=None, gas_used=None,
-                error=error_text,
-                reason_code=code,
-                sig_verify_dropped=len(dropped_uuids),
-            )
+                error_text = f"broadcast failed: {e}"
+                # Distinguish "wallet has no CTC for gas" from generic RPC
+                # failures — the resolution is operator-actionable (fund the
+                # identity wallet) and should not look like a transient
+                # network blip in the GUI.
+                if _is_insufficient_funds_error(e):
+                    code = reasons.CLAIM_INSUFFICIENT_GAS
+                else:
+                    code = reasons.CLAIM_RPC_UNREACHABLE
+                return ClaimResult(
+                    submitted=len(kept_batch), tx_hash=None, gas_used=None,
+                    error=error_text,
+                    reason_code=code,
+                    sig_verify_dropped=len(dropped_uuids),
+                )
 
-        tx_hex = tx_hash.hex()
-        if not tx_hex.startswith("0x"):
-            tx_hex = "0x" + tx_hex
+        # Resolve the bytes form of the tx hash for the receipt wait.
+        if broadcast_succeeded:
+            tx_hex = tx_hash.hex()
+            if not tx_hex.startswith("0x"):
+                tx_hex = "0x" + tx_hex
+            wait_arg = tx_hash
+        else:
+            # "already known" path — rebuild the bytes form from the
+            # hex we computed at build time. wait_for_transaction_receipt
+            # accepts either bytes or hex string, but we use bytes for
+            # uniformity with the success path.
+            wait_arg = bytes.fromhex(tx_hex.removeprefix("0x"))
+
         try:
-            rcpt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+            rcpt = w3.eth.wait_for_transaction_receipt(wait_arg, timeout=120)
         except Exception as e:
             return ClaimResult(
                 submitted=len(kept_batch), tx_hash=tx_hex, gas_used=None,

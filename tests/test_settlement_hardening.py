@@ -497,6 +497,173 @@ async def test_rpc_unreachable_preserves_claim_tx_pending(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_already_known_falls_through_to_receipt_wait(tmp_path):
+    """rc.5 MAJ-1: when ``send_raw_transaction`` raises "already known",
+    the deterministic tx hash is already in mempool from a prior attempt
+    — DON'T classify as CLAIM_RPC_UNREACHABLE; fall through to
+    ``wait_for_transaction_receipt`` and resolve the tx properly.
+
+    Pre-rc.5 a retried claim against a leaked-but-not-yet-mined tx stayed
+    stuck on CLAIM_RPC_UNREACHABLE forever, even though the tx was about
+    to mine. The fix routes "already known" to the success-in-mempool
+    path.
+    """
+    from app.payment.settlement import _submit_batch
+
+    db = tmp_path / "r.db"
+    store = get_store(str(db))
+    await store.initialize()
+
+    payer_addr = _gateway_address()
+    settings = _mk_settings(db, payer=payer_addr)
+    domain = _domain_for(settings)
+
+    r = _mk_receipt()
+    sig = sign_receipt(_GATEWAY_KEY, r, domain)
+    await store.store(r, signature=sig)
+    batch = [await store.get_by_uuid(r.request_uuid)]
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    with patch(
+        "app.payment.settlement.asyncio.to_thread", fake_to_thread,
+    ), patch("web3.Web3") as MockWeb3, \
+         patch("eth_account.Account") as MockAccount:
+        inst = MockWeb3.return_value
+        inst.is_connected.return_value = True
+        inst.eth = MagicMock()
+        inst.eth.gas_price = 1
+        inst.eth.get_transaction_count.return_value = 0
+        contract = MagicMock()
+        inst.eth.contract.return_value = contract
+        contract.functions.claimBatch.return_value.estimate_gas.return_value = 100_000
+        contract.functions.claimBatch.return_value.build_transaction.return_value = {
+            "from": payer_addr, "nonce": 0, "gas": 100_000,
+            "gasPrice": 1, "chainId": settings.ESCROW_CHAIN_ID,
+        }
+        MockWeb3.to_checksum_address.side_effect = lambda x: x
+        MockWeb3.HTTPProvider.return_value = MagicMock()
+
+        # First call: the leaked tx is in mempool from a prior attempt.
+        # This is a synchronous reject from send_raw_transaction.
+        inst.eth.send_raw_transaction.side_effect = ValueError("already known")
+
+        # Receipt wait succeeds — the tx mines while we're waiting.
+        inst.eth.wait_for_transaction_receipt.return_value = MagicMock(
+            status=1, gasUsed=42_000,
+        )
+
+        signed_tx = MagicMock()
+        signed_tx.raw_transaction = b"\x01\x02"
+        signed_tx.hash.hex.return_value = "ab" * 32
+        account_inst = MagicMock()
+        account_inst.address = payer_addr
+        account_inst.sign_transaction.return_value = signed_tx
+        MockAccount.from_key.return_value = account_inst
+
+        result = await _submit_batch(settings, _GATEWAY_KEY, batch, store)
+
+    # Treated as success: tx_hash set, no error, no reason_code.
+    assert result.error is None or result.error == ""
+    assert result.reason_code is None or result.reason_code == ""
+    assert result.tx_hash == "0x" + "ab" * 32
+    assert result.gas_used == 42_000
+
+    # Receipt is marked claimed and the breadcrumb cleared (success path).
+    final = await store.get_by_uuid(r.request_uuid)
+    assert final.claim_tx_hash == "0x" + "ab" * 32
+    assert final.claim_tx_pending is None
+
+
+@pytest.mark.asyncio
+async def test_already_known_then_revert_still_classified_correctly(tmp_path):
+    """If the leaked-into-mempool tx mines and then reverts on-chain,
+    we classify as CLAIM_REVERTED — same terminal-failure handling as
+    the regular broadcast-then-revert path. The "already known" branch
+    only changes the broadcast classification; the post-wait logic is
+    unchanged.
+    """
+    from app.payment.settlement import _submit_batch
+
+    db = tmp_path / "r.db"
+    store = get_store(str(db))
+    await store.initialize()
+
+    payer_addr = _gateway_address()
+    settings = _mk_settings(db, payer=payer_addr)
+    domain = _domain_for(settings)
+
+    r = _mk_receipt()
+    sig = sign_receipt(_GATEWAY_KEY, r, domain)
+    await store.store(r, signature=sig)
+    batch = [await store.get_by_uuid(r.request_uuid)]
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    with patch(
+        "app.payment.settlement.asyncio.to_thread", fake_to_thread,
+    ), patch("web3.Web3") as MockWeb3, \
+         patch("eth_account.Account") as MockAccount:
+        inst = MockWeb3.return_value
+        inst.is_connected.return_value = True
+        inst.eth = MagicMock()
+        inst.eth.gas_price = 1
+        inst.eth.get_transaction_count.return_value = 0
+        contract = MagicMock()
+        inst.eth.contract.return_value = contract
+        contract.functions.claimBatch.return_value.estimate_gas.return_value = 100_000
+        contract.functions.claimBatch.return_value.build_transaction.return_value = {
+            "from": payer_addr, "nonce": 0, "gas": 100_000,
+            "gasPrice": 1, "chainId": settings.ESCROW_CHAIN_ID,
+        }
+        MockWeb3.to_checksum_address.side_effect = lambda x: x
+        MockWeb3.HTTPProvider.return_value = MagicMock()
+
+        inst.eth.send_raw_transaction.side_effect = ValueError("AlreadyKnown")
+        inst.eth.wait_for_transaction_receipt.return_value = MagicMock(
+            status=0, gasUsed=42_000,
+        )
+
+        signed_tx = MagicMock()
+        signed_tx.raw_transaction = b"\x01\x02"
+        signed_tx.hash.hex.return_value = "ab" * 32
+        account_inst = MagicMock()
+        account_inst.address = payer_addr
+        account_inst.sign_transaction.return_value = signed_tx
+        MockAccount.from_key.return_value = account_inst
+
+        result = await _submit_batch(settings, _GATEWAY_KEY, batch, store)
+
+    assert result.reason_code == reasons.CLAIM_REVERTED
+    assert result.tx_hash == "0x" + "ab" * 32
+
+
+def test_is_already_known_error_matches_common_variants():
+    """Sniffer must recognise the case-insensitive variants we've seen
+    across geth, besu, nethermind, and the JSON-RPC dict-on-args
+    wrapping web3.py applies to some errors.
+    """
+    from app.payment.settlement import _is_already_known_error
+
+    assert _is_already_known_error(ValueError("already known"))
+    assert _is_already_known_error(ValueError("Already Known"))
+    assert _is_already_known_error(ValueError("ALREADY_KNOWN"))
+    assert _is_already_known_error(ValueError("AlreadyKnown"))
+    assert _is_already_known_error(ValueError("transaction already exists"))
+    assert _is_already_known_error(ValueError("ALREADY_EXISTS"))
+    # web3.py dict-on-args wrapping — emulate.
+    err = ValueError({"code": -32603, "message": "Already known"})
+    assert _is_already_known_error(err)
+
+    # Negative cases.
+    assert not _is_already_known_error(ValueError("insufficient funds"))
+    assert not _is_already_known_error(ValueError("connection reset by peer"))
+    assert not _is_already_known_error(ValueError("nonce too low"))
+
+
+@pytest.mark.asyncio
 async def test_reverted_clears_claim_tx_pending(tmp_path):
     """Sanity: the on-chain-confirmed terminal failure (revert) DOES
     clear the breadcrumb — there's nothing left to reconcile, the tx
