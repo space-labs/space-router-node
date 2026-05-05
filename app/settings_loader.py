@@ -175,6 +175,18 @@ _TEST_ESCROW_CHAIN_RPC = "https://rpc.cc3-testnet.creditcoin.network"
 _TEST_ESCROW_CHAIN_ID = 102031
 
 
+def reconcile_passphrase_flag_in_place(s: Settings) -> bool:
+    """Public wrapper for :py:func:`_reconcile_passphrase_flag_in_place`.
+
+    Exposed so non-daemon callers (notably the GUI's :py:class:`ConfigStore`,
+    which has its own settings.json read path that doesn't go through
+    :py:func:`load_provider_settings`) can apply the same keystore-vs-flag
+    reconciliation. See the underscore-prefixed implementation for the
+    full rationale.
+    """
+    return _reconcile_passphrase_flag_in_place(s)
+
+
 def _reconcile_passphrase_flag_in_place(s: Settings) -> bool:
     """Refresh ``wallet.identity_passphrase_set`` from the on-disk keystore.
 

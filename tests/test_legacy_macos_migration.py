@@ -406,3 +406,65 @@ def test_linux_migrator_runs_inside_load_provider_settings(fake_linux):
     s = load_provider_settings(directory=fake_linux["target"])
     assert s.node.port == 5252
     assert (fake_linux["target"] / ".migrated_from_xdg_config").exists()
+
+
+# --- ConfigStore (GUI) trigger ----------------------------------------------
+#
+# rc.5 BLK-1: prior to this fix the macOS legacy migration only ran inside the
+# daemon's ``load_provider_settings`` path. The GUI's ``ConfigStore.__init__``
+# creates ``~/.spacerouter`` and writes settings.json before the daemon ever
+# boots; by the time the daemon's loader called the migrator, the target dir
+# was no longer empty and the safety check refused to copy. v1.4 macOS users
+# upgrading via the GUI silently lost their identity key + receipts.
+#
+# These tests pin the rc.5 fix that hooks the migrator into ConfigStore too.
+
+
+def test_macos_migration_runs_via_config_store_construction(fake_macos):
+    """Constructing :py:class:`ConfigStore` triggers the macOS migration
+    so the GUI's first onboarding write doesn't pre-populate the target
+    dir and trip the migrator's non-empty-target safety bail.
+    """
+    legacy = fake_macos["prod"]
+    _seed_legacy(
+        legacy,
+        files={
+            "certs/node-identity.key": "deadbeef",
+            "spacerouter.env": "SR_NODE_PORT=9090\n",
+        },
+    )
+    target = fake_macos["target"]
+
+    # Reload gui.config_store so the patched Path.home is in effect for
+    # its ``_config_dir()`` resolution.
+    import importlib
+    import gui.config_store as cs_mod
+    importlib.reload(cs_mod)
+
+    cs_mod.ConfigStore()
+
+    assert (target / "certs" / "node-identity.key").read_text() == "deadbeef"
+    sentinel = target / ".migrated_from_appsupport"
+    assert sentinel.exists()
+
+
+def test_config_store_construction_is_idempotent(fake_macos):
+    """Second ConfigStore() must NOT re-copy: the sentinel file gates the
+    migrator after the first run.
+    """
+    legacy = fake_macos["prod"]
+    _seed_legacy(legacy, files={"a.txt": "v1-from-legacy"})
+    target = fake_macos["target"]
+
+    import importlib
+    import gui.config_store as cs_mod
+    importlib.reload(cs_mod)
+
+    cs_mod.ConfigStore()
+    assert (target / "a.txt").read_text() == "v1-from-legacy"
+
+    # User edits the migrated file. A second ConfigStore() construction
+    # must leave the edit alone (sentinel-gated).
+    (target / "a.txt").write_text("v2-edited")
+    cs_mod.ConfigStore()
+    assert (target / "a.txt").read_text() == "v2-edited"

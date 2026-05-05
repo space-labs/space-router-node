@@ -20,6 +20,10 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 from app.identity import write_identity_key
+from app.legacy_migration import (
+    maybe_migrate_legacy_linux,
+    maybe_migrate_legacy_macos,
+)
 from app.settings_v2 import Settings as _SettingsV2
 from app.variant import BUILD_VARIANT
 from app.wallet import validate_wallet_address
@@ -199,6 +203,23 @@ class ConfigStore:
         # immediately if settings.json already exists. Failures are logged
         # but never raised.
         self.migrate_to_settings_json()
+        # Reconcile the cached ``identity_passphrase_set`` flag against the
+        # actual on-disk keystore. The daemon's ``load_provider_settings``
+        # already does this, but the GUI's settings.json reads bypass that
+        # path — without this call, a user who manually rm'd
+        # ``node-identity.key`` (or otherwise desynced the flag from disk)
+        # stays stuck routing the GUI into PASSPHRASE_REQUIRED for a key
+        # that isn't there.
+        try:
+            from app.settings_loader import reconcile_passphrase_flag_in_place
+            if self._settings_json_path.exists():
+                s = self._load_settings_v2()
+                if reconcile_passphrase_flag_in_place(s):
+                    self._save_settings_v2(s)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "passphrase-flag reconcile skipped due to error", exc_info=True
+            )
 
     def migrate_to_settings_json(self) -> "object | None":
         """Migrate an existing v1.4 ``spacerouter.env`` to ``settings.json``.
@@ -232,8 +253,31 @@ class ConfigStore:
         spacerouter.env from v1.4 still get migrated through
         :py:meth:`migrate_to_settings_json`, which then renames the env
         file to ``.migrated.bak``.
+
+        We also opportunistically pull in a legacy macOS / Linux v1.4
+        config dir (Application Support / XDG) here, BEFORE the env
+        migration runs. The daemon's ``app.settings_loader`` performs
+        the same migration when called via CLI, but the GUI's first
+        write into ``settings.json`` (via ``save_onboarding``) happens
+        before the daemon ever boots; if we wait, the legacy migration's
+        non-empty-target safety check trips and the v1.4 user's data is
+        silently abandoned.
         """
         self._dir.mkdir(parents=True, exist_ok=True)
+        # Same fail-soft pattern as ``app.settings_loader.load_provider_settings``:
+        # never let a migration glitch block the GUI from coming up.
+        try:
+            maybe_migrate_legacy_macos(self._dir)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "legacy macOS migration skipped due to error", exc_info=True
+            )
+        try:
+            maybe_migrate_legacy_linux(self._dir)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "legacy Linux XDG migration skipped due to error", exc_info=True
+            )
 
     def _load_settings_v2(self) -> "_SettingsV2":
         """Load settings.json (or a defaults instance if it doesn't exist)."""

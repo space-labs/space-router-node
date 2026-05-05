@@ -64,6 +64,94 @@ def _wizard_env_file() -> str:
 # First-run interactive setup (CLI only)
 # ---------------------------------------------------------------------------
 
+def _persist_wizard_results(
+    *,
+    staking_address: str,
+    collection_address: str,
+    referral_code: str,
+    upnp_enabled: bool,
+    public_ip: str,
+    public_port: str,
+    passphrase_set: bool,
+) -> None:
+    """Write wizard answers directly into ``~/.spacerouter/settings.json``.
+
+    Pre-rc.5 the wizard only wrote to ``spacerouter.env`` and relied on
+    ``settings_loader`` to migrate the env file on the next daemon read.
+    But ``load_settings()`` is invoked BEFORE the wizard (to compute
+    ``needs_setup``), and that call's cold-start branch persists a
+    defaults-only ``settings.json``. From then on the env-file migration
+    is a no-op (target exists), so the wizard's values never reach
+    settings.json. This helper plugs that gap by writing settings.json
+    directly using the same ``Settings.from_env_mapping`` shape.
+
+    The passphrase is INTENTIONALLY not persisted — only the
+    ``identity_passphrase_set`` boolean is, and only when the user
+    actually picked a passphrase. The plaintext passphrase stays in
+    ``os.environ['SR_IDENTITY_PASSPHRASE']`` for the immediate daemon
+    start that follows.
+    """
+    from app.settings_loader import settings_path
+    from app.settings_v2 import Settings as _SettingsV2
+    from app.variant import BUILD_VARIANT as _BUILD_VARIANT
+
+    env_dict: dict[str, str] = {"SR_BUILD_VARIANT": _BUILD_VARIANT}
+    if staking_address:
+        env_dict["SR_STAKING_ADDRESS"] = staking_address
+    if collection_address:
+        env_dict["SR_COLLECTION_ADDRESS"] = collection_address
+    if referral_code:
+        env_dict["SR_REFERRAL_CODE"] = referral_code
+    env_dict["SR_UPNP_ENABLED"] = "true" if upnp_enabled else "false"
+    if public_ip:
+        env_dict["SR_PUBLIC_IP"] = public_ip
+    if public_port and str(public_port) != "9090":
+        env_dict["SR_PUBLIC_PORT"] = str(public_port)
+    if passphrase_set:
+        # ``from_env_mapping`` reads the presence of SR_IDENTITY_PASSPHRASE
+        # to flip the boolean — value is never stored, only the boolean flag.
+        env_dict["SR_IDENTITY_PASSPHRASE"] = "set"
+
+    sp = settings_path()
+    sp.parent.mkdir(parents=True, exist_ok=True)
+
+    # Merge: if a defaults-only settings.json already exists (cold-start
+    # path), preserve any operator-set fields we didn't overwrite. Build
+    # a fresh Settings from the wizard mapping, then copy it over the
+    # existing one section-by-section using model_dump merge.
+    merged = _SettingsV2.from_env_mapping(env_dict)
+    if sp.exists():
+        try:
+            existing = _SettingsV2.load(sp)
+        except Exception:  # noqa: BLE001
+            existing = None
+        if existing is not None:
+            # Wizard answers win for the fields the user just chose; for
+            # everything else (escrow defaults, coord URL, ports the
+            # wizard didn't touch) keep the existing value.
+            if not staking_address:
+                merged.wallet.staking_address = existing.wallet.staking_address
+            if not collection_address:
+                merged.wallet.collection_address = existing.wallet.collection_address
+            if not referral_code:
+                merged.node.referral_code = existing.node.referral_code
+            if not public_ip:
+                merged.node.public_ip = existing.node.public_ip
+            if not public_port or str(public_port) == "9090":
+                merged.node.public_port = existing.node.public_port
+            # Preserve previously-configured escrow + coord URL.
+            merged.escrow = existing.escrow
+            merged.coordination = existing.coordination
+            # Carry over identity_passphrase_set when the wizard didn't
+            # touch it (existing key, no fresh passphrase set).
+            if not passphrase_set:
+                merged.wallet.identity_passphrase_set = (
+                    existing.wallet.identity_passphrase_set
+                )
+
+    merged.save(sp)
+
+
 def _first_run_setup() -> bool:
     """Interactive first-time setup wizard with rich prompts.
 
@@ -244,6 +332,22 @@ def _first_run_setup() -> bool:
             set_key(env_file, "SR_PUBLIC_IP", public_ip)
         if public_port and public_port != "9090":
             set_key(env_file, "SR_PUBLIC_PORT", public_port)
+
+        # ALSO write directly to settings.json. Pre-rc.5 we relied on
+        # settings_loader picking up the env file on the next daemon
+        # start, but a settings.json had already been created by the
+        # earlier ``load_settings()`` call (the cold-start path persists
+        # defaults). With settings.json present the env-file migration is
+        # skipped and the wizard's values are silently dropped.
+        _persist_wizard_results(
+            staking_address=staking_address,
+            collection_address=collection_address,
+            referral_code=referral_code,
+            upnp_enabled=upnp_enabled,
+            public_ip=public_ip,
+            public_port=public_port,
+            passphrase_set=bool(passphrase),
+        )
 
         wizard_done(env_file)
         return True
