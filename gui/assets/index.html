@@ -51,7 +51,18 @@
       <div class="advanced-section" id="advanced-section" style="display: none;">
         <div class="input-group" style="margin-top: 0;">
           <label for="passphrase-input">Passphrase</label>
-          <input type="password" id="passphrase-input" placeholder="Optional — encrypts key on disk" autocomplete="new-password">
+          <div class="passphrase-row">
+            <input type="password" id="passphrase-input" placeholder="Optional — encrypts key on disk" autocomplete="new-password">
+            <button type="button" id="passphrase-show-toggle" class="passphrase-toggle" aria-label="Show passphrase">Show</button>
+          </div>
+        </div>
+        <div class="input-group">
+          <label for="passphrase-confirm-input">Confirm passphrase</label>
+          <div class="passphrase-row">
+            <input type="password" id="passphrase-confirm-input" placeholder="Re-enter passphrase" autocomplete="new-password">
+            <button type="button" id="passphrase-confirm-show-toggle" class="passphrase-toggle" aria-label="Show passphrase">Show</button>
+          </div>
+          <span id="passphrase-error" class="error"></span>
         </div>
         <div class="input-group">
           <label for="staking-input">Staking address</label>
@@ -240,10 +251,25 @@
   <!-- Fresh Restart Confirmation Dialog -->
   <div id="screen-fresh-restart" class="screen" style="display: none;">
     <div class="container">
-      <h2>Reset Node</h2>
-      <p class="subtitle">This will delete your identity key, certificates, and all configuration. You will need to set up the node again.</p>
+      <h2>Reset Node — this is permanent</h2>
+      <p class="subtitle">Read each consequence carefully before continuing:</p>
+      <ul class="reset-warning-list">
+        <li><strong>Pending receipts will be permanently lost.</strong> Any unclaimed earnings cannot be recovered.</li>
+        <li><strong>Identity key will be replaced.</strong> Your provider node ID changes; the gateway sees you as a new node.</li>
+        <li><strong>You will need to re-stake</strong> against the new identity to resume earning.</li>
+      </ul>
+      <p class="reset-confirm-prompt">Type <code>RESET</code> below to enable the confirm button.</p>
+      <input
+        type="text"
+        id="reset-confirm-input"
+        autocomplete="off"
+        autocapitalize="off"
+        autocorrect="off"
+        spellcheck="false"
+        placeholder="RESET"
+      />
       <div class="restart-actions">
-        <button id="btn-restart-confirm" class="btn-primary btn-danger">Reset Node</button>
+        <button id="btn-restart-confirm" class="btn-primary btn-danger" disabled>Confirm Reset</button>
         <button id="btn-restart-cancel" class="btn-back">Cancel</button>
       </div>
     </div>

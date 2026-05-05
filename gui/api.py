@@ -976,6 +976,19 @@ class Api:
             for key in list(os.environ.keys()):
                 if key.startswith("SR_"):
                     del os.environ[key]
+            # Re-init the GUI file logger. ``wipe_operational_state`` just
+            # removed the ``logs/`` directory; without re-init the existing
+            # RotatingFileHandler points at a non-existent file and some
+            # platforms drop subsequent messages until restart. Calling
+            # setup_gui_file_logging again attaches a fresh handler.
+            try:
+                from app.node_logging import setup_gui_file_logging
+                setup_gui_file_logging()
+            except Exception:
+                logger.warning(
+                    "GUI file logging re-init failed after reset",
+                    exc_info=True,
+                )
             return {"ok": True}
         except Exception as exc:
             logger.exception("Failed to fresh restart")

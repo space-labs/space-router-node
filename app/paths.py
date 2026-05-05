@@ -88,4 +88,19 @@ def wipe_operational_state(directory: Path) -> list[str]:
                 f"be in use; restart and try again if it persists."
             )
 
+    # Single-instance + claim coordination locks. These are pid/flock-style
+    # files; if Reset Node leaves them behind, the next start either
+    # refuses to launch (single-instance check sees a stale daemon.lock)
+    # or skips a claim cycle (claim.lock looks taken). They're owned by
+    # the running process, so deletion here is safe — the next start
+    # rewrites them.
+    for lock_name in ("daemon.lock", "claim.lock"):
+        lock = directory / lock_name
+        if lock.is_file():
+            try:
+                lock.unlink()
+                notes.append(f"Removed {lock}")
+            except OSError as e:
+                notes.append(f"Could not remove {lock}: {e}")
+
     return notes

@@ -498,6 +498,80 @@ h2 {
   margin-top: 4px;
 }
 
+/* Reset warning list — explicit consequences of Fresh Restart. */
+.reset-warning-list {
+  margin: 12px 0 16px 20px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #2c3e50;
+}
+
+.reset-warning-list li {
+  margin-bottom: 10px;
+}
+
+.reset-confirm-prompt {
+  margin: 8px 0;
+  font-size: 13px;
+  color: #555;
+}
+
+.reset-confirm-prompt code {
+  background: #f4f4f4;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: monospace;
+}
+
+#reset-confirm-input {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 14px;
+  font-family: monospace;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  margin-bottom: 8px;
+  box-sizing: border-box;
+}
+
+#reset-confirm-input:focus {
+  outline: none;
+  border-color: #e74c3c;
+}
+
+/* Disabled-button styling so the gating is visible. */
+.btn-primary:disabled,
+.btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Passphrase row — input + show/hide toggle. */
+.passphrase-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.passphrase-row input {
+  flex: 1;
+}
+
+.passphrase-toggle {
+  padding: 0 10px;
+  font-size: 12px;
+  background: #ecf0f1;
+  border: 1px solid #bdc3c7;
+  border-radius: 4px;
+  cursor: pointer;
+  color: #2c3e50;
+}
+
+.passphrase-toggle:hover {
+  background: #d5dbdf;
+}
+
 /* Network setup radio cards */
 .network-options {
   display: flex;

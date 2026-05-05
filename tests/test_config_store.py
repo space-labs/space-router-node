@@ -192,19 +192,40 @@ class TestEscrowDefaults:
 
 
 class TestFreshRestartPreservesEscrow:
-    def test_reset_rewrites_settings_json_with_variant_defaults(self, monkeypatch, tmp_path):
-        """Reset wipes user customisations but preserves variant defaults.
+    """Reset must wipe customisations but the next *load* must come back
+    with sane variant defaults.
 
-        On v1.5 the canonical store is settings.json, not spacerouter.env.
-        After ``reset()`` the file should re-appear with a fresh defaults
-        instance for the active build variant, so QA's wallet-edit-then-
-        Fresh-Restart flow no longer destroys their config layout.
+    rc.5 MAJ-3 changed reset() to DELETE settings.json (matching CLI
+    --reset) instead of re-saving a defaults instance. The defaults are
+    re-materialised on the next load via ``app.settings_loader``'s
+    cold-start path + ``_backfill_test_escrow_in_place``. These tests
+    exercise that round-trip: reset() then load_provider_settings.
+    """
+
+    @staticmethod
+    def _force_seed_variant(monkeypatch, variant: str) -> None:
+        """Make a fresh post-reset load come back with *variant* as the
+        ``build_variant``.
+
+        Strategy: patch ``app.variant.BUILD_VARIANT`` (used by
+        ``gui.config_store``) and set ``SR_BUILD_VARIANT`` in os.environ
+        so ``settings_loader``'s cold-start step 3 (env-mapping path)
+        fires with the right value before falling through to the
+        defaults-only step 4. Both are reverted by monkeypatch teardown
+        so tests stay isolated.
+        """
+        import app.variant as variant_mod
+        monkeypatch.setattr(variant_mod, "BUILD_VARIANT", variant)
+        monkeypatch.setenv("SR_BUILD_VARIANT", variant)
+
+    def test_reset_then_reload_yields_variant_defaults(self, monkeypatch, tmp_path):
+        """After ``reset()`` plus a load, settings.json reappears with
+        fresh defaults for the active build variant. Wallet
+        customisations are gone (that's the promise of reset).
         """
         import importlib
-        import json
 
-        import app.variant as variant_mod
-        monkeypatch.setattr(variant_mod, "BUILD_VARIANT", "test")
+        self._force_seed_variant(monkeypatch, "test")
 
         import gui.config_store as cs
         cs = importlib.reload(cs)
@@ -215,26 +236,28 @@ class TestFreshRestartPreservesEscrow:
             store.save_wallets("0x" + "a" * 40)
             store.reset()
 
-        # After reset, settings.json exists with defaults for the active
-        # variant. The wallet-address customisation is gone (that's the
-        # promise of reset), but the structure itself is sane.
-        settings_path = tmp_path / "settings.json"
-        assert settings_path.exists()
-        data = json.loads(settings_path.read_text())
-        assert data["build_variant"] == "test"
-        assert data["wallet"]["staking_address"] in (None, "")
+        # rc.5: settings.json is deleted on reset. The cold-start path
+        # rebuilds it on the next load.
+        assert not (tmp_path / "settings.json").exists()
 
-    def test_reset_preserves_escrow_on_test_variant(self, monkeypatch, tmp_path):
+        from app.settings_loader import load_provider_settings
+        s = load_provider_settings(tmp_path)
+        # Rebuilt on load — wallet wiped, variant intact.
+        assert s.build_variant == "test"
+        assert s.wallet.staking_address in (None, "")
+        # And settings.json is now back on disk.
+        assert (tmp_path / "settings.json").exists()
+
+    def test_reset_then_reload_preserves_escrow_on_test_variant(self, monkeypatch, tmp_path):
         """Regression for the test.95 ship-stopper: Fresh Restart used to
         wipe escrow.enabled to false, leaving the receipt submitter dead
         and Earnings spamming `no such table: signed_receipts`. After
-        reset, escrow must still be on with the testnet contract addrs.
+        reset + reload, escrow must still be on with testnet contract
+        addrs (via ``_backfill_test_escrow_in_place``).
         """
         import importlib
-        import json
 
-        import app.variant as variant_mod
-        monkeypatch.setattr(variant_mod, "BUILD_VARIANT", "test")
+        self._force_seed_variant(monkeypatch, "test")
 
         import gui.config_store as cs
         cs = importlib.reload(cs)
@@ -243,24 +266,22 @@ class TestFreshRestartPreservesEscrow:
             store = cs.ConfigStore()
             store.reset()
 
-        data = json.loads((tmp_path / "settings.json").read_text())
-        assert data["escrow"]["enabled"] is True
-        assert data["escrow"]["contract_address"].lower().startswith("0xc5740e4e")
-        assert "testnet.creditcoin.network" in data["escrow"]["chain_rpc"]
-        assert data["escrow"]["chain_id"] == 102031
+        from app.settings_loader import load_provider_settings
+        s = load_provider_settings(tmp_path)
+        assert s.escrow.enabled is True
+        assert s.escrow.contract_address.lower().startswith("0xc5740e4e")
+        assert "testnet.creditcoin.network" in s.escrow.chain_rpc
+        assert s.escrow.chain_id == 102031
         # Rate is left null after reset; TOFU sync at boot fills it.
-        assert data["escrow"]["leg2_rate_per_gb"] is None
+        assert s.escrow.leg2_rate_per_gb is None
 
-    def test_reset_does_not_force_escrow_on_prod_variant(self, monkeypatch, tmp_path):
+    def test_reset_then_reload_does_not_force_escrow_on_prod_variant(self, monkeypatch, tmp_path):
         """Prod must NOT auto-opt-into escrow until mainnet rollout —
-        operators decide. Reset on prod yields escrow.enabled=false and
-        no testnet contract addrs.
+        operators decide. Reset + reload on prod yields escrow.enabled=false.
         """
         import importlib
-        import json
 
-        import app.variant as variant_mod
-        monkeypatch.setattr(variant_mod, "BUILD_VARIANT", "production")
+        self._force_seed_variant(monkeypatch, "production")
 
         import gui.config_store as cs
         cs = importlib.reload(cs)
@@ -269,8 +290,8 @@ class TestFreshRestartPreservesEscrow:
             store = cs.ConfigStore()
             store.reset()
 
-        data = json.loads((tmp_path / "settings.json").read_text())
-        assert data["escrow"]["enabled"] is False
-        # Empty/None — operator hasn't configured prod escrow yet.
-        assert not data["escrow"]["contract_address"]
-        assert not data["escrow"]["chain_rpc"]
+        from app.settings_loader import load_provider_settings
+        s = load_provider_settings(tmp_path)
+        assert s.escrow.enabled is False
+        assert not s.escrow.contract_address
+        assert not s.escrow.chain_rpc

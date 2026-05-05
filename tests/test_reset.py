@@ -73,20 +73,20 @@ class TestConfigStoreReset:
         assert store_with_state.get("SR_STAKING_ADDRESS") == ""
         assert store_with_state.get("SR_COLLECTION_ADDRESS") == ""
 
-    def test_reset_restores_default_config(self, store_with_state):
-        """reset() must rewrite settings.json with a fresh defaults instance."""
-        import json
+    def test_reset_deletes_settings_json(self, store_with_state):
+        """reset() must DELETE settings.json (rc.5 MAJ-3).
 
+        Pre-rc.5 reset() re-saved a defaults instance, which left a stale
+        defaults file behind that drifted out of sync when the canonical
+        defaults changed between releases. The cold-start path in
+        ``app.settings_loader`` re-creates settings.json on the next
+        start with current canonical defaults — including the test
+        variant's escrow opt-in via ``_backfill_test_escrow_in_place``.
+        Brings GUI behavior in line with CLI's ``_do_reset``.
+        """
         store_with_state.reset()
 
-        settings_path = store_with_state._settings_json_path
-        assert settings_path.exists()
-        data = json.loads(settings_path.read_text())
-        # Schema-fresh defaults: wallet wiped, schema version present,
-        # build_variant matches the active value.
-        assert data["wallet"]["staking_address"] in (None, "")
-        assert data["wallet"]["collection_address"] in (None, "")
-        assert data.get("schema_version") == 1
+        assert not store_with_state._settings_json_path.exists()
 
     def test_reset_makes_needs_onboarding_true(self, store_with_state):
         """After reset(), needs_onboarding() must return True (identity key gone)."""
@@ -166,6 +166,8 @@ class TestApiFreshRestart:
         assert not (tmp_path / "certs" / "node-identity.key").exists()
         # Verify certs dir was removed
         assert not (tmp_path / "certs").exists()
+        # rc.5 MAJ-3: settings.json must be deleted, not re-saved.
+        assert not (tmp_path / "settings.json").exists()
 
     def test_fresh_restart_clears_env_vars(self, store_with_state):
         """fresh_restart() must remove all SR_ env vars."""
@@ -279,6 +281,9 @@ class TestWipeOperationalState:
         (tmp_path / "incidents.json").write_text("[]")
         (tmp_path / "logs").mkdir()
         (tmp_path / "logs" / "a.log").write_text("y")
+        # rc.5 MAJ-3: pid/coordination locks must also go.
+        (tmp_path / "daemon.lock").write_text("12345")
+        (tmp_path / "claim.lock").write_text("active")
 
         notes = wipe_operational_state(tmp_path)
 
@@ -286,9 +291,13 @@ class TestWipeOperationalState:
         assert not (tmp_path / "receipts.db-wal").exists()
         assert not (tmp_path / "incidents.json").exists()
         assert not (tmp_path / "logs").exists()
+        assert not (tmp_path / "daemon.lock").exists()
+        assert not (tmp_path / "claim.lock").exists()
         assert any("receipts.db" in n for n in notes)
         assert any("incidents.json" in n for n in notes)
         assert any("logs" in n for n in notes)
+        assert any("daemon.lock" in n for n in notes)
+        assert any("claim.lock" in n for n in notes)
 
     def test_silent_when_nothing_to_wipe(self, tmp_path):
         from app.paths import wipe_operational_state

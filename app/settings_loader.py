@@ -138,6 +138,11 @@ def load_provider_settings(directory: Path | None = None) -> Settings:
     env_vars = {k: v for k, v in os.environ.items() if k.startswith("SR_")}
     if env_vars:
         s = Settings.from_env_mapping(env_vars)
+        # Apply the same testnet-escrow backfill we do for the JSON-load
+        # and defaults-only paths. Without this, a test build that
+        # cold-starts from env vars (no settings.json, no env file) wakes
+        # up with escrow disabled and the receipt submitter dead.
+        _backfill_test_escrow_in_place(s)
         directory.mkdir(parents=True, exist_ok=True)
         s.save(s_path)
         logger.info("settings loaded from: %s (seeded from environment)", s_path)

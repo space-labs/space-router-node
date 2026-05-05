@@ -465,24 +465,30 @@ class ConfigStore:
             shutil.rmtree(certs_dir)
 
         # Wipe operational artefacts — receipts.db, incidents.json,
-        # logs/. Reset Node promises a clean slate, but pre-rc.3 only
-        # touched settings + identity. Stale failed-claim rows and old
-        # incident banners survived a "fresh" restart and confused QA.
+        # logs/, and pid/coordination locks. Reset Node promises a clean
+        # slate, but pre-rc.3 only touched settings + identity. Stale
+        # failed-claim rows and old incident banners survived a "fresh"
+        # restart and confused QA.
         for note in wipe_operational_state(self._dir):
             logger.info("reset: %s", note)
 
-        # Reset settings.json to defaults for the current build variant.
-        # Anything previously persisted (wallet, coord URL, etc.) is wiped
-        # intentionally — that's what reset promises. We feed _DEFAULTS
-        # through from_env_mapping so the test variant's escrow opt-in
-        # (PAYMENT_ENABLED + leg2 rate + contract addrs) survives Fresh
-        # Restart. test.95 shipped a bare `_SettingsV2()` here, which
-        # wiped escrow.enabled to false and left the receipt submitter
-        # dead until the user hand-edited settings.json.
-        env_defaults = {k: v for k, v in _DEFAULTS.items() if v}
-        env_defaults["SR_BUILD_VARIANT"] = BUILD_VARIANT
-        defaults = _SettingsV2.from_env_mapping(env_defaults)
-        self._save_settings_v2(defaults)
+        # Delete settings.json instead of re-saving defaults. The next
+        # start's cold-start path in ``app.settings_loader`` re-creates
+        # it with canonical defaults (the test variant's escrow opt-in
+        # is restored by ``_backfill_test_escrow_in_place``). This brings
+        # the GUI in line with the CLI's ``_do_reset`` which already
+        # removes settings.json directly. Keeping a stale defaults file
+        # here was the source of subtle drift when the canonical defaults
+        # changed between releases.
+        if self._settings_json_path.is_file():
+            try:
+                self._settings_json_path.unlink()
+            except OSError as e:
+                logger.warning(
+                    "reset: could not remove %s: %s",
+                    self._settings_json_path,
+                    e,
+                )
 
     def apply_to_env(self) -> None:
         """Load all config values into os.environ so pydantic-settings picks them up."""

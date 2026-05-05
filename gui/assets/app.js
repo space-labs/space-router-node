@@ -255,6 +255,59 @@ function initOnboarding() {
     advancedArrow.textContent = open ? "▸" : "▾";
   });
 
+  // ── Passphrase show/hide toggles ──
+  // Two fields, each with its own visibility toggle. We never touch the
+  // value — only the input ``type``. This mirrors the CLI wizard's
+  // confirm-twice behaviour.
+  function wirePassphraseToggle(inputId, toggleId) {
+    const input = document.getElementById(inputId);
+    const toggle = document.getElementById(toggleId);
+    if (!input || !toggle) return;
+    toggle.addEventListener("click", function () {
+      if (input.type === "password") {
+        input.type = "text";
+        toggle.textContent = "Hide";
+      } else {
+        input.type = "password";
+        toggle.textContent = "Show";
+      }
+    });
+  }
+  wirePassphraseToggle("passphrase-input", "passphrase-show-toggle");
+  wirePassphraseToggle("passphrase-confirm-input", "passphrase-confirm-show-toggle");
+
+  // ── Passphrase confirm validation ──
+  const passphraseInput = $("#passphrase-input");
+  const passphraseConfirmInput = $("#passphrase-confirm-input");
+  const passphraseError = $("#passphrase-error");
+  function validatePassphrase() {
+    const a = passphraseInput.value;
+    const b = passphraseConfirmInput.value;
+    // Empty is allowed (passphrase is optional). Once the user types
+    // anything in the primary, both fields must match.
+    if (!a && !b) {
+      passphraseError.textContent = "";
+      passphraseConfirmInput.classList.remove("invalid");
+      return true;
+    }
+    if (a !== b) {
+      passphraseError.textContent = "Passphrases do not match";
+      passphraseConfirmInput.classList.add("invalid");
+      return false;
+    }
+    passphraseError.textContent = "";
+    passphraseConfirmInput.classList.remove("invalid");
+    return true;
+  }
+  passphraseInput.addEventListener("input", function () {
+    validatePassphrase();
+    validateForm();
+  });
+  passphraseConfirmInput.addEventListener("input", function () {
+    validatePassphrase();
+    validateForm();
+  });
+
   // ── Network mode toggle (in advanced section) ──
   const onboardNetworkRadios = document.querySelectorAll('input[name="onboard-network-mode"]');
   const onboardTunnelConfig = $("#onboard-tunnel-config");
@@ -306,7 +359,8 @@ function initOnboarding() {
       (radioImport.checked && HEX_KEY_RE.test(identityKeyInput.value.trim()));
     const stakingValid = validateAddress(stakingInput, stakingError);
     const collectionValid = validateAddress(collectionInput, collectionError);
-    btn.disabled = !(importValid && stakingValid && collectionValid);
+    const passphraseValid = validatePassphrase();
+    btn.disabled = !(importValid && stakingValid && collectionValid && passphraseValid);
   }
 
   // Enable button immediately for generate mode
@@ -318,6 +372,15 @@ function initOnboarding() {
     btn.textContent = "Starting...";
 
     const passphrase = $("#passphrase-input").value;
+    const passphraseConfirm = $("#passphrase-confirm-input").value;
+    if (passphrase !== passphraseConfirm) {
+      // Belt-and-suspenders — validateForm already gates the button,
+      // but a programmatic submit could bypass that.
+      $("#passphrase-error").textContent = "Passphrases do not match";
+      btn.disabled = false;
+      btn.textContent = "Start Node";
+      return;
+    }
     const staking = stakingInput.value.trim();
     const collection = collectionInput.value.trim();
     const identityKeyHex = radioImport.checked ? identityKeyInput.value.trim() : "";
@@ -866,12 +929,22 @@ async function updateStatus() {
 // ── Fresh Restart ──
 
 function initFreshRestart() {
+  const confirmBtn = $("#btn-restart-confirm");
+  const confirmInput = $("#reset-confirm-input");
+
   $("#btn-fresh-restart").addEventListener("click", function () {
-    // Reset button state
-    $("#btn-restart-confirm").disabled = false;
-    $("#btn-restart-confirm").textContent = "Reset Node";
+    // Reset button state — RESET-typing gating starts disabled.
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = "Confirm Reset";
+    if (confirmInput) {
+      confirmInput.value = "";
+    }
     hideAll();
     show("screen-fresh-restart");
+    if (confirmInput) {
+      // Focus the input so the user lands ready to type.
+      setTimeout(function () { confirmInput.focus(); }, 50);
+    }
   });
 
   $("#btn-restart-cancel").addEventListener("click", function () {
@@ -879,7 +952,17 @@ function initFreshRestart() {
     showStatus();
   });
 
-  $("#btn-restart-confirm").addEventListener("click", async function () {
+  if (confirmInput) {
+    // The confirm button is gated behind the user typing exactly "RESET".
+    // Case-sensitive on purpose — typo-protection. Whitespace tolerated.
+    confirmInput.addEventListener("input", function () {
+      const matches = confirmInput.value.trim() === "RESET";
+      confirmBtn.disabled = !matches;
+    });
+  }
+
+  confirmBtn.addEventListener("click", async function () {
+    if (confirmBtn.disabled) return;
     await doFreshRestart();
   });
 }
@@ -893,7 +976,7 @@ async function doFreshRestart() {
     const result = await window.pywebview.api.fresh_restart();
     if (!result.ok) {
       btn.disabled = false;
-      btn.textContent = "Reset Node";
+      btn.textContent = "Confirm Reset";
       return;
     }
 
@@ -904,7 +987,7 @@ async function doFreshRestart() {
     initOnboarding();
   } catch (e) {
     btn.disabled = false;
-    btn.textContent = "Reset Node";
+    btn.textContent = "Confirm Reset";
   }
 }
 
