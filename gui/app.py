@@ -9,19 +9,58 @@ import time
 
 import webview
 
-from gui.api import Api
-from gui.config_store import ConfigStore
-from gui.node_manager import NodeManager
-from gui.single_instance import SingleInstanceLock
-from gui.tray import SpaceRouterTray
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# Set up persistent log file with rotation
+# Run legacy macOS / Linux migrations BEFORE anything else touches
+# ~/.spacerouter — including the log file handler below, which creates
+# ~/.spacerouter/logs/ on first call. The migration's safety check
+# (`_is_dir_empty`) refuses to overwrite a non-empty target, so even a
+# single log file pre-existing in the new dir is enough to silently
+# skip the migration. Running this first guarantees the canonical dir
+# is empty when the migration helper looks at it.
+def _run_legacy_migrations_early() -> None:
+    try:
+        from app.paths import config_dir
+        from app.legacy_migration import (
+            maybe_migrate_legacy_linux,
+            maybe_migrate_legacy_macos,
+        )
+        target = config_dir()
+        try:
+            moved = maybe_migrate_legacy_macos(target)
+            if moved:
+                logger.info("legacy macOS migration: copied to %s", target)
+        except Exception:
+            logger.warning(
+                "legacy macOS migration skipped due to error", exc_info=True,
+            )
+        try:
+            moved = maybe_migrate_legacy_linux(target)
+            if moved:
+                logger.info("legacy Linux XDG migration: copied to %s", target)
+        except Exception:
+            logger.warning(
+                "legacy Linux XDG migration skipped due to error", exc_info=True,
+            )
+    except Exception:
+        # Never let migration glitches block startup.
+        logger.warning("legacy migration entry skipped due to error", exc_info=True)
+
+
+_run_legacy_migrations_early()
+
+from gui.api import Api  # noqa: E402
+from gui.config_store import ConfigStore  # noqa: E402
+from gui.node_manager import NodeManager  # noqa: E402
+from gui.single_instance import SingleInstanceLock  # noqa: E402
+from gui.tray import SpaceRouterTray  # noqa: E402
+
+# Set up persistent log file with rotation. Must follow the migration
+# above — this call creates ~/.spacerouter/logs/ on first run.
 from app.node_logging import setup_gui_file_logging  # noqa: E402
 
 _log_dir = setup_gui_file_logging()

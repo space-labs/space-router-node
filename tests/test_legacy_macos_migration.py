@@ -448,6 +448,43 @@ def test_macos_migration_runs_via_config_store_construction(fake_macos):
     assert sentinel.exists()
 
 
+def test_gui_app_runs_migration_before_log_setup():
+    """The GUI entry point (``gui/app.py``) must invoke the legacy
+    migration BEFORE the file-log handler is created — otherwise
+    ``~/.spacerouter/logs/spacerouter-node.log`` is written first, the
+    target dir is no longer empty, and the migrator's safety check
+    silently bails.
+
+    Pre-rc.5.1: real macOS GUI binary smoke exposed this — the rc.5
+    fix added the migration call to ``ConfigStore.__init__``, but
+    ``setup_gui_file_logging`` is invoked at module import time by
+    ``gui/app.py``, which runs BEFORE ``ConfigStore`` is constructed.
+    The fix wires an explicit early migration call into ``gui/app.py``
+    that runs before any ``~/.spacerouter`` writes. This static-source
+    test pins the ordering so a future refactor doesn't silently
+    reintroduce the bug.
+    """
+    import inspect
+    import gui.app as gui_app
+
+    src = inspect.getsource(gui_app)
+
+    early_pos = src.find("_run_legacy_migrations_early()")
+    log_pos = src.find("setup_gui_file_logging")
+    assert early_pos != -1, (
+        "gui/app.py must call _run_legacy_migrations_early() at module load "
+        "so the legacy macOS / Linux migration runs before any "
+        "~/.spacerouter write."
+    )
+    assert log_pos != -1, (
+        "gui/app.py must call setup_gui_file_logging at module load."
+    )
+    assert early_pos < log_pos, (
+        "Legacy migration must precede log-handler setup. "
+        f"Got migration call at offset {early_pos}, log setup at {log_pos}."
+    )
+
+
 def test_config_store_construction_is_idempotent(fake_macos):
     """Second ConfigStore() must NOT re-copy: the sentinel file gates the
     migrator after the first run.
