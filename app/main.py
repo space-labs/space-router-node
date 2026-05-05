@@ -2320,6 +2320,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
              "listing so stuck CLAIM_TX_TIMEOUT rows are resolved.",
     )
     claim_group.add_argument(
+        "--include-claimed", action="store_true", dest="include_claimed",
+        help="With --receipts --json: include already-claimed (settled) "
+             "receipts in the output alongside pending and failed rows. "
+             "Default off so the JSON payload stays focused on actionable "
+             "rows.",
+    )
+    claim_group.add_argument(
         "--claim", action="store_true",
         help="Submit all claimable Leg 2 receipts on-chain via claimBatch() "
              "and exit. Combine with --include-retryable to also settle "
@@ -2557,6 +2564,7 @@ async def _cmd_receipts(
     failed_only: bool = False,
     as_json: bool = False,
     run_reaper: bool = False,
+    include_claimed: bool = False,
 ) -> None:
     """List Leg 2 receipts from the local store.
 
@@ -2598,6 +2606,11 @@ async def _cmd_receipts(
         # Locked rows at the end so they don't dominate the top of the
         # list when the interesting data is further down.
         rows += await store.list_by_view("failed_terminal", limit=500)
+        # rc.5 minor #2 — include claimed history for tools that want
+        # the full picture. Off by default so the operator-facing
+        # default stays focused on actionable rows.
+        if include_claimed:
+            rows += await store.list_by_view("claimed", limit=500)
 
     if as_json:
         print(json_mod.dumps({
@@ -2884,11 +2897,17 @@ import time  # noqa: E402
 def main() -> None:
     from app.node_logging import setup_cli_logging, reset_activity  # noqa: E402
 
-    setup_cli_logging()
-    reset_activity()
-
     parser = _build_arg_parser()
     args = parser.parse_args()
+
+    # ``--receipts --json`` is consumed by tooling that reads stdout as
+    # JSON. Route INFO/WARNING/ERROR to stderr so log lines never bleed
+    # into the JSON payload. Also applies to ``--claim`` when run with
+    # any later ``--json`` flag (currently no such flag, but the same
+    # reasoning would apply).
+    log_to_stderr = bool(getattr(args, "output_json", False) and args.receipts)
+    setup_cli_logging(log_to_stderr=log_to_stderr)
+    reset_activity()
 
     # Validate CLI input before doing any work. Bad --port / --staking-address
     # used to start the daemon anyway and surface as far-downstream failures
@@ -2913,6 +2932,7 @@ def main() -> None:
             failed_only=args.failed,
             as_json=args.output_json,
             run_reaper=args.reap,
+            include_claimed=getattr(args, "include_claimed", False),
         ))
         return
     if args.claim:

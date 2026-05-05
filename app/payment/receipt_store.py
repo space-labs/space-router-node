@@ -147,6 +147,16 @@ class ReceiptStore:
         if self._initialized:
             return
 
+        # rc.5 minor #4: a fresh receipts.db can hit
+        # "sqlite3.OperationalError: database is locked" on the first
+        # connection when ``PRAGMA journal_mode=WAL`` runs concurrently
+        # with another writer (e.g. the GUI's submitter racing with a
+        # CLI `--receipts` invocation, or two daemon worker tasks
+        # initialising in parallel). Retry with backoff before giving
+        # up — keeps startup self-healing on a cold DB.
+        delays = (0.1, 0.5, 2.0)
+        attempt = 0
+
         def _do() -> None:
             with self._connect() as conn:
                 cur = conn.execute("PRAGMA user_version")
@@ -279,7 +289,28 @@ class ReceiptStore:
                         f"writer. Retry after stopping other processes."
                     )
 
-        await asyncio.to_thread(_do)
+        last_err: Exception | None = None
+        for delay in (0.0, *delays):
+            if delay:
+                await asyncio.sleep(delay)
+            attempt += 1
+            try:
+                await asyncio.to_thread(_do)
+                last_err = None
+                break
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e).lower():
+                    logger.info(
+                        "receipt_store init: database is locked "
+                        "(attempt %d/%d) — retrying in %.1fs",
+                        attempt, len(delays) + 1, delay if delay else 0.1,
+                    )
+                    last_err = e
+                    continue
+                # Non-locked OperationalError → propagate immediately.
+                raise
+        if last_err is not None:
+            raise last_err
         self._initialized = True
 
     async def store_unsigned(self, receipt: Receipt, request_id: str) -> None:
