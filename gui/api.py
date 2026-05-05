@@ -423,6 +423,10 @@ class Api:
             "retry_count": ns.retry_count,
             "next_retry_at": ns.next_retry_at,
             "node_id": ns.node_id,
+            # rc.5 F2: surface the identity address explicitly so the
+            # GUI's Wallet panel doesn't have to know that node_id IS
+            # the identity address (a coincidence of the architecture).
+            "identity_address": ns.node_id,
             "cert_expiry_warning": ns.cert_expiry_warning,
             # Backward-compatible fields
             "running": self._node.is_running,

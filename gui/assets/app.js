@@ -144,6 +144,23 @@ function initNetworkSetup(onComplete) {
       }
       tunnelHost.classList.remove("invalid");
       port = tunnelPort.value.trim();
+
+      // F4: if the user pasted "host:port" in the hostname field,
+      // split it client-side and populate the port field. Saves the
+      // most common bore.pub copy-paste mistake.
+      const parsed = parseHostPort(publicHost);
+      if (parsed.error) {
+        tunnelHost.classList.add("invalid");
+        showInlineError(tunnelHost, parsed.error);
+        return;
+      }
+      publicHost = parsed.host;
+      if (parsed.port) {
+        port = parsed.port;
+        tunnelPort.value = port;
+      }
+      tunnelHost.classList.remove("invalid");
+      clearInlineError(tunnelHost);
     }
 
     continueBtn.disabled = true;
@@ -161,6 +178,48 @@ function initNetworkSetup(onComplete) {
     continueBtn.disabled = false;
     continueBtn.textContent = "Continue";
   });
+}
+
+// F4 helpers — parse "host:port" into a {host, port} pair, validating
+// the port is numeric in 1..65535 and rejecting raw IPv6 addresses
+// (which would also contain colons and need bracket-quoting we don't
+// support yet).
+function parseHostPort(raw) {
+  const value = (raw || "").trim();
+  if (!value) return { host: "", port: "" };
+  // Multiple colons → likely IPv6 without brackets; ambiguous.
+  const colonCount = (value.match(/:/g) || []).length;
+  if (colonCount > 1) {
+    return { error: "Use a hostname or IPv4 IP address (IPv6 not supported here)" };
+  }
+  if (colonCount === 0) {
+    return { host: value, port: "" };
+  }
+  const [host, portStr] = value.split(":");
+  if (!host) {
+    return { error: "Hostname is empty" };
+  }
+  const portNum = parseInt(portStr, 10);
+  if (!Number.isFinite(portNum) || String(portNum) !== portStr || portNum < 1 || portNum > 65535) {
+    return { error: "Port must be an integer between 1 and 65535" };
+  }
+  return { host, port: String(portNum) };
+}
+
+function showInlineError(inputEl, message) {
+  // Try to find a sibling .error span; if none, append one once.
+  let err = inputEl.parentElement && inputEl.parentElement.querySelector(".error");
+  if (!err && inputEl.parentElement) {
+    err = document.createElement("span");
+    err.className = "error";
+    inputEl.parentElement.appendChild(err);
+  }
+  if (err) err.textContent = message;
+}
+
+function clearInlineError(inputEl) {
+  const err = inputEl.parentElement && inputEl.parentElement.querySelector(".error");
+  if (err) err.textContent = "";
 }
 
 async function showNetworkSetup(onComplete) {
@@ -396,8 +455,25 @@ function initOnboarding() {
     // Save network mode from advanced section
     const networkMode = document.querySelector('input[name="onboard-network-mode"]:checked');
     const mode = networkMode ? networkMode.value : "upnp";
-    const tunnelHost = mode === "tunnel" ? ($("#onboard-tunnel-host").value.trim() || "") : "";
-    const tunnelPort = mode === "tunnel" ? ($("#onboard-tunnel-port").value.trim() || "") : "";
+    let tunnelHost = mode === "tunnel" ? ($("#onboard-tunnel-host").value.trim() || "") : "";
+    let tunnelPort = mode === "tunnel" ? ($("#onboard-tunnel-port").value.trim() || "") : "";
+    if (mode === "tunnel" && tunnelHost) {
+      // F4: parse "host:port" client-side.
+      const parsed = parseHostPort(tunnelHost);
+      if (parsed.error) {
+        const hostEl = $("#onboard-tunnel-host");
+        hostEl.classList.add("invalid");
+        showInlineError(hostEl, parsed.error);
+        btn.disabled = false;
+        btn.textContent = "Start Node";
+        return;
+      }
+      tunnelHost = parsed.host;
+      if (parsed.port) {
+        tunnelPort = parsed.port;
+        $("#onboard-tunnel-port").value = tunnelPort;
+      }
+    }
 
     try {
       await window.pywebview.api.save_network_mode(mode, tunnelHost, tunnelPort);
@@ -687,15 +763,37 @@ async function updateStatus() {
     // Wallet addresses (truncated, full on hover)
     const fullStaking = status.staking_address || status.wallet || "";
     const fullCollection = status.collection_address || "";
+    const fullIdentity = status.identity_address || status.node_id || "";
     stakingEl.textContent = truncateAddress(fullStaking) || "-";
     stakingEl.title = fullStaking;
     collectionEl.textContent = truncateAddress(fullCollection) || "-";
     collectionEl.title = fullCollection;
+    // F2: surface the identity address (the wallet derived from the
+    // local key) so operators can verify it matches what they staked
+    // against without digging through logs.
+    const identityEl = $("#identity-address");
+    if (identityEl) {
+      identityEl.textContent = truncateAddress(fullIdentity) || "-";
+      identityEl.title = fullIdentity;
+    }
 
     // Staking status display
     const stakingStatusEl = $("#staking-status");
     const ss = status.staking_status || "—";
-    stakingStatusEl.textContent = ss === "unstaked" ? ss + " — stake required" : ss;
+    // F3 — surface a clear label for the unstaked state. Pre-rc.5 the
+    // raw "unstaked" lower-case token leaked into the GUI; map to a
+    // capitalised "Unstaked — stake required" so it reads as a
+    // status rather than a typo.
+    let stakingStatusLabel;
+    if (ss === "unstaked") {
+      stakingStatusLabel = "Unstaked — stake required";
+    } else if (ss === "earning" || ss === "qualifying") {
+      // Capitalise for consistency with the new "Unstaked" label.
+      stakingStatusLabel = ss.charAt(0).toUpperCase() + ss.slice(1);
+    } else {
+      stakingStatusLabel = ss;
+    }
+    stakingStatusEl.textContent = stakingStatusLabel;
     stakingStatusEl.className = "wallet-value"
       + (ss === "earning" ? " staking-earning"
         : ss === "qualifying" ? " staking-qualifying"
@@ -1317,11 +1415,16 @@ async function init() {
     // Determine build variant before showing any screens
     await initTestVariant();
 
-    // Display build version
+    // Display build version on every surface that has a version-label slot
+    // (status footer + onboarding screen — F1).
     try {
       const version = await window.pywebview.api.get_build_version();
-      const el = document.getElementById("version-label");
-      if (el && version) el.textContent = version;
+      if (version) {
+        for (const id of ["version-label", "version-label-onboarding"]) {
+          const el = document.getElementById(id);
+          if (el) el.textContent = version;
+        }
+      }
     } catch (e) {}
 
     // Action buttons
