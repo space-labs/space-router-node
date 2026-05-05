@@ -197,7 +197,27 @@ class NodeManager:
         self._version_check = result
 
     def stop(self, timeout: float = 20.0) -> None:
-        """Signal the node to stop and wait for the thread to finish."""
+        """Signal the node to stop and wait for the thread to finish.
+
+        rc.5 MAJ: improved stop path so Quit/Reset doesn't leak the
+        node port. The daemon runs as asyncio code in a sibling thread
+        of the GUI process — we cannot SIGKILL it without taking down
+        the GUI itself, so the recovery sequence is:
+
+        1. ``stop_event.set()`` — graceful shutdown via ``_run``'s
+           cancellation point. Bounded by *timeout*.
+        2. If the thread is still alive, ``_force_cancel_loop`` cancels
+           every running task on the loop and calls ``loop.stop``.
+        3. Final 3s join. If it's STILL alive at this point we cannot
+           safely escalate — surface a loud ERROR with the live thread's
+           name and the configured port so the operator knows the next
+           start may collide. We log + return rather than block the GUI
+           indefinitely.
+        4. After the join completes, poll the configured port for up
+           to ~3s with bounded retries to confirm the OS released the
+           socket; log a warning if it's still bound (helps diagnose
+           "Reset Node failed: address in use" reports).
+        """
         if not self._thread or not self._thread.is_alive():
             if self._sm.state not in (NodeState.IDLE, NodeState.ERROR_PERMANENT):
                 try:
@@ -222,10 +242,72 @@ class NodeManager:
         if self._thread:
             self._thread.join(timeout=timeout)
             if self._thread.is_alive():
-                logger.warning("Node thread did not stop within %.1fs — forcing", timeout)
+                logger.warning(
+                    "Node thread did not stop within %.1fs — forcing", timeout,
+                )
                 self._force_cancel_loop(loop)
                 self._thread.join(timeout=3.0)
+                if self._thread.is_alive():
+                    # We can't SIGKILL — that would take down the GUI.
+                    # Loudest possible log: this leaks the node port and
+                    # the next start will collide with EADDRINUSE.
+                    logger.error(
+                        "Node thread %r did not exit after force-cancel; "
+                        "the asyncio loop may be stuck inside a blocking "
+                        "third-party call. Port %s may stay bound until "
+                        "the GUI process is restarted.",
+                        self._thread.name,
+                        self._configured_port_for_log(),
+                    )
             self._thread = None
+
+        # Best-effort port-release verification. We bind-test the
+        # configured port; if it's still bound after a few hundred ms,
+        # log a warning so the operator can see the diagnosis.
+        self._wait_for_port_release()
+
+    @staticmethod
+    def _configured_port_for_log() -> int | None:
+        """Best-effort lookup of the daemon's configured listen port."""
+        try:
+            from app.config import load_settings
+            return int(load_settings().NODE_PORT)
+        except Exception:
+            return None
+
+    def _wait_for_port_release(self) -> None:
+        """Poll the configured listen port until it's free (bounded).
+
+        Uses a transient ``socket.socket().bind`` attempt as the probe;
+        on success we close immediately so we don't actually take the
+        port. Bounded retries (3 attempts at 200ms / 500ms / 1500ms);
+        failure logs a warning but does NOT raise — Reset/Quit must
+        still proceed even if the port is wedged.
+        """
+        port = self._configured_port_for_log()
+        if not port:
+            return
+        import socket
+        import time
+
+        delays = (0.2, 0.5, 1.5)
+        for delay in delays:
+            time.sleep(delay)
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("0.0.0.0", port))
+                # Bound successfully → port is free.
+                s.close()
+                return
+            except OSError:
+                s.close()
+                continue
+        logger.warning(
+            "Port %s still bound after node stop — next start may fail "
+            "with 'address in use'. Restart the GUI if this persists.",
+            port,
+        )
 
     def _mark_reportable(self, error: NodeError) -> None:
         """Flag the error as eligible for user-initiated reporting."""

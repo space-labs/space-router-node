@@ -309,11 +309,39 @@ class Api:
         return {"ok": True}
 
     def start_node(self) -> dict:
-        """Start the node (config must already be set)."""
+        """Start the node (config must already be set).
+
+        rc.5 MAJ — passphrase prompt order: if the keystore is encrypted
+        (``identity_passphrase_set=True``) but no passphrase is in the
+        environment yet, refuse to start and tell the GUI to render the
+        unlock dialog. Pre-rc.5 the start kicked off, the daemon's
+        identity load failed inside the node thread, the state machine
+        eventually surfaced PASSPHRASE_REQUIRED — but in the meantime
+        the GUI had already displayed the staking-required modal,
+        confusing operators about the actual order of operations.
+        """
         if self._node.is_running:
             return {"ok": True, "message": "Already running"}
 
         self._config.apply_to_env()
+
+        # Pre-flight passphrase gate. The cached ``identity_passphrase_set``
+        # boolean was reconciled against the on-disk keystore by
+        # ``ConfigStore.__init__`` so we can trust it here.
+        try:
+            settings_v2 = self._config._load_settings_v2()
+            needs_passphrase = bool(
+                settings_v2.wallet.identity_passphrase_set
+            ) and not os.environ.get("SR_IDENTITY_PASSPHRASE")
+        except Exception:  # noqa: BLE001
+            needs_passphrase = False
+
+        if needs_passphrase:
+            return {
+                "ok": False,
+                "error": "passphrase required",
+                "error_code": "PASSPHRASE_REQUIRED",
+            }
 
         try:
             self._node.start()
