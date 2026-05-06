@@ -1142,7 +1142,19 @@ function initActionButtons() {
     btn.textContent = "Starting...";
     versionModalDismissed = false;
     try {
-      await window.pywebview.api.start_node();
+      const result = await window.pywebview.api.start_node();
+      // rc.7 BLK-new: the daemon's pre-flight passphrase gate (added in
+      // rc.5) returns early without spawning the node thread when the
+      // keystore is encrypted but no passphrase is in env. The state
+      // machine therefore never enters PASSPHRASE_REQUIRED — the poll
+      // loop's state-driven dialog won't fire. Surface it explicitly.
+      if (result && result.error_code === "PASSPHRASE_REQUIRED") {
+        setNodeTransition(null);
+        btn.disabled = false;
+        btn.textContent = "Start";
+        showUnlockDialog(result.error || "");
+        return;
+      }
     } catch (e) {}
     // Don't reset the label here. The polling loop will drive the
     // visible button based on the new state once the backend
@@ -1334,7 +1346,7 @@ function initSettings() {
       statusEl.style.color = "#8080a0";
 
       await window.pywebview.api.stop_node();
-      await window.pywebview.api.start_node();
+      const startResult = await window.pywebview.api.start_node();
 
       saveBtn.disabled = false;
       saveBtn.textContent = "Save & Restart Node";
@@ -1342,6 +1354,13 @@ function initSettings() {
       // Go back to status
       hideAll();
       showStatus();
+
+      // rc.7 BLK-new: pre-flight passphrase gate may have returned early
+      // without starting the node. Surface the unlock dialog so the
+      // status screen doesn't sit on "Starting..." indefinitely.
+      if (startResult && startResult.error_code === "PASSPHRASE_REQUIRED") {
+        showUnlockDialog(startResult.error || "");
+      }
     } catch (e) {
       statusEl.textContent = "Failed to save settings";
       statusEl.style.color = "#e74c3c";
@@ -1471,8 +1490,19 @@ async function init() {
       showOnboarding();
     } else {
       // Already configured — show status, then maybe overlay staking modal.
-      await window.pywebview.api.start_node();
+      const startResult = await window.pywebview.api.start_node();
       showStatus();
+      // rc.7 BLK-new: when the keystore is encrypted (operator set a
+      // passphrase during onboarding), start_node's pre-flight gate
+      // returns PASSPHRASE_REQUIRED without spawning the daemon. The
+      // state machine stays at IDLE so the status poll never fires the
+      // unlock dialog — the GUI used to sit on "Starting..." forever
+      // (Woojung's rc.5/rc.6 regression). Surface the dialog explicitly
+      // and skip the staking modal until the daemon is actually up.
+      if (startResult && startResult.error_code === "PASSPHRASE_REQUIRED") {
+        showUnlockDialog(startResult.error || "");
+        return;
+      }
       // rc.6 MIN-3: pre-rc.6 we showed the staking modal on every startup,
       // even for wallets that were already earning rewards — operators
       // had to click past it every single launch. Only nag when the wallet

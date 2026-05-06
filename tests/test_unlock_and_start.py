@@ -178,3 +178,95 @@ def test_unlock_and_start_sets_passphrase_env_var(monkeypatch):
 
     import os
     assert os.environ.get("SR_IDENTITY_PASSPHRASE") == "hunter2"
+
+
+# ---------------------------------------------------------------------------
+# Api.start_node() pre-flight passphrase gate (rc.5 → rc.7)
+#
+# rc.5 added a pre-flight gate to start_node that returns
+# PASSPHRASE_REQUIRED without spawning the daemon thread when the
+# keystore is encrypted but no passphrase is in env. This test pins the
+# return contract so the rc.7 GUI fix (app.js consumes the early-return
+# and pops the unlock dialog) cannot regress without us noticing —
+# Woojung's rc.5/rc.6 hang was caused by the GUI not reading this
+# response, leaving the spinner stuck on "Starting..." forever.
+# ---------------------------------------------------------------------------
+
+
+def test_start_node_returns_passphrase_required_when_keystore_encrypted_and_env_unset(monkeypatch):
+    """Encrypted keystore + no SR_IDENTITY_PASSPHRASE → ok=False with
+    error_code=PASSPHRASE_REQUIRED, and the daemon thread is NOT started."""
+    monkeypatch.delenv("SR_IDENTITY_PASSPHRASE", raising=False)
+
+    config = MagicMock()
+    config.get.return_value = None
+    config.get_environment.return_value = "production"
+    # Cached flag says keystore is encrypted; pre-flight reads this via
+    # _load_settings_v2().wallet.identity_passphrase_set.
+    settings_v2 = MagicMock()
+    settings_v2.wallet.identity_passphrase_set = True
+    config._load_settings_v2.return_value = settings_v2
+
+    node = MagicMock()
+    node.is_running = False
+
+    from gui.api import Api
+    api = Api(config=config, node_manager=node)
+
+    result = api.start_node()
+
+    assert result["ok"] is False
+    assert result["error_code"] == "PASSPHRASE_REQUIRED"
+    # CRITICAL: the daemon must not have been spawned. If it were, the
+    # state machine would eventually surface PASSPHRASE_REQUIRED and the
+    # GUI poll would fire showUnlockDialog — but with the early-return
+    # gate the daemon stays IDLE, so the GUI must consume this response.
+    node.start.assert_not_called()
+
+
+def test_start_node_proceeds_when_keystore_encrypted_but_passphrase_in_env(monkeypatch):
+    """If the operator already has SR_IDENTITY_PASSPHRASE set (e.g. via
+    unlock_and_start a moment earlier), the pre-flight gate must NOT
+    trip — start the daemon as usual."""
+    monkeypatch.setenv("SR_IDENTITY_PASSPHRASE", "hunter2")
+
+    config = MagicMock()
+    config.get.return_value = None
+    config.get_environment.return_value = "production"
+    settings_v2 = MagicMock()
+    settings_v2.wallet.identity_passphrase_set = True
+    config._load_settings_v2.return_value = settings_v2
+
+    node = MagicMock()
+    node.is_running = False
+
+    from gui.api import Api
+    api = Api(config=config, node_manager=node)
+
+    result = api.start_node()
+
+    assert result["ok"] is True
+    node.start.assert_called_once()
+
+
+def test_start_node_proceeds_when_keystore_plaintext(monkeypatch):
+    """No encryption flag set → no passphrase gate. Daemon starts."""
+    monkeypatch.delenv("SR_IDENTITY_PASSPHRASE", raising=False)
+
+    config = MagicMock()
+    config.get.return_value = None
+    config.get_environment.return_value = "production"
+    settings_v2 = MagicMock()
+    settings_v2.wallet.identity_passphrase_set = False
+    config._load_settings_v2.return_value = settings_v2
+
+    node = MagicMock()
+    node.is_running = False
+
+    from gui.api import Api
+    api = Api(config=config, node_manager=node)
+
+    result = api.start_node()
+
+    assert result["ok"] is True
+    node.start.assert_called_once()
