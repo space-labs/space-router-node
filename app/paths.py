@@ -66,6 +66,16 @@ def wipe_operational_state(directory: Path) -> list[str]:
             except OSError as e:
                 notes.append(f"Could not remove {p}: {e}")
 
+    # rc.6 BLK-2: the receipt store keeps a module-level singleton whose
+    # ``_initialized`` flag survives the file deletion above. Drop it so
+    # the next get_store() returns a fresh instance that re-runs the
+    # schema against the recreated DB.
+    try:
+        from app.payment.receipt_store import clear_singleton
+        clear_singleton()
+    except Exception:  # noqa: BLE001
+        pass
+
     # Incident banner state — the GUI's sticky operator alerts.
     incidents = directory / "incidents.json"
     if incidents.is_file():

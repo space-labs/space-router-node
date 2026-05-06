@@ -11,6 +11,7 @@ import uuid as uuid_mod
 from pathlib import Path
 
 
+from app.state import NodeState
 from app.variant import BUILD_VARIANT
 from app.version import __version__
 from gui.config_store import ConfigStore
@@ -291,14 +292,35 @@ class Api:
 
         Called from the passphrase unlock dialog when the node cannot start
         because the keystore requires a passphrase that is not configured.
+
+        rc.6 BLK-4 + MAJ-5: after a wrong passphrase the daemon thread is
+        still alive but the state machine is parked in PASSPHRASE_REQUIRED.
+        ``is_running`` reports False (PASSPHRASE_REQUIRED is not in the
+        operational set), so the previous implementation skipped ``stop()``
+        — orphaning the old thread when it called ``start()``. Two daemon
+        threads then raced on the listen port. We use ``has_live_thread``
+        to reap orphan threads regardless of state, with a bounded stop
+        timeout so the GUI button doesn't hang.
+
+        Also: after kicking the new ``start()``, poll the state machine
+        briefly so we only return ok=True once the daemon has actually
+        moved past PASSPHRASE_REQUIRED. If it stays put (e.g. wrong
+        passphrase again) we surface ok=False so the dialog can re-prompt
+        instead of flashing the main screen for a few seconds.
         """
         os.environ["SR_IDENTITY_PASSPHRASE"] = passphrase
 
-        if self._node.is_running:
+        # Cleanup gate uses has_live_thread, not is_running — covers the
+        # PASSPHRASE_REQUIRED / ERROR_TRANSIENT orphan-thread paths.
+        if self._node.has_live_thread():
             try:
-                self._node.stop()
-            except Exception as exc:
-                logger.warning("Failed to stop node before unlock restart: %s", exc)
+                # Bounded timeout — the stuck thread is the common path
+                # here, so don't make the GUI wait the default 20s.
+                self._node.stop(timeout=10.0)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to stop node before unlock restart: %s", exc,
+                )
 
         try:
             self._node.start()
@@ -306,6 +328,32 @@ class Api:
             logger.exception("Failed to start node after unlock")
             return {"ok": False, "error": f"Failed to start node: {exc}"}
 
+        # Wait for the state machine to confirm it's past
+        # IDLE/PASSPHRASE_REQUIRED. If the wrong passphrase is supplied,
+        # the daemon will flip back to PASSPHRASE_REQUIRED — return
+        # ok=False so the GUI can re-enable the unlock button.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            state = self._node._sm.state
+            if state == NodeState.PASSPHRASE_REQUIRED:
+                return {
+                    "ok": False,
+                    "error_code": "PASSPHRASE_REQUIRED",
+                    "error": "Passphrase still required — wrong passphrase?",
+                }
+            if state not in (NodeState.IDLE, NodeState.INITIALIZING):
+                # Daemon advanced beyond identity load — passphrase accepted.
+                return {"ok": True}
+            time.sleep(0.05)
+
+        # Timed out before a definitive transition. If we're still in
+        # PASSPHRASE_REQUIRED at this point, treat that as failure.
+        if self._node._sm.state == NodeState.PASSPHRASE_REQUIRED:
+            return {
+                "ok": False,
+                "error_code": "PASSPHRASE_REQUIRED",
+                "error": "Passphrase still required — wrong passphrase?",
+            }
         return {"ok": True}
 
     def start_node(self) -> dict:
@@ -1001,6 +1049,20 @@ class Api:
             self._node.stop(timeout=5.0)
         except Exception:
             logger.warning("Node stop timed out during fresh restart — proceeding anyway")
+
+        # rc.6 MAJ-3: tell the coord we're going away BEFORE we delete
+        # the identity key + settings — otherwise the dashboard sees the
+        # node as online for the full health-check window after reset.
+        # Best-effort; do NOT block reset on coord failure.
+        try:
+            from app.config import load_settings
+            from app.registration import deregister_best_effort_sync
+            deregister_best_effort_sync(load_settings())
+        except Exception:
+            logger.warning(
+                "Coord deregister failed during fresh restart; continuing",
+                exc_info=True,
+            )
 
         try:
             self._config.reset()

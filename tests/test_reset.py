@@ -319,3 +319,215 @@ class TestWipeOperationalState:
         # those are owned by the GUI/CLI reset paths.
         assert (tmp_path / "settings.json").exists()
         assert (certs / "node-identity.key").exists()
+
+
+# ---------------------------------------------------------------------------
+# rc.6 BLK-2 — receipt store singleton survives wipe_operational_state
+# ---------------------------------------------------------------------------
+
+
+class TestReceiptStoreSingletonSurvivesReset:
+    """The receipt store keeps a module-level singleton with an
+    `_initialized=True` flag. wipe_operational_state deletes
+    receipts.db on disk but the in-process singleton kept saying
+    "already initialized" — so the next initialize() short-circuited,
+    the schema never re-ran, and SQLite auto-created an empty file
+    on first query → "no such table: signed_receipts"."""
+
+    def test_clear_singleton_drops_cached_instance(self, tmp_path):
+        from app.payment import receipt_store as rs
+
+        path = tmp_path / "receipts.db"
+        first = rs.get_store(path)
+        assert rs.get_store(path) is first  # cached
+        rs.clear_singleton()
+        second = rs.get_store(path)
+        assert second is not first
+
+    def test_initialize_self_heals_when_file_was_deleted(self, tmp_path):
+        """initialize() must notice the file is gone and re-run schema."""
+        import asyncio
+
+        from app.payment import receipt_store as rs
+
+        path = tmp_path / "receipts.db"
+        store = rs.get_store(path)
+
+        # First init — schema applied, file exists.
+        asyncio.run(store.initialize())
+        assert path.exists()
+        assert store._initialized is True
+
+        # Simulate wipe_operational_state deleting the file under us
+        # without going through clear_singleton (defense in depth).
+        path.unlink()
+        for sib in ("receipts.db-wal", "receipts.db-shm"):
+            p = tmp_path / sib
+            if p.exists():
+                p.unlink()
+
+        # initialize() should detect the missing file and rebuild.
+        asyncio.run(store.initialize())
+        assert path.exists()
+
+        # And the schema must be present (no "no such table" on summary()).
+        summary = asyncio.run(store.summary())
+        assert summary["claimed"] == 0
+
+    def test_wipe_then_fresh_get_store_has_working_schema(self, tmp_path):
+        """End-to-end: initialize → wipe → get_store again → use store."""
+        import asyncio
+
+        from app.paths import wipe_operational_state
+        from app.payment import receipt_store as rs
+
+        path = tmp_path / "receipts.db"
+        store = rs.get_store(path)
+        asyncio.run(store.initialize())
+        assert path.exists()
+
+        # Reset Node path: wipe disk + drop the singleton.
+        wipe_operational_state(tmp_path)
+        assert not path.exists()
+
+        # Next caller obtains a fresh store; the cached one was cleared
+        # so its stale `_initialized=True` can't poison the new path.
+        fresh = rs.get_store(path)
+        assert fresh is not store
+        asyncio.run(fresh.initialize())
+        assert path.exists()
+        # Schema must be wired up — summary works without OperationalError.
+        summary = asyncio.run(fresh.summary())
+        assert summary["claimed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# rc.6 MAJ-3 — Reset must deregister from coord
+# ---------------------------------------------------------------------------
+
+
+class TestResetDeregistersFromCoord:
+    """Pre-rc.6 fresh_restart and _do_reset made zero HTTP calls. The
+    operator's node hung in "online" state on the dashboard for the
+    full health-check timeout (~3 min) after a reset.
+
+    We call deregister_best_effort_sync BEFORE deleting identity/settings
+    so the helper still has a key to sign with. Failure is logged and
+    swallowed so reset always completes even if the coord is unreachable.
+    """
+
+    def test_fresh_restart_calls_deregister_before_reset(
+        self, store_with_state, tmp_path,
+    ):
+        from gui.api import Api
+        from gui.node_manager import NodeManager
+
+        node = MagicMock(spec=NodeManager)
+        api = Api(config=store_with_state, node_manager=node)
+
+        with patch(
+            "app.registration.deregister_best_effort_sync",
+            return_value=True,
+        ) as mock_dereg:
+            result = api.fresh_restart()
+
+        assert result["ok"] is True
+        # Deregister was attempted exactly once.
+        assert mock_dereg.call_count == 1
+        # Identity was still deleted afterwards (reset proceeds).
+        assert not (tmp_path / "certs").exists()
+
+    def test_fresh_restart_continues_when_deregister_raises(
+        self, store_with_state, tmp_path,
+    ):
+        """Reset must still complete if the coord is unreachable."""
+        from gui.api import Api
+        from gui.node_manager import NodeManager
+
+        node = MagicMock(spec=NodeManager)
+        api = Api(config=store_with_state, node_manager=node)
+
+        with patch(
+            "app.registration.deregister_best_effort_sync",
+            side_effect=RuntimeError("coord unreachable"),
+        ):
+            result = api.fresh_restart()
+
+        assert result["ok"] is True
+        # Identity was still cleaned up.
+        assert not (tmp_path / "certs").exists()
+
+    def test_do_reset_calls_deregister_before_deleting_identity(
+        self, tmp_path,
+    ):
+        """CLI --reset must also notify coord before removing certs."""
+        certs_dir = tmp_path / "certs"
+        certs_dir.mkdir()
+        (certs_dir / "node-identity.key").write_text("fake\n")
+        env_file = tmp_path / "spacerouter.env"
+        env_file.write_text("SR_STAKING_ADDRESS=0x" + "aa" * 20 + "\n")
+
+        with patch("app.main.load_settings") as mock_settings, \
+             patch("app.paths.config_dir", return_value=tmp_path), \
+             patch("app.main.sys") as mock_sys, \
+             patch(
+                 "app.registration.deregister_best_effort_sync",
+                 return_value=True,
+             ) as mock_dereg:
+            mock_settings.return_value.IDENTITY_KEY_PATH = str(
+                certs_dir / "node-identity.key"
+            )
+            mock_sys.argv = ["prog", "--reset"]
+            mock_sys.stdin.isatty.return_value = False
+
+            from app.main import _do_reset
+            _do_reset()
+
+        assert mock_dereg.call_count == 1
+        # Reset still proceeded.
+        assert not certs_dir.exists()
+
+
+class TestDeregisterBestEffortSync:
+    """Unit tests for the rc.6 MAJ-3 helper itself."""
+
+    def test_returns_false_when_identity_missing(self, tmp_path):
+        from app.config import Settings
+        from app.registration import deregister_best_effort_sync
+
+        settings = Settings(
+            COORDINATION_API_URL="http://example.invalid",
+            IDENTITY_KEY_PATH=str(tmp_path / "missing.key"),
+            IDENTITY_PASSPHRASE="",
+        )
+        # No key file — load_or_create_identity would create one, but
+        # we want the bail-out path. Use a truly broken settings to
+        # force load_or_create_identity to fail.
+        with patch(
+            "app.identity.load_or_create_identity",
+            side_effect=RuntimeError("no key"),
+        ):
+            ok = deregister_best_effort_sync(settings)
+        assert ok is False
+
+    def test_returns_true_on_successful_dispatch(self, tmp_path):
+        """Helper returns True when the async deregister_node was awaited
+        without raising."""
+        from app.config import Settings
+        from app.registration import deregister_best_effort_sync
+
+        settings = Settings(
+            COORDINATION_API_URL="http://example.invalid",
+            IDENTITY_KEY_PATH=str(tmp_path / "missing.key"),
+            IDENTITY_PASSPHRASE="",
+        )
+
+        async def _ok(*args, **kwargs):
+            return None
+
+        with patch(
+            "app.identity.load_or_create_identity",
+            return_value=("0x" + "ab" * 32, "0x" + "cd" * 20),
+        ), patch("app.registration.deregister_node", side_effect=_ok):
+            ok = deregister_best_effort_sync(settings)
+        assert ok is True

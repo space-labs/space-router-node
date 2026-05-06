@@ -206,6 +206,26 @@ function parseHostPort(raw) {
   return { host, port: String(portNum) };
 }
 
+// rc.6 MIN-1: shared helper to wire a "host:port" blur listener that
+// auto-splits the host field on focus-out and populates the matching
+// port field. Errors are silent on blur — only the submit path
+// surfaces them, so the UX is forgiving of mid-typing values.
+function wireHostPortBlur(hostSelector, portSelector) {
+  const hostEl = document.querySelector(hostSelector);
+  const portEl = document.querySelector(portSelector);
+  if (!hostEl || !portEl) return;
+  hostEl.addEventListener("blur", function () {
+    const raw = hostEl.value.trim();
+    if (!raw) return;
+    const parsed = parseHostPort(raw);
+    if (!parsed.error && parsed.port) {
+      hostEl.value = parsed.host;
+      portEl.value = parsed.port;
+    }
+    // Don't show errors on blur — let submit do that.
+  });
+}
+
 function showInlineError(inputEl, message) {
   // Try to find a sibling .error span; if none, append one once.
   let err = inputEl.parentElement && inputEl.parentElement.querySelector(".error");
@@ -313,6 +333,14 @@ function initOnboarding() {
     advancedSection.style.display = open ? "none" : "block";
     advancedArrow.textContent = open ? "▸" : "▾";
   });
+
+  // rc.6 MIN-1: parse pasted "host:port" on blur, not just on submit.
+  // The most common bore.pub copy-paste mistake is pasting the whole
+  // "subdomain.example.com:1234" string into the host field, then
+  // staring at the port "30000" thinking it's correct. Auto-split on
+  // blur so the operator sees the corrected fields immediately.
+  // Don't show errors on blur — let the submit path render those.
+  wireHostPortBlur("#onboard-tunnel-host", "#onboard-tunnel-port");
 
   // ── Passphrase show/hide toggles ──
   // Two fields, each with its own visibility toggle. We never touch the
@@ -1164,6 +1192,10 @@ function initSettings() {
     });
   }
 
+  // rc.6 MIN-1: parse pasted "host:port" on blur (settings dialog).
+  // Same UX nicety as the onboarding wizard.
+  wireHostPortBlur("#settings-tunnel-host", "#settings-tunnel-port");
+
   // Show/hide custom URL input based on dropdown
   envSelect.addEventListener("change", function () {
     if (envSelect.value === "custom") {
@@ -1438,10 +1470,25 @@ async function init() {
     if (needsOnboarding) {
       showOnboarding();
     } else {
-      // Already configured — show status, then overlay staking modal
+      // Already configured — show status, then maybe overlay staking modal.
       await window.pywebview.api.start_node();
       showStatus();
-      showStakingModal();
+      // rc.6 MIN-3: pre-rc.6 we showed the staking modal on every startup,
+      // even for wallets that were already earning rewards — operators
+      // had to click past it every single launch. Only nag when the wallet
+      // hasn't actually staked yet ("unstaked"/"inactive"/"—" sentinel
+      // value before the first probe lands).
+      try {
+        const status = await window.pywebview.api.get_status();
+        const ss = status && status.staking_status;
+        if (ss !== "earning" && ss !== "qualifying") {
+          showStakingModal();
+        }
+      } catch (e) {
+        // Status fetch failed — fall back to old behaviour so the
+        // operator can still see the modal if they truly haven't staked.
+        showStakingModal();
+      }
     }
   } catch (e) {
     // pywebview.api not ready — retry

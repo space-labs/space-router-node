@@ -95,7 +95,12 @@ class NodeSection(_Section):
 class WalletSection(_Section):
     staking_address: str | None = None
     collection_address: str | None = None
-    settlement_key_path: str = "~/.spacerouter/identity.key"
+    # rc.6 MIN-4: pre-rc.6 default was wrong (~/.spacerouter/identity.key),
+    # but the on-disk keystore actually lives at
+    # ~/.spacerouter/certs/node-identity.key. The mismatch broke
+    # _reconcile_passphrase_flag_in_place — it always concluded the
+    # keystore was missing and flipped identity_passphrase_set to False.
+    settlement_key_path: str = "~/.spacerouter/certs/node-identity.key"
     identity_passphrase_set: bool = False
 
     @field_validator("staking_address", "collection_address")

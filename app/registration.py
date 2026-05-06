@@ -388,3 +388,58 @@ async def deregister_node(
         logger.info("Deregistered node %s (status → offline)", node_id)
     except Exception as exc:
         logger.warning("Failed to deregister node %s: %s", node_id, exc)
+
+
+def deregister_best_effort_sync(settings: Settings) -> bool:
+    """Synchronous best-effort deregister — load identity from disk and
+    PATCH status to offline.
+
+    rc.6 MAJ-3: Reset Node / fresh restart didn't tell the coord we
+    were going away, so the operator's node hung in "online" state on
+    the dashboard for the full health-check timeout (~3 min) after a
+    reset. This helper bridges the sync reset paths to the async
+    deregister_node helper.
+
+    Returns True on best-effort success (HTTP call dispatched), False
+    on any failure (no identity, network error, etc.). The caller must
+    NOT block reset on the return value — this is purely informational.
+    """
+    import asyncio
+
+    try:
+        from app.identity import load_or_create_identity
+    except Exception:
+        logger.warning(
+            "Cannot import identity module for reset-time deregister",
+            exc_info=True,
+        )
+        return False
+
+    try:
+        identity_key, identity_address = load_or_create_identity(
+            settings.IDENTITY_KEY_PATH,
+            settings.IDENTITY_PASSPHRASE,
+        )
+    except Exception:
+        logger.warning(
+            "Could not load identity for reset-time deregister; skipping",
+            exc_info=True,
+        )
+        return False
+
+    async def _run() -> None:
+        async with httpx.AsyncClient() as client:
+            await deregister_node(
+                client, settings, identity_address,
+                identity_key=identity_key,
+            )
+
+    try:
+        asyncio.run(_run())
+        return True
+    except Exception:
+        logger.warning(
+            "Best-effort deregister failed; continuing with reset",
+            exc_info=True,
+        )
+        return False

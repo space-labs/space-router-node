@@ -145,7 +145,12 @@ class ReceiptStore:
         # callers in the hot path (submitter, poller) don't serialize on
         # the SQLite writer once the DB is at the current schema version.
         if self._initialized:
-            return
+            # rc.6 BLK-2: wipe_operational_state may have deleted the
+            # file under us. Verify the schema actually exists on disk
+            # before short-circuiting; otherwise reset and re-run.
+            if self._path.exists():
+                return
+            self._initialized = False
 
         # rc.5 minor #4: a fresh receipts.db can hit
         # "sqlite3.OperationalError: database is locked" on the first
@@ -928,23 +933,32 @@ class ReceiptStore:
                       SUM(CASE WHEN claimed_at IS NULL AND locked = 0
                                AND signature IS NULL
                                AND (last_error_code IS NULL OR last_error_code = '')
-                               THEN 1 ELSE 0 END),
-                      COALESCE(SUM(
-                        CASE WHEN claimed_at IS NULL AND locked = 0
-                             AND signature IS NOT NULL
-                             AND (last_error_code IS NULL OR last_error_code = '')
-                             THEN total_price ELSE 0 END
-                      ), 0)
+                               THEN 1 ELSE 0 END)
                     FROM signed_receipts
                     """
                 ).fetchone()
+                # rc.6 MAJ-4: SQLite SUM is INT64 (max ~9.22e18). At
+                # 10^24 wei/GB rates the cumulative claimable_total_price
+                # exceeds INT64 with as few as 12 receipts and the query
+                # raises OperationalError("integer overflow"), which the
+                # GUI catches and renders as zeros — cascades into BLK-1
+                # (Earnings empty). Fetch per-row prices and aggregate
+                # in Python (arbitrary precision).
+                prices = conn.execute(
+                    """
+                    SELECT total_price FROM signed_receipts
+                     WHERE claimed_at IS NULL AND locked = 0
+                       AND signature IS NOT NULL
+                       AND (last_error_code IS NULL OR last_error_code = '')
+                    """
+                ).fetchall()
             return {
                 "claimed": int(row[0] or 0),
                 "failed_terminal": int(row[1] or 0),
                 "claimable": int(row[2] or 0),
                 "failed_retryable": int(row[3] or 0),
                 "pending_sign": int(row[4] or 0),
-                "claimable_total_price": int(row[5] or 0),
+                "claimable_total_price": sum(int(p[0]) for p in prices),
             }
 
         return await asyncio.to_thread(_do)
@@ -1257,3 +1271,11 @@ def get_store(db_path: str | os.PathLike) -> ReceiptStore:
     if _singleton is None or str(_singleton.path) != str(Path(db_path).expanduser()):
         _singleton = ReceiptStore(db_path)
     return _singleton
+
+
+def clear_singleton() -> None:
+    """Invalidate the cached store. Call after disk-level operations
+    that delete or replace receipts.db so the next get_store() returns
+    a fresh instance whose ``_initialized`` reflects on-disk reality."""
+    global _singleton
+    _singleton = None

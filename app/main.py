@@ -1067,6 +1067,14 @@ async def _health_loop(
 
         if consecutive_failures >= _HEARTBEAT_FAIL_THRESHOLD:
             logger.warning("Health check threshold reached — triggering reconnection")
+            # rc.6 BLK-3: the self-probe loop (_self_probe_loop) can also
+            # trigger this transition. If it raced ahead of us, the state
+            # is already RECONNECTING and a second transition would raise
+            # ValueError (RECONNECTING→RECONNECTING is not allowed) —
+            # killing this task. Guard at the call site; the state table
+            # itself stays correct.
+            if sm.state == NodeState.RECONNECTING:
+                return
             sm.transition(NodeState.RECONNECTING, "Lost connection to coordination server")
             return  # exit health loop; orchestrator handles reconnection
 
@@ -1323,6 +1331,11 @@ async def _self_probe_loop(
                 consecutive_offline,
             )
             sm.status.last_probe_outcome = "escalated"
+            # rc.6 BLK-3: see _health_loop — the same race applies here in
+            # reverse. Guard against a double-transition that would raise
+            # ValueError and kill this loop.
+            if sm.state == NodeState.RECONNECTING:
+                return
             sm.transition(
                 NodeState.RECONNECTING,
                 "Persistent offline status from coord — retrying registration",
@@ -2204,6 +2217,18 @@ def _do_reset() -> bool:
             "Non-interactive --reset: removing all config without confirmation.",
             flush=True,
         )
+
+    # rc.6 MAJ-3: tell the coord we're going away BEFORE we delete the
+    # identity key — otherwise the dashboard sees this node as online
+    # for the full health-check timeout (~3 min) after --reset returns.
+    # Best-effort; do NOT block reset on coord failure.
+    try:
+        from app.registration import deregister_best_effort_sync
+        if deregister_best_effort_sync(s):
+            print("Notified coordination API (status → offline).", flush=True)
+    except Exception:
+        # Already logged inside the helper; reset must still proceed.
+        pass
 
     # Delete settings.json (canonical v1.5 config)
     if settings_file.is_file():

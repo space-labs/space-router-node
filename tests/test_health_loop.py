@@ -450,3 +450,116 @@ class TestHealthLoopProbeCoordination:
 
             # Probe should NOT be called because self-probe is recent
             assert mock_probe.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# rc.6 BLK-3 — RECONNECTING transition race between health + self-probe loops
+# ---------------------------------------------------------------------------
+
+
+class TestReconnectingTransitionRace:
+    """Both _health_loop and _self_probe_loop can transition to RECONNECTING.
+    If they race, the second caller hits a state that is already RECONNECTING,
+    and (because RECONNECTING→RECONNECTING is an invalid transition in the
+    state table) the second transition raises ValueError, killing the loop.
+
+    The fix guards each call site to no-op if state is already RECONNECTING.
+    """
+
+    @pytest.mark.asyncio
+    async def test_health_loop_no_op_when_state_already_reconnecting(
+        self, probe_settings
+    ):
+        """When the self-probe loop already moved us to RECONNECTING, the
+        health loop's threshold path must not raise ValueError."""
+        from app.main import _health_loop
+        from app.state import NodeState, NodeStateMachine
+
+        ctx = _make_ctx(probe_settings)
+        # Use a real state machine seeded into RECONNECTING (simulating
+        # the self-probe loop having already escalated).
+        sm = NodeStateMachine()
+        # Drive sm to RECONNECTING via the only legal path.
+        sm.transition(NodeState.INITIALIZING, "init")
+        sm.transition(NodeState.BINDING, "bind")
+        sm.transition(NodeState.REGISTERING, "register")
+        sm.transition(NodeState.RUNNING, "run")
+        sm.transition(NodeState.RECONNECTING, "self-probe escalated")
+        assert sm.state == NodeState.RECONNECTING
+
+        stop_event = asyncio.Event()
+
+        # Force health_check_status to fail repeatedly so the loop hits
+        # the threshold path on its very first iteration.
+        from app.main import _HEARTBEAT_FAIL_THRESHOLD
+
+        call_count = 0
+
+        async def _fake_wait_for(coro, *, timeout):
+            nonlocal call_count
+            call_count += 1
+            coro.close()
+            # Run enough iterations to exceed the threshold, then stop.
+            if call_count >= _HEARTBEAT_FAIL_THRESHOLD + 1:
+                stop_event.set()
+            raise asyncio.TimeoutError()
+
+        mock_activity = MagicMock()
+        mock_activity.record_health_check = MagicMock()
+
+        # No exception should escape — the guard short-circuits.
+        with patch("asyncio.wait_for", side_effect=_fake_wait_for), \
+             patch("time.time", return_value=1000.0), \
+             patch("app.registration.check_node_status",
+                   new_callable=AsyncMock,
+                   side_effect=Exception("simulated coord failure")), \
+             patch("app.registration.request_probe", new_callable=AsyncMock), \
+             patch("app.tls.check_certificate_expiry", return_value=None), \
+             patch("app.node_logging.activity", mock_activity):
+            await _health_loop(ctx, sm, stop_event)
+
+        # State stays RECONNECTING — the second transition was guarded.
+        assert sm.state == NodeState.RECONNECTING
+
+    @pytest.mark.asyncio
+    async def test_self_probe_loop_no_op_when_state_already_reconnecting(
+        self, probe_settings
+    ):
+        """When the health loop already moved us to RECONNECTING, the
+        self-probe loop's escalation path must not raise ValueError."""
+        from app.main import _self_probe_loop, _SELF_PROBE_OFFLINE_ESCALATION_THRESHOLD
+        from app.state import NodeState, NodeStateMachine
+
+        ctx = _make_ctx(probe_settings)
+        sm = NodeStateMachine()
+        sm.transition(NodeState.INITIALIZING, "init")
+        sm.transition(NodeState.BINDING, "bind")
+        sm.transition(NodeState.REGISTERING, "register")
+        sm.transition(NodeState.RUNNING, "run")
+        sm.transition(NodeState.RECONNECTING, "health loop escalated")
+        assert sm.state == NodeState.RECONNECTING
+
+        stop_event = asyncio.Event()
+        iteration = 0
+
+        async def _fake_wait_for(coro, *, timeout):
+            nonlocal iteration
+            iteration += 1
+            coro.close()
+            # Run enough iterations to exceed the offline escalation threshold.
+            if iteration >= _SELF_PROBE_OFFLINE_ESCALATION_THRESHOLD + 2:
+                stop_event.set()
+            raise asyncio.TimeoutError()
+
+        # No exception should escape — the guard short-circuits.
+        with patch("asyncio.wait_for", side_effect=_fake_wait_for), \
+             patch("time.time", return_value=1000.0), \
+             patch("app.registration.check_node_status",
+                   new_callable=AsyncMock,
+                   return_value={"status": "offline", "health_score": 0.1,
+                                 "staking_status": "qualifying"}), \
+             patch("app.registration.request_probe", new_callable=AsyncMock):
+            await _self_probe_loop(ctx, sm, stop_event)
+
+        # State stays RECONNECTING — no ValueError.
+        assert sm.state == NodeState.RECONNECTING

@@ -128,3 +128,80 @@ def test_helper_idempotent_when_already_correct(tmp_path):
     s.wallet.identity_passphrase_set = False
 
     assert _reconcile_passphrase_flag_in_place(s) is False
+
+
+# ---------------------------------------------------------------------------
+# rc.6 MIN-4 — settlement_key_path default mismatch heal
+# ---------------------------------------------------------------------------
+
+
+def test_schema_default_settlement_key_path_is_correct():
+    """Pre-rc.6 default was ~/.spacerouter/identity.key, but the actual
+    keystore lives at ~/.spacerouter/certs/node-identity.key. Confirm
+    the schema default matches the on-disk reality going forward."""
+    s = Settings()
+    assert s.wallet.settlement_key_path == "~/.spacerouter/certs/node-identity.key"
+
+
+def test_heal_settlement_key_path_rewrites_bad_default():
+    """Existing users on rc.3/rc.5 have the wrong path persisted in
+    their settings.json. The heal helper must rewrite it on load."""
+    from app.settings_loader import _heal_settlement_key_path_in_place
+
+    s = Settings()
+    s.wallet.settlement_key_path = "~/.spacerouter/identity.key"
+
+    changed = _heal_settlement_key_path_in_place(s)
+    assert changed is True
+    assert s.wallet.settlement_key_path == "~/.spacerouter/certs/node-identity.key"
+
+
+def test_heal_settlement_key_path_preserves_custom_value():
+    """If the operator set a custom path (or it's already healed), the
+    helper must NOT touch it."""
+    from app.settings_loader import _heal_settlement_key_path_in_place
+
+    s = Settings()
+    custom = "/tmp/somewhere/operator-keystore.key"
+    s.wallet.settlement_key_path = custom
+
+    changed = _heal_settlement_key_path_in_place(s)
+    assert changed is False
+    assert s.wallet.settlement_key_path == custom
+
+
+def test_heal_settlement_key_path_idempotent_on_correct_default():
+    """Already-correct value must return False (no dirty write needed)."""
+    from app.settings_loader import _heal_settlement_key_path_in_place
+
+    s = Settings()
+    # Default constructor already gives us the correct value.
+    changed = _heal_settlement_key_path_in_place(s)
+    assert changed is False
+
+
+def test_load_provider_settings_heals_persisted_bad_path(tmp_path):
+    """End-to-end: a settings.json on disk with the bad legacy path is
+    healed transparently when load_provider_settings reads it. After
+    healing, the reconcile (which tests the keystore file) sees the
+    correct path and does the right thing."""
+    from app.settings_loader import settings_path
+
+    s = Settings(build_variant="production")
+    # Persist the bad legacy path.
+    s.wallet.settlement_key_path = "~/.spacerouter/identity.key"
+    s.wallet.identity_passphrase_set = False
+    sp = settings_path(tmp_path)
+    s.save(sp)
+
+    loaded = load_provider_settings(tmp_path)
+    assert loaded.wallet.settlement_key_path == (
+        "~/.spacerouter/certs/node-identity.key"
+    )
+
+    # And the heal was persisted to disk so the next load is a no-op.
+    import json
+    raw = json.loads(sp.read_text())
+    assert raw["wallet"]["settlement_key_path"] == (
+        "~/.spacerouter/certs/node-identity.key"
+    )

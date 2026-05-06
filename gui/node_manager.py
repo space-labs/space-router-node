@@ -41,6 +41,15 @@ class NodeManager:
             )
         )
 
+    def has_live_thread(self) -> bool:
+        """True if there's a daemon thread currently alive, regardless of state.
+
+        Distinct from ``is_running`` which gates on the state machine being in
+        an "operational" set; this one is for cleanup paths that must reap
+        orphan threads from PASSPHRASE_REQUIRED / ERROR_TRANSIENT (rc.6 BLK-4).
+        """
+        return self._thread is not None and self._thread.is_alive()
+
     @property
     def phase(self) -> str:
         """Backward-compatible phase string."""

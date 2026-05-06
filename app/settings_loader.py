@@ -102,6 +102,13 @@ def load_provider_settings(directory: Path | None = None) -> Settings:
         # is unconfigured.
         if _backfill_test_escrow_in_place(s):
             dirty = True
+        # rc.6 MIN-4: pre-rc.6 schema had the wrong default
+        # settlement_key_path (~/.spacerouter/identity.key vs the actual
+        # ~/.spacerouter/certs/node-identity.key). Existing users have
+        # the bad value persisted in settings.json; fix it on load so
+        # the reconcile call below points at the real keystore.
+        if _heal_settlement_key_path_in_place(s):
+            dirty = True
         # Reconcile ``identity_passphrase_set`` against the actual keystore
         # on disk. Pre-rc.3 the flag was trusted as written, so a user
         # who manually deleted ``node-identity.key`` (or ran reset and
@@ -230,6 +237,31 @@ def _reconcile_passphrase_flag_in_place(s: Settings) -> bool:
             s.wallet.identity_passphrase_set, actual, key_path,
         )
         s.wallet.identity_passphrase_set = actual
+        return True
+    return False
+
+
+def _heal_settlement_key_path_in_place(s: Settings) -> bool:
+    """rc.6 MIN-4: pre-rc.6 the schema default for
+    ``wallet.settlement_key_path`` was wrong
+    (``~/.spacerouter/identity.key``); the actual keystore lives at
+    ``~/.spacerouter/certs/node-identity.key``. Existing users have the
+    bad value persisted in settings.json; correct it on load so
+    :py:func:`_reconcile_passphrase_flag_in_place` points at the real
+    keystore (otherwise it always concludes the keystore is missing
+    and silently flips ``identity_passphrase_set`` to False).
+
+    The fix here only rewrites the documented bad default. Operator-set
+    custom paths are preserved.
+    """
+    bad = "~/.spacerouter/identity.key"
+    good = "~/.spacerouter/certs/node-identity.key"
+    if s.wallet.settlement_key_path == bad:
+        logger.info(
+            "Healing settlement_key_path: %s → %s (rc.6 MIN-4)",
+            bad, good,
+        )
+        s.wallet.settlement_key_path = good
         return True
     return False
 

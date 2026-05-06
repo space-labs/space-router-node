@@ -401,3 +401,67 @@ async def test_stored_receipt_view_derivation(store):
     await store.mark_claimed([r.request_uuid], "0xtx")
     s = await store.get_by_uuid(r.request_uuid)
     assert s.view == "claimed"
+
+
+# ---------------------------------------------------------------------------
+# rc.6 MAJ-4 — SUM(total_price) overflow on SQLite INT64
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_summary_handles_total_price_beyond_int64(store):
+    """At 10^24 wei/GB rates, the cumulative claimable_total_price
+    exceeds SQLite's INT64 max (~9.22e18) with as few as 12 receipts.
+    Pre-rc.6 the SUM(total_price) inside the SELECT raised
+    OperationalError("integer overflow"), the GUI caught it and rendered
+    zeros — cascading into BLK-1 (Earnings empty).
+
+    The fix moves the aggregation into Python (arbitrary precision)
+    so the same query no longer overflows.
+    """
+    await store.initialize()
+    PER_ROW = 7_700_000_000_000_000_000  # 7.7e18 — INT64 max is ~9.22e18
+    N = 15  # 15 * 7.7e18 = 1.155e20  ≫ INT64 max
+    for _ in range(N):
+        await store.store(_mk_receipt(total_price=PER_ROW), signature="0xa")
+
+    summ = await store.summary()
+    assert summ["claimable"] == N
+    assert summ["claimable_total_price"] == N * PER_ROW
+    assert summ["claimable_total_price"] > 2**63  # past INT64 max
+
+
+@pytest.mark.asyncio
+async def test_summary_baseline_still_correct_after_python_aggregation(store):
+    """Sanity check: the Python-side aggregation matches the original
+    SQL behaviour for the small-numbers happy path."""
+    await store.initialize()
+    await store.store(_mk_receipt(total_price=100), signature="0xa")
+    await store.store(_mk_receipt(total_price=50), signature="0xb")
+    await store.store_unsigned(_mk_receipt(total_price=999), request_id="rc")
+
+    summ = await store.summary()
+    # store_unsigned does NOT contribute to claimable_total_price.
+    assert summ["claimable_total_price"] == 150
+    assert summ["claimable"] == 2
+    assert summ["pending_sign"] == 1
+
+
+def test_demonstrate_old_sql_path_overflows(tmp_path):
+    """Reproduces the pre-fix bug: the original SQL aggregation would
+    raise OperationalError("integer overflow"). Kept as a regression
+    pin so we don't accidentally re-introduce SUM(total_price) into the
+    summary query.
+    """
+    db_path = tmp_path / "overflow.db"
+    PER_ROW = 7_700_000_000_000_000_000
+    N = 15
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, total_price INTEGER)"
+        )
+        for i in range(N):
+            conn.execute("INSERT INTO t (total_price) VALUES (?)", (PER_ROW,))
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            conn.execute("SELECT SUM(total_price) FROM t").fetchone()
+        assert "overflow" in str(excinfo.value).lower()
