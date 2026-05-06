@@ -369,12 +369,46 @@ def _fetch_min_staking_amount() -> int:
         return 1
 
 
+def _fetch_wallet_staking_status() -> str | None:
+    """Best-effort fetch of the operator's coord-side ``staking_status``.
+
+    rc.7 MIN-3: mirrors the GUI staking-modal gate (see
+    ``gui/assets/app.js`` ~L1483) so the CLI doesn't nag operators whose
+    wallet is already ``qualifying``/``earning``. Fail-safe: any error
+    (no STAKING_ADDRESS configured, network failure, 404, malformed
+    JSON) returns ``None`` so the caller falls through to the existing
+    prompt — first-run setup still gets the nag.
+    """
+    try:
+        import httpx
+        s = load_settings()
+        wallet = (s.STAKING_ADDRESS or "").strip().lower()
+        if not wallet:
+            return None
+        resp = httpx.get(
+            f"{s.COORDINATION_API_URL}/nodes/{wallet}",
+            timeout=5,
+        )
+        resp.raise_for_status()
+        ss = resp.json().get("staking_status")
+        return ss if isinstance(ss, str) else None
+    except Exception:
+        return None
+
+
 def _show_staking_prompt() -> None:
     """Display a staking requirement notice before starting the node.
 
     Only shown when stdin is a TTY (interactive mode). In non-interactive
     mode (piped input, systemd), logs a warning instead.
     """
+    # rc.7 MIN-3: skip the nag if the wallet is already qualifying/earning.
+    # Mirrors the GUI gate added in rc.6 (gui/assets/app.js ~L1483) so the
+    # two surfaces stay coherent. Best-effort — on fetch failure we fall
+    # through so first-run setup (no node registered yet) still nags.
+    if _fetch_wallet_staking_status() in ("qualifying", "earning"):
+        return
+
     min_amount = _fetch_min_staking_amount()
 
     if not sys.stdin.isatty():
