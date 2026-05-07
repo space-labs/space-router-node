@@ -623,18 +623,64 @@ async def _phase_bind(ctx: _NodeContext) -> None:
     logger.info("Home Node listening on port %d", s.NODE_PORT)
 
 
+_first_register_attempted: bool = False
+# rc.8 #6: bounded retry on ENDPOINT_UNREACHABLE for the *first* registration
+# of this process. Repro: full GUI quit → immediate CLI launch → coord probes
+# while UPnP teardown is still in flight (5-15s) → connection_refused →
+# ENDPOINT_UNREACHABLE on first attempt, but the second attempt seconds later
+# succeeds. Bound the retry to first-launch only; runtime re-registrations
+# (the reconnect loop near line 2073) keep their own backoff and must not
+# get a second free pass on every reentry.
+_FIRST_LAUNCH_RETRY_MAX_ATTEMPTS = 3
+_FIRST_LAUNCH_RETRY_SLEEP_S = 5
+
+
 async def _phase_register(ctx: _NodeContext) -> None:
     """REGISTERING: Register with the Coordination API."""
+    from app.errors import NodeError, NodeErrorCode, classify_error
     from app.registration import register_node, save_gateway_ca_cert
 
-    node_id, gateway_ca_cert = await register_node(
-        ctx.http, ctx.s, ctx.public_ip,
-        identity_key=ctx.identity_key,
-        upnp_endpoint=ctx.upnp_endpoint,
-        wallet_address=ctx.wallet_address,
-        staking_address=ctx.staking_address,
-        collection_address=ctx.collection_address,
-    )
+    global _first_register_attempted  # noqa: PLW0603
+    is_first_launch = not _first_register_attempted
+    _first_register_attempted = True
+
+    async def _do_register():
+        return await register_node(
+            ctx.http, ctx.s, ctx.public_ip,
+            identity_key=ctx.identity_key,
+            upnp_endpoint=ctx.upnp_endpoint,
+            wallet_address=ctx.wallet_address,
+            staking_address=ctx.staking_address,
+            collection_address=ctx.collection_address,
+        )
+
+    if is_first_launch:
+        last_err: Exception | None = None
+        for attempt in range(1, _FIRST_LAUNCH_RETRY_MAX_ATTEMPTS + 1):
+            try:
+                node_id, gateway_ca_cert = await _do_register()
+                break
+            except Exception as exc:
+                # Only retry classified ENDPOINT_UNREACHABLE — every other code
+                # (REGISTRATION_REJECTED, IP_CONFLICT, VERSION_TOO_OLD, etc.)
+                # propagates immediately so the GUI/CLI surfaces the real fault.
+                classified = exc if isinstance(exc, NodeError) else classify_error(exc)
+                if classified.code is not NodeErrorCode.ENDPOINT_UNREACHABLE:
+                    raise
+                last_err = exc
+                if attempt >= _FIRST_LAUNCH_RETRY_MAX_ATTEMPTS:
+                    raise
+                logger.info(
+                    "Endpoint not yet reachable, retrying in %ds (attempt %d/%d)...",
+                    _FIRST_LAUNCH_RETRY_SLEEP_S, attempt, _FIRST_LAUNCH_RETRY_MAX_ATTEMPTS,
+                )
+                await asyncio.sleep(_FIRST_LAUNCH_RETRY_SLEEP_S)
+        else:  # pragma: no cover — defensive; the loop always breaks or raises
+            assert last_err is not None
+            raise last_err
+    else:
+        node_id, gateway_ca_cert = await _do_register()
+
     ctx.node_id = node_id
     ctx.gateway_ca_cert = gateway_ca_cert
 
