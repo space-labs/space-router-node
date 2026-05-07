@@ -192,6 +192,72 @@ async def test_cmd_claim_rejects_unknown_uuid(seeded_store, capsys):
     assert "No receipt found" in err
 
 
+# ---------------------------------------------------------------------------
+# rc.9 #P1 — ``--claim --json`` failure paths must emit JSON, not text
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cmd_claim_json_emits_json_on_unknown_uuid(seeded_store, capsys):
+    """Pre-rc.9 a cron-running ``spacerouter-proxy --claim --json | jq``
+    on a missing-UUID failure parsed text and crashed. rc.9 routes every
+    exit path through a typed JSON envelope on stdout when ``as_json``."""
+    import json as _json
+    from app.main import _cmd_claim
+    db, _ = seeded_store
+
+    class FakeSettings:
+        RECEIPT_STORE_PATH = str(db)
+        ESCROW_CHAIN_RPC = "http://fake"
+        ESCROW_CONTRACT_ADDRESS = "0xe"
+        CLAIM_BATCH_SIZE = 50
+        ESCROW_CHAIN_ID = 102031
+
+    with patch("app.main.load_settings", return_value=FakeSettings()):
+        with pytest.raises(SystemExit) as exc:
+            await _cmd_claim(
+                only_uuid="00000000-0000-0000-0000-000000000000",
+                as_json=True,
+            )
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err == "", "JSON mode must not write to stderr on failure"
+    payload = _json.loads(captured.out)
+    assert payload == {
+        "ok": False,
+        "error_code": "NO_RECEIPT",
+        "error": "No receipt found with uuid 00000000-0000-0000-0000-000000000000",
+    }
+
+
+@pytest.mark.asyncio
+async def test_cmd_claim_json_emits_json_on_locked_uuid(seeded_store, capsys):
+    """Locked-receipt failure also emits typed JSON in --json mode."""
+    import json as _json
+    from app.main import _cmd_claim
+    db, seeded = seeded_store
+
+    class FakeSettings:
+        RECEIPT_STORE_PATH = str(db)
+        ESCROW_CHAIN_RPC = "http://fake"
+        ESCROW_CONTRACT_ADDRESS = "0xe"
+        CLAIM_BATCH_SIZE = 50
+        ESCROW_CHAIN_ID = 102031
+
+    with patch("app.main.load_settings", return_value=FakeSettings()):
+        with pytest.raises(SystemExit) as exc:
+            await _cmd_claim(
+                only_uuid=seeded["locked"].request_uuid, as_json=True,
+            )
+
+    assert exc.value.code == 1
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error_code"] == "RECEIPT_LOCKED"
+    assert "locked" in payload["error"].lower()
+
+
 def test_argparse_new_flags_present():
     """Smoke test: argparse accepts the new flags without errors."""
     from app.main import _build_arg_parser

@@ -2939,6 +2939,7 @@ def _receipt_to_json(sr) -> dict:
 
 async def _cmd_claim(
     include_retryable: bool = False, only_uuid: str | None = None,
+    as_json: bool = False,
 ) -> None:
     """Submit claimable Leg 2 receipts on-chain.
 
@@ -2946,9 +2947,33 @@ async def _cmd_claim(
     ``include_retryable=True`` picks up ``failed_retryable`` rows for
     explicit retry. ``only_uuid`` restricts the run to a single row and
     refuses if that row is locked.
+
+    rc.9: ``as_json=True`` (set when the operator passes ``--json``)
+    routes every exit path through a single JSON envelope — failures
+    emit ``{"ok": false, "error_code": ..., "error": ...}`` to stdout
+    + exit 1; success emits a structured summary. Cron scripts piping
+    to ``jq`` no longer get text on the failure path.
     """
+    import json as _json
     from app.payment.settlement import claim_all
     from app.payment.receipt_store import get_store
+
+    def _fail(error_code: str, message: str, exit_code: int = 1) -> None:
+        if as_json:
+            print(_json.dumps({
+                "ok": False,
+                "error_code": error_code,
+                "error": message,
+            }))
+        else:
+            print(message, file=sys.stderr)
+        sys.exit(exit_code)
+
+    def _info(message: str) -> None:
+        # Informational text on the success path — suppressed in JSON
+        # mode so the only thing on stdout is the final summary object.
+        if not as_json:
+            print(message)
 
     s = load_settings()
 
@@ -2957,15 +2982,13 @@ async def _cmd_claim(
         await store.initialize()
         existing = await store.get_by_uuid(only_uuid)
         if existing is None:
-            print(f"No receipt found with uuid {only_uuid}", file=sys.stderr)
-            sys.exit(1)
+            _fail("NO_RECEIPT", f"No receipt found with uuid {only_uuid}")
         if existing.locked:
-            print(
+            _fail(
+                "RECEIPT_LOCKED",
                 f"Receipt {only_uuid} is locked (failed_terminal) — refusing "
                 f"to claim. Use --unlock to reset if you're sure.",
-                file=sys.stderr,
             )
-            sys.exit(1)
 
     # Use identity key by default — operator can override with SR_SETTLEMENT_KEY if they want
     # a separate settlement wallet. Both paths require the key file on disk.
@@ -2977,11 +3000,12 @@ async def _cmd_claim(
                 s.IDENTITY_KEY_PATH, s.IDENTITY_PASSPHRASE,
             )
             settlement_key_hex = identity_key if identity_key.startswith("0x") else "0x" + identity_key
-            print(f"Submitting as identity {identity_address}")
+            _info(f"Submitting as identity {identity_address}")
         except KeystorePassphraseRequired:
-            print("Identity key is encrypted. Set SR_IDENTITY_PASSPHRASE or use --password-file.",
-                  file=sys.stderr)
-            sys.exit(1)
+            _fail(
+                "KEYSTORE_PASSPHRASE_REQUIRED",
+                "Identity key is encrypted. Set SR_IDENTITY_PASSPHRASE or use --password-file.",
+            )
 
     # Gas pre-check — the chain tx will revert with cryptic "insufficient
     # funds" if the settlement wallet has 0 native tokens. Fail early with
@@ -2994,17 +3018,22 @@ async def _cmd_claim(
             addr = Account.from_key(settlement_key_hex).address
             balance = w3.eth.get_balance(addr)
         except Exception as e:
-            print(f"Could not check gas balance ({e}); proceeding.", file=sys.stderr)
+            # Non-fatal warning — proceed with claim; chain may revert.
+            if not as_json:
+                print(f"Could not check gas balance ({e}); proceeding.", file=sys.stderr)
             balance = None
         if balance is not None and balance == 0:
-            print(
-                f"Settlement wallet {addr} has 0 native tokens for gas.\n"
+            # Pre-rc.9 used exit 0 here (treated as benign skip); rc.9
+            # keeps that exit code so existing cron behaviour is unchanged
+            # but routes through ``_fail`` so JSON mode gets a clean shape.
+            _fail(
+                "SETTLEMENT_GAS_BALANCE_ZERO",
+                f"Settlement wallet {addr} has 0 native tokens for gas. "
                 f"{'(This is your identity key.) ' if not override else ''}"
                 f"Fund it with a small amount of the chain's native token, "
                 f"or set SR_SETTLEMENT_KEY=<hex> to a funded wallet and retry.",
-                file=sys.stderr,
+                exit_code=0,
             )
-            sys.exit(0)
 
     # P3/L3 — share the GUI's claim.lock so a CLI claim and a GUI
     # claim can't double-submit the same nonces. Stale-lock recovery
@@ -3021,24 +3050,53 @@ async def _cmd_claim(
                     only_uuids=[only_uuid] if only_uuid else None,
                 )
             except ValueError as e:
-                print(f"Cannot claim: {e}", file=sys.stderr)
-                sys.exit(1)
+                _fail("CANNOT_CLAIM", f"Cannot claim: {e}")
     except ClaimLockHeld:
-        print(
+        _fail(
+            "CLAIM_LOCK_HELD",
             "another claim is in progress (GUI or CLI). Wait for it to "
             "finish or close the GUI.",
-            file=sys.stderr,
         )
-        sys.exit(1)
 
     if not results:
-        print("No receipts to submit.")
+        if as_json:
+            print(_json.dumps({"ok": True, "submitted": 0, "batches": [], "message": "No receipts to submit."}))
+        else:
+            print("No receipts to submit.")
         return
 
     total_submitted = sum(r.submitted for r in results)
     total_failed = sum(1 for r in results if r.error)
     total_reconciled = sum(r.skipped_as_already_claimed for r in results)
     total_locked = sum(r.locked_after_failure for r in results)
+
+    if as_json:
+        # Single canonical JSON envelope — cron + jq friendly.
+        batches = []
+        for i, r in enumerate(results, 1):
+            batch = {
+                "index": i,
+                "submitted": r.submitted,
+                "tx_hash": r.tx_hash,
+                "gas_used": r.gas_used,
+                "ok": not r.error,
+                "skipped_as_already_claimed": r.skipped_as_already_claimed,
+                "locked_after_failure": r.locked_after_failure,
+            }
+            if r.error:
+                batch["reason_code"] = r.reason_code
+                batch["error"] = str(r.error) if r.error is not None else None
+            batches.append(batch)
+        print(_json.dumps({
+            "ok": total_failed == 0,
+            "submitted": total_submitted,
+            "reconciled": total_reconciled,
+            "locked": total_locked,
+            "batches": batches,
+        }))
+        if total_failed:
+            sys.exit(1)
+        return
 
     print(
         f"Submitted {len(results)} batch(es), {total_submitted} receipt(s) total."
@@ -3120,6 +3178,7 @@ def main() -> None:
         asyncio.run(_cmd_claim(
             include_retryable=args.include_retryable,
             only_uuid=args.uuid,
+            as_json=args.output_json,
         ))
         return
 
