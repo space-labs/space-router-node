@@ -275,8 +275,17 @@ class TestCoord500HonestFailure:
                 "PATCH",
                 "https://spacerouter-coordination-api-test.fly.dev/nodes/0xabc/status",
             )
+            # rc.10 #3b: mirror what httpx.Response.raise_for_status()
+            # actually produces — a 2-line message that EMBEDS the Mozilla
+            # URL inline. Pre-#3b the mock used a sanitized one-liner so
+            # the test passed even though production leaked the URL via
+            # %s formatting. Same class of bug as the rc.6→rc.8 J-06
+            # mock-vs-reality mismatch — this keeps the regression honest.
             raise httpx.HTTPStatusError(
-                "Server error '500 Internal Server Error' for url ...",
+                "Server error '500 Internal Server Error' for url "
+                "'https://spacerouter-coordination-api-test.fly.dev/nodes/0xabc/status'\n"
+                "For more information check: "
+                "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
                 request=req,
                 response=httpx.Response(500, request=req),
             )
@@ -331,8 +340,17 @@ class TestCoord500HonestFailure:
                 "PATCH",
                 "https://spacerouter-coordination-api-test.fly.dev/nodes/0xabc/status",
             )
+            # rc.10 #3b: mirror what httpx.Response.raise_for_status()
+            # actually produces — a 2-line message that EMBEDS the Mozilla
+            # URL inline. Pre-#3b the mock used a sanitized one-liner so
+            # the test passed even though production leaked the URL via
+            # %s formatting. Same class of bug as the rc.6→rc.8 J-06
+            # mock-vs-reality mismatch — this keeps the regression honest.
             raise httpx.HTTPStatusError(
-                "Server error '500 Internal Server Error' for url ...",
+                "Server error '500 Internal Server Error' for url "
+                "'https://spacerouter-coordination-api-test.fly.dev/nodes/0xabc/status'\n"
+                "For more information check: "
+                "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
                 request=req,
                 response=httpx.Response(500, request=req),
             )

@@ -449,6 +449,19 @@ def deregister_best_effort_sync(settings: Settings) -> bool:
     try:
         asyncio.run(_run())
         return True
+    except httpx.HTTPStatusError as exc:
+        # rc.10 #3b: httpx.HTTPStatusError.__str__ embeds the Mozilla URL
+        # ("For more information check: https://developer.mozilla.org/...")
+        # inline. Even without exc_info=True (rc.10 #3), formatting `%s` on
+        # the exception leaks that URL into operator-facing logs. Render
+        # the diagnostic ourselves with just the status + URL we hit.
+        logger.warning(
+            "Best-effort deregister failed; continuing with reset: "
+            "HTTP %d on %s",
+            exc.response.status_code,
+            exc.request.url,
+        )
+        return False
     except Exception as exc:
         logger.warning(
             "Best-effort deregister failed; continuing with reset: %s",
