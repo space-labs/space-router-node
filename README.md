@@ -111,7 +111,7 @@ python -m app.main --claim
 ```
 
 On macOS, the same CLI ships inside the GUI bundle, so you don't need a source
-install: `/Applications/SpaceRouter.app/Contents/MacOS/space-router-node --claim`.
+install: `"/Applications/SpaceRouter Proxy.app/Contents/MacOS/space-router-node" --claim`.
 Useful flags: `--include-retryable`, `--uuid <UUID>`, `--receipts` (list).
 
 ## macOS launchd service

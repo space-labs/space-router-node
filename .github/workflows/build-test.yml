@@ -32,11 +32,11 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            artifact: space-router-node-test-macos-arm64
+            artifact: spacerouter-proxy-cli-v1.5.0-test.${{ github.run_number }}-macos-arm64
           - os: windows-latest
-            artifact: space-router-node-test-windows-x64
+            artifact: spacerouter-proxy-cli-v1.5.0-test.${{ github.run_number }}-windows-x64
           - os: ubuntu-latest
-            artifact: space-router-node-test-linux-x64
+            artifact: spacerouter-proxy-cli-v1.5.0-test.${{ github.run_number }}-linux-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -147,9 +147,9 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            artifact: spacerouter-gui-test-macos-arm64
+            artifact: spacerouter-proxy-gui-v1.5.0-test.${{ github.run_number }}-macos-arm64
           - os: windows-latest
-            artifact: spacerouter-gui-test-windows-x64
+            artifact: spacerouter-proxy-gui-v1.5.0-test.${{ github.run_number }}-windows-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -181,7 +181,7 @@ jobs:
         run: pyinstaller spacerouter_gui.spec
 
       # Build the CLI binary in the same job so we can embed it inside
-      # SpaceRouter.app on macOS. Without this, QA installs from the .dmg
+      # SpaceRouter Proxy.app on macOS. Without this, QA installs from the .dmg
       # have no way to reach --claim / --receipts. Mirrors build.yml.
       - name: Build embedded CLI binary (macOS)
         if: runner.os == 'macOS'
@@ -191,9 +191,9 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          cp dist/space-router-node dist/SpaceRouter.app/Contents/MacOS/space-router-node
-          chmod +x dist/SpaceRouter.app/Contents/MacOS/space-router-node
-          ls -la dist/SpaceRouter.app/Contents/MacOS/
+          cp dist/space-router-node "dist/SpaceRouter Proxy.app/Contents/MacOS/space-router-node"
+          chmod +x "dist/SpaceRouter Proxy.app/Contents/MacOS/space-router-node"
+          ls -la "dist/SpaceRouter Proxy.app/Contents/MacOS/"
 
       # PyInstaller's per-component ad-hoc signatures invalidate the .app
       # bundle's outer seal once we drop in the embedded CLI binary above
@@ -208,9 +208,9 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          xattr -cr dist/SpaceRouter.app
-          codesign --force --deep --sign - dist/SpaceRouter.app
-          codesign --verify --deep --strict --verbose=2 dist/SpaceRouter.app
+          xattr -cr "dist/SpaceRouter Proxy.app"
+          codesign --force --deep --sign - "dist/SpaceRouter Proxy.app"
+          codesign --verify --deep --strict --verbose=2 "dist/SpaceRouter Proxy.app"
 
       - name: Embedded CLI smoke test (macOS)
         if: runner.os == 'macOS'
@@ -220,8 +220,8 @@ jobs:
           # version-frozen binary reports the same version the GUI was
           # stamped with. Catches packaging regressions like the
           # ``space-router-node`` entrypoint failing to import app.*
-          ./dist/SpaceRouter.app/Contents/MacOS/space-router-node --help > /dev/null
-          printed_version=$(./dist/SpaceRouter.app/Contents/MacOS/space-router-node --version 2>&1 || true)
+          "./dist/SpaceRouter Proxy.app/Contents/MacOS/space-router-node" --help > /dev/null
+          printed_version=$("./dist/SpaceRouter Proxy.app/Contents/MacOS/space-router-node" --version 2>&1 || true)
           echo "Embedded CLI reports: $printed_version"
           case "$printed_version" in
             *"${{ steps.version.outputs.version }}"*) echo "version matches" ;;
@@ -232,7 +232,7 @@ jobs:
       - name: GUI smoke test (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        run: bash tests/e2e/gui_smoke_test.sh "dist/SpaceRouter.app/Contents/MacOS/SpaceRouter"
+        run: bash tests/e2e/gui_smoke_test.sh "dist/SpaceRouter Proxy.app/Contents/MacOS/SpaceRouter"
         timeout-minutes: 3
 
       - name: GUI smoke test (Windows)
@@ -251,10 +251,10 @@ jobs:
         shell: bash
         run: |
           set -e
-          BUNDLE_CLI="dist/SpaceRouter.app/Contents/MacOS/space-router-node"
+          BUNDLE_CLI="dist/SpaceRouter Proxy.app/Contents/MacOS/space-router-node"
           if [ ! -f "$BUNDLE_CLI" ]; then
             echo "::error::Embedded CLI missing from app bundle before DMG packaging: $BUNDLE_CLI"
-            ls -la dist/SpaceRouter.app/Contents/MacOS/ || true
+            ls -la "dist/SpaceRouter Proxy.app/Contents/MacOS/" || true
             exit 1
           fi
           if [ ! -x "$BUNDLE_CLI" ]; then
@@ -273,21 +273,21 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          if [ -d "dist/SpaceRouter.app" ]; then
+          if [ -d "dist/SpaceRouter Proxy.app" ]; then
             DMG="dist/${{ matrix.artifact }}.dmg"
             rm -f "$DMG"
             for attempt in 1 2 3; do
               if create-dmg \
-                   --volname "SpaceRouter" \
+                   --volname "SpaceRouter Proxy" \
                    --background "packaging/macos/dmg/background.tiff" \
                    --window-size 600 400 \
                    --icon-size 110 \
-                   --icon "SpaceRouter.app" 150 185 \
+                   --icon "SpaceRouter Proxy.app" 150 185 \
                    --app-drop-link 450 185 \
-                   --hide-extension "SpaceRouter.app" \
+                   --hide-extension "SpaceRouter Proxy.app" \
                    --no-internet-enable \
                    "$DMG" \
-                   "dist/SpaceRouter.app"; then
+                   "dist/SpaceRouter Proxy.app"; then
                 break
               fi
               if [ "$attempt" -lt 3 ]; then
@@ -314,10 +314,10 @@ jobs:
           DMG="dist/${{ matrix.artifact }}.dmg"
           MOUNT_POINT=$(mktemp -d)
           hdiutil attach "$DMG" -mountpoint "$MOUNT_POINT" -nobrowse -readonly -quiet
-          BUNDLE_CLI="$MOUNT_POINT/SpaceRouter.app/Contents/MacOS/space-router-node"
+          BUNDLE_CLI="$MOUNT_POINT/SpaceRouter Proxy.app/Contents/MacOS/space-router-node"
           if [ ! -f "$BUNDLE_CLI" ]; then
             echo "::error::Embedded CLI missing from DMG: $BUNDLE_CLI"
-            ls -la "$MOUNT_POINT/SpaceRouter.app/Contents/MacOS/" || true
+            ls -la "$MOUNT_POINT/SpaceRouter Proxy.app/Contents/MacOS/" || true
             hdiutil detach "$MOUNT_POINT" -quiet || true
             exit 1
           fi

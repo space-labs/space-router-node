@@ -36,11 +36,11 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            artifact_base: spacerouter-cli-macos-arm64
+            target: macos-arm64
           - os: windows-latest
-            artifact_base: spacerouter-cli-windows-x64
+            target: windows-x64
           - os: ubuntu-latest
-            artifact_base: spacerouter-cli-linux-x64
+            target: linux-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -67,9 +67,10 @@ jobs:
         id: artifact
         shell: bash
         run: |
-          PKG_VERSION="${{ steps.version.outputs.version }}"
-          PKG_VERSION="${PKG_VERSION#v}"
-          echo "name=${{ matrix.artifact_base }}-${PKG_VERSION}" >> "$GITHUB_OUTPUT"
+          # User-spec format: spacerouter-proxy-cli-{version}-{target}
+          # version is the git tag (with leading 'v') for tag builds, or
+          # v0.0.0-dev.{run_number} for branch / dispatch builds.
+          echo "name=spacerouter-proxy-cli-${{ steps.version.outputs.version }}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: pip install -r requirements.txt pyinstaller
@@ -392,9 +393,9 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            artifact_base: spacerouter-gui-macos-arm64
+            target: macos-arm64
           - os: windows-latest
-            artifact_base: spacerouter-gui-windows-x64
+            target: windows-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -421,9 +422,8 @@ jobs:
         id: artifact
         shell: bash
         run: |
-          PKG_VERSION="${{ steps.version.outputs.version }}"
-          PKG_VERSION="${PKG_VERSION#v}"
-          echo "name=${{ matrix.artifact_base }}-${PKG_VERSION}" >> "$GITHUB_OUTPUT"
+          # User-spec format: spacerouter-proxy-gui-{version}-{target}
+          echo "name=spacerouter-proxy-gui-${{ steps.version.outputs.version }}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: pip install -r requirements.txt pyinstaller pywebview
@@ -463,7 +463,7 @@ jobs:
         run: pyinstaller spacerouter_gui.spec
 
       # Build the CLI binary in the same job so we can embed it inside
-      # SpaceRouter.app on macOS. Without this, users who install via
+      # SpaceRouter Proxy.app on macOS. Without this, users who install via
       # the .dmg have no way to reach --claim / --receipts.
       # The standalone CLI artifact is still published separately by the
       # `build` job above; this copy is additive.
@@ -475,9 +475,9 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          cp dist/space-router-node dist/SpaceRouter.app/Contents/MacOS/space-router-node
-          chmod +x dist/SpaceRouter.app/Contents/MacOS/space-router-node
-          ls -la dist/SpaceRouter.app/Contents/MacOS/
+          cp dist/space-router-node "dist/SpaceRouter Proxy.app/Contents/MacOS/space-router-node"
+          chmod +x "dist/SpaceRouter Proxy.app/Contents/MacOS/space-router-node"
+          ls -la "dist/SpaceRouter Proxy.app/Contents/MacOS/"
 
       - name: Embedded CLI smoke test (macOS)
         if: runner.os == 'macOS'
@@ -487,8 +487,8 @@ jobs:
           # version-frozen binary reports the same version the GUI was
           # stamped with. Catches packaging regressions like the
           # ``space-router-node`` entrypoint failing to import app.*
-          ./dist/SpaceRouter.app/Contents/MacOS/space-router-node --help > /dev/null
-          printed_version=$(./dist/SpaceRouter.app/Contents/MacOS/space-router-node --version 2>&1 || true)
+          "./dist/SpaceRouter Proxy.app/Contents/MacOS/space-router-node" --help > /dev/null
+          printed_version=$("./dist/SpaceRouter Proxy.app/Contents/MacOS/space-router-node" --version 2>&1 || true)
           echo "Embedded CLI reports: $printed_version"
           case "$printed_version" in
             *"${{ steps.version.outputs.version }}"*) echo "version matches" ;;
@@ -499,7 +499,7 @@ jobs:
       - name: GUI smoke test (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        run: bash tests/e2e/gui_smoke_test.sh "dist/SpaceRouter.app/Contents/MacOS/SpaceRouter"
+        run: bash tests/e2e/gui_smoke_test.sh "dist/SpaceRouter Proxy.app/Contents/MacOS/SpaceRouter"
         timeout-minutes: 3
 
       - name: GUI smoke test (Windows)
@@ -519,7 +519,7 @@ jobs:
           codesign --force --deep --options runtime \
             --sign "$APPLE_SIGNING_IDENTITY" \
             --timestamp \
-            "dist/SpaceRouter.app"
+            "dist/SpaceRouter Proxy.app"
 
       - name: Install create-dmg
         if: runner.os == 'macOS'
@@ -532,21 +532,21 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          if [ -d "dist/SpaceRouter.app" ]; then
+          if [ -d "dist/SpaceRouter Proxy.app" ]; then
             DMG="dist/${{ steps.artifact.outputs.name }}.dmg"
             rm -f "$DMG"
             for attempt in 1 2 3; do
               if create-dmg \
-                   --volname "SpaceRouter" \
+                   --volname "SpaceRouter Proxy" \
                    --background "packaging/macos/dmg/background.tiff" \
                    --window-size 600 400 \
                    --icon-size 110 \
-                   --icon "SpaceRouter.app" 150 185 \
+                   --icon "SpaceRouter Proxy.app" 150 185 \
                    --app-drop-link 450 185 \
-                   --hide-extension "SpaceRouter.app" \
+                   --hide-extension "SpaceRouter Proxy.app" \
                    --no-internet-enable \
                    "$DMG" \
-                   "dist/SpaceRouter.app"; then
+                   "dist/SpaceRouter Proxy.app"; then
                 break
               fi
               if [ "$attempt" -lt 3 ]; then

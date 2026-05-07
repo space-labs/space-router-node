@@ -170,7 +170,7 @@ else:
     if sys.platform == "darwin":
         app = BUNDLE(
             coll,
-            name="SpaceRouter.app",
+            name="SpaceRouter Proxy.app",
             icon="packaging/macos/SpaceRouter.icns",
             bundle_identifier="com.spacerouter.desktop",
             info_plist={
