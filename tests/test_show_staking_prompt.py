@@ -105,3 +105,95 @@ def test_fetch_returns_none_on_http_error(monkeypatch):
     import httpx
     monkeypatch.setattr(httpx, "get", _boom)
     assert main_mod._fetch_wallet_staking_status() is None
+
+
+# ── rc.8 #1 — query endpoint, not path endpoint ────────────────────
+
+
+def test_fetch_uses_query_endpoint_with_staking_address(monkeypatch):
+    """rc.8 fix: the helper must call ``GET /nodes?staking_address=…``
+    (case-insensitive list lookup), not ``GET /nodes/{addr}`` (path is
+    typed as a node UUID and triggers Postgres cast errors → 500)."""
+
+    class _StubSettings:
+        STAKING_ADDRESS = "0xAbCdEf" + "00" * 17
+        COORDINATION_API_URL = "http://coord.example"
+
+    monkeypatch.setattr(main_mod, "load_settings", lambda: _StubSettings())
+
+    captured: dict = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"staking_status": "earning"}]
+
+    def _fake_get(url, params=None, timeout=None):
+        captured["url"] = url
+        captured["params"] = params
+        captured["timeout"] = timeout
+        return _Resp()
+
+    import httpx
+    monkeypatch.setattr(httpx, "get", _fake_get)
+
+    assert main_mod._fetch_wallet_staking_status() == "earning"
+    # The URL must NOT contain the wallet address as a path segment.
+    assert captured["url"].endswith("/nodes")
+    assert "/nodes/0x" not in captured["url"]
+    # The wallet must travel as a query param, lowercased per the
+    # original contract.
+    assert captured["params"] == {"staking_address": "0xabcdef" + "00" * 17}
+
+
+def test_fetch_returns_none_when_node_not_registered(monkeypatch):
+    """Empty list response (wallet not yet registered) must return None
+    — the operator should still see the "Staking Required" prompt at
+    first-run setup time."""
+
+    class _StubSettings:
+        STAKING_ADDRESS = "0x" + "11" * 20
+        COORDINATION_API_URL = "http://coord.example"
+
+    monkeypatch.setattr(main_mod, "load_settings", lambda: _StubSettings())
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return []
+
+    import httpx
+    monkeypatch.setattr(httpx, "get", lambda *a, **kw: _Resp())
+
+    assert main_mod._fetch_wallet_staking_status() is None
+
+
+def test_fetch_returns_first_node_status(monkeypatch):
+    """If multiple nodes share a staking address (multi-node operator),
+    the first row's status drives the gate — same behaviour as the
+    pre-rc.8 single-object response."""
+
+    class _StubSettings:
+        STAKING_ADDRESS = "0x" + "22" * 20
+        COORDINATION_API_URL = "http://coord.example"
+
+    monkeypatch.setattr(main_mod, "load_settings", lambda: _StubSettings())
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [
+                {"staking_status": "qualifying"},
+                {"staking_status": "earning"},
+            ]
+
+    import httpx
+    monkeypatch.setattr(httpx, "get", lambda *a, **kw: _Resp())
+
+    assert main_mod._fetch_wallet_staking_status() == "qualifying"

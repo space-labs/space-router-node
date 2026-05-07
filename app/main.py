@@ -375,9 +375,14 @@ def _fetch_wallet_staking_status() -> str | None:
     rc.7 MIN-3: mirrors the GUI staking-modal gate (see
     ``gui/assets/app.js`` ~L1483) so the CLI doesn't nag operators whose
     wallet is already ``qualifying``/``earning``. Fail-safe: any error
-    (no STAKING_ADDRESS configured, network failure, 404, malformed
-    JSON) returns ``None`` so the caller falls through to the existing
-    prompt — first-run setup still gets the nag.
+    (no STAKING_ADDRESS configured, network failure, malformed JSON,
+    wallet not yet registered) returns ``None`` so the caller falls
+    through to the existing prompt — first-run setup still gets the nag.
+
+    rc.8 fix: query ``/nodes?staking_address=...`` (case-insensitive,
+    list response) instead of the path-style ``/nodes/{node_id}`` —
+    the latter expects a node UUID, and passing a 0x-address triggers
+    a Postgres UUID-cast error → HTTP 500 from the coord backend.
     """
     try:
         import httpx
@@ -386,11 +391,15 @@ def _fetch_wallet_staking_status() -> str | None:
         if not wallet:
             return None
         resp = httpx.get(
-            f"{s.COORDINATION_API_URL}/nodes/{wallet}",
+            f"{s.COORDINATION_API_URL}/nodes",
+            params={"staking_address": wallet},
             timeout=5,
         )
         resp.raise_for_status()
-        ss = resp.json().get("staking_status")
+        nodes = resp.json()
+        if not isinstance(nodes, list) or not nodes:
+            return None  # wallet not registered yet
+        ss = nodes[0].get("staking_status")
         return ss if isinstance(ss, str) else None
     except Exception:
         return None
