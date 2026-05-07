@@ -1331,12 +1331,17 @@ class TestDeregisterNode:
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_deregister_failure_logged_not_raised(self, reg_settings):
+    async def test_deregister_failure_raises(self, reg_settings):
+        """rc.8 #7b: coord 5xx must propagate so callers can distinguish
+        real success from "we tried and the server fell over". The policy
+        decision (swallow / log / report failure) lives at the call site —
+        e.g. ``deregister_best_effort_sync`` returns False, while the
+        daemon shutdown path catches and logs."""
         respx.patch("http://coordination:8000/nodes/node-abc-123/status").mock(
             return_value=Response(500)
         )
 
         import httpx
         async with httpx.AsyncClient() as client:
-            # Should NOT raise — deregister is best-effort
-            await deregister_node(client, reg_settings, "node-abc-123", identity_key=TEST_IDENTITY_KEY)
+            with pytest.raises(httpx.HTTPStatusError):
+                await deregister_node(client, reg_settings, "node-abc-123", identity_key=TEST_IDENTITY_KEY)

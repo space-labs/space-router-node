@@ -373,21 +373,28 @@ async def deregister_node(
     *,
     identity_key: str,
 ) -> None:
-    """Set node status to offline (signed). Best-effort."""
+    """Set node status to offline (signed).
+
+    Raises on HTTP/network failure so callers can distinguish a real
+    "coord said offline" from a "we tried and the server 500'd". rc.8 #7b:
+    the previous swallow-and-warn made ``deregister_best_effort_sync``
+    report success on coord 500s, which surfaced as a misleading
+    "Notified coordination API (status → offline)" line during --reset.
+    Wrap calls in a try/except at the policy layer (e.g.
+    ``deregister_best_effort_sync``) when failure must not abort the
+    surrounding flow.
+    """
     signature, timestamp = sign_request(identity_key, "update_status", node_id)
 
     url = f"{settings.COORDINATION_API_URL}/nodes/{node_id}/status"
-    try:
-        resp = await http_client.patch(url, json={
-            "status": "offline",
-            "wallet_address": _effective_wallet(settings),
-            "signature": signature,
-            "timestamp": timestamp,
-        }, timeout=10.0)
-        resp.raise_for_status()
-        logger.info("Deregistered node %s (status → offline)", node_id)
-    except Exception as exc:
-        logger.warning("Failed to deregister node %s: %s", node_id, exc)
+    resp = await http_client.patch(url, json={
+        "status": "offline",
+        "wallet_address": _effective_wallet(settings),
+        "signature": signature,
+        "timestamp": timestamp,
+    }, timeout=10.0)
+    resp.raise_for_status()
+    logger.info("Deregistered node %s (status → offline)", node_id)
 
 
 def deregister_best_effort_sync(settings: Settings) -> bool:

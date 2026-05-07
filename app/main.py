@@ -2208,11 +2208,43 @@ async def _run(
                 from app.upnp import remove_upnp_mapping
                 await remove_upnp_mapping(ctx.upnp_endpoint[1])
 
-            # Deregister (best-effort)
+            # Deregister (best-effort) — swallow failures here so a coord
+            # 500 / network blip during shutdown doesn't surface as a
+            # noisy traceback. rc.8 #7b made the inner helper raise so
+            # the --reset path can surface honest success/failure; the
+            # daemon shutdown path doesn't care so we keep the swallow.
             if ctx.node_id:
-                await deregister_node(ctx.http, s, ctx.node_id, identity_key=ctx.identity_key)
+                try:
+                    await deregister_node(ctx.http, s, ctx.node_id, identity_key=ctx.identity_key)
+                except Exception as exc:
+                    logger.warning("Shutdown deregister failed for %s: %s", ctx.node_id, exc)
 
     logger.info("Home Node shut down cleanly")
+
+
+def _identity_keystore_is_encrypted(s) -> bool:
+    """Return True iff the identity key on disk is an encrypted keystore JSON.
+
+    rc.8 #7a helper: ``--reset`` needs to know whether to prompt for a
+    passphrase before attempting the coord deregister. Reuses the same
+    detector used by ``_reconcile_passphrase_flag_in_place`` in
+    ``settings_loader`` so both paths agree on what "encrypted" means.
+
+    A missing file → False (no key to load → caller will skip dereg
+    cleanly via the existing identity-load failure path).
+    """
+    try:
+        from app.identity import _is_keystore_json
+    except Exception:  # noqa: BLE001
+        return False
+    key_path = s.IDENTITY_KEY_PATH
+    if not key_path or not os.path.isfile(key_path):
+        return False
+    try:
+        with open(key_path) as f:
+            return _is_keystore_json(f.read())
+    except OSError:
+        return False
 
 
 def _do_reset() -> bool:
@@ -2256,13 +2288,48 @@ def _do_reset() -> bool:
     # identity key — otherwise the dashboard sees this node as online
     # for the full health-check timeout (~3 min) after --reset returns.
     # Best-effort; do NOT block reset on coord failure.
+    #
+    # rc.8 #7a: when the keystore is encrypted and SR_IDENTITY_PASSPHRASE
+    # is unset, ``deregister_best_effort_sync`` would silently fail to
+    # load the identity (KeystorePassphraseRequired) and skip the coord
+    # ping entirely — leaving a stale "online" row on the dashboard.
+    # Prompt interactively when we have a TTY; bail with an actionable
+    # error otherwise so scripted operators don't silently break.
+    if _identity_keystore_is_encrypted(s) and not os.environ.get("SR_IDENTITY_PASSPHRASE"):
+        if sys.stdin.isatty():
+            import getpass
+            passphrase = getpass.getpass("Identity keystore passphrase: ")
+            os.environ["SR_IDENTITY_PASSPHRASE"] = passphrase
+            # Reload settings so IDENTITY_PASSPHRASE picks up the new env.
+            s = load_settings()
+        else:
+            print(
+                "ERROR: Identity keystore is encrypted but SR_IDENTITY_PASSPHRASE is not set.\n"
+                "Set SR_IDENTITY_PASSPHRASE before running --reset on an encrypted keystore "
+                "so the coordination API can be notified before the key is deleted.",
+                file=sys.stderr, flush=True,
+            )
+            sys.exit(1)
+
+    # rc.8 #7b: surface a clean boolean so a coord 500 doesn't masquerade
+    # as success. Local wipe MUST proceed either way — the operator just
+    # needs to know whether the dashboard row got the offline ping.
     try:
         from app.registration import deregister_best_effort_sync
-        if deregister_best_effort_sync(s):
-            print("Notified coordination API (status → offline).", flush=True)
+        coord_ok = deregister_best_effort_sync(s)
     except Exception:
-        # Already logged inside the helper; reset must still proceed.
-        pass
+        # Defensive: helper already swallows internally, but keep the
+        # outer guard so a programmer error doesn't abort --reset.
+        logger.warning("deregister_best_effort_sync raised unexpectedly", exc_info=True)
+        coord_ok = False
+
+    if coord_ok:
+        print("Notified coordination API (status → offline).", flush=True)
+    else:
+        print(
+            "Coord deregister failed (likely server issue) — local state still wiped.",
+            flush=True,
+        )
 
     # Delete settings.json (canonical v1.5 config)
     if settings_file.is_file():
