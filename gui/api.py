@@ -391,6 +391,18 @@ class Api:
                 "error_code": "PASSPHRASE_REQUIRED",
             }
 
+        # rc.8 MAJ-6: belt-and-braces. The macOS GUI runs Stop→Start in
+        # the same pywebview Python process, so the receipt_store
+        # singleton (and its async-sqlite connection bound to the prior
+        # event loop's thread) can survive across the restart. Drop it
+        # here so the next ``initialize()`` rebinds to the new loop.
+        # See PR #108 diagnostic.
+        try:
+            from app.payment import receipt_store as _rs
+            _rs.clear_singleton()
+        except Exception:  # noqa: BLE001
+            pass
+
         try:
             self._node.start()
         except Exception as exc:
@@ -423,6 +435,23 @@ class Api:
         except Exception as exc:
             logger.exception("Failed to stop node")
             return {"ok": False, "error": str(exc)}
+
+        # rc.8 MAJ-6: clear the receipt_store singleton so a subsequent
+        # Save & Restart in the same pywebview process gets a fresh
+        # ReceiptStore. Without this, the cached singleton's async-sqlite
+        # connection — opened on the previous loop's thread — survives
+        # into the next start and triggers a thread-affinity error,
+        # parking the daemon in ERROR before reaching EARNING. Same
+        # singleton-survives-the-cycle bug class as rc.6 BLK-2 (Reset
+        # path); different trigger. See PR #108 diagnostic.
+        try:
+            from app.payment import receipt_store as _rs
+            _rs.clear_singleton()
+        except Exception:  # noqa: BLE001
+            # Idempotent helper — best-effort. A failure to import
+            # receipt_store here would be surprising but must not
+            # propagate out of stop_node().
+            logger.debug("receipt_store.clear_singleton failed", exc_info=True)
         return {"ok": True}
 
     def get_environments(self) -> list:
