@@ -415,10 +415,15 @@ def deregister_best_effort_sync(settings: Settings) -> bool:
 
     try:
         from app.identity import load_or_create_identity
-    except Exception:
+    except Exception as exc:
+        # rc.10 #3: do NOT pass exc_info=True here — --reset runs against a
+        # CLI logger whose StreamHandler would dump the full traceback
+        # (httpx HTTPStatusError + Mozilla URL hint) to stderr BEFORE
+        # _do_reset prints its honest "Coord deregister failed (likely
+        # server issue)" message, scaring operators who just want to wipe.
         logger.warning(
-            "Cannot import identity module for reset-time deregister",
-            exc_info=True,
+            "Cannot import identity module for reset-time deregister: %s",
+            exc,
         )
         return False
 
@@ -427,10 +432,10 @@ def deregister_best_effort_sync(settings: Settings) -> bool:
             settings.IDENTITY_KEY_PATH,
             settings.IDENTITY_PASSPHRASE,
         )
-    except Exception:
+    except Exception as exc:
         logger.warning(
-            "Could not load identity for reset-time deregister; skipping",
-            exc_info=True,
+            "Could not load identity for reset-time deregister; skipping: %s",
+            exc,
         )
         return False
 
@@ -444,9 +449,9 @@ def deregister_best_effort_sync(settings: Settings) -> bool:
     try:
         asyncio.run(_run())
         return True
-    except Exception:
+    except Exception as exc:
         logger.warning(
-            "Best-effort deregister failed; continuing with reset",
-            exc_info=True,
+            "Best-effort deregister failed; continuing with reset: %s",
+            exc,
         )
         return False

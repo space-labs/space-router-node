@@ -2372,10 +2372,13 @@ def _do_reset() -> bool:
     try:
         from app.registration import deregister_best_effort_sync
         coord_ok = deregister_best_effort_sync(s)
-    except Exception:
+    except Exception as exc:
         # Defensive: helper already swallows internally, but keep the
         # outer guard so a programmer error doesn't abort --reset.
-        logger.warning("deregister_best_effort_sync raised unexpectedly", exc_info=True)
+        # rc.10 #3: no exc_info=True — the CLI logger writes tracebacks
+        # to stderr, which would leak ahead of the honest "Coord
+        # deregister failed" line below.
+        logger.warning("deregister_best_effort_sync raised unexpectedly: %s", exc)
         coord_ok = False
 
     if coord_ok:

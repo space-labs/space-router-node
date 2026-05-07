@@ -246,6 +246,138 @@ class TestCoord500HonestFailure:
         # Local wipe ran (the whole point of "still wiped").
         assert not key_path.exists()
 
+    def test_wrapper_does_not_log_with_exc_info(self, tmp_path, caplog):
+        """rc.10 #3: ``deregister_best_effort_sync`` must NOT call
+        ``logger.warning(..., exc_info=True)`` on coord HTTP failure.
+        Pre-fix it did, which made the CLI logger's StreamHandler dump
+        the full httpx HTTPStatusError traceback (with the Mozilla URL
+        hint) to stderr ahead of ``_do_reset``'s honest message.
+
+        We pin the regression at the LogRecord level — checking
+        ``record.exc_info`` is None — because the formatted output only
+        materialises once an actual ``Formatter``/``Handler`` is wired
+        up (which it isn't in unit tests, but very much is in the
+        shipped binary)."""
+        import logging
+
+        from app.config import Settings
+        from app.registration import deregister_best_effort_sync
+
+        settings = Settings(
+            COORDINATION_API_URL="http://example.invalid",
+            IDENTITY_KEY_PATH=str(tmp_path / "missing.key"),
+            IDENTITY_PASSPHRASE="",
+        )
+
+        async def _boom(*args, **kwargs):
+            import httpx
+            req = httpx.Request(
+                "PATCH",
+                "https://spacerouter-coordination-api-test.fly.dev/nodes/0xabc/status",
+            )
+            raise httpx.HTTPStatusError(
+                "Server error '500 Internal Server Error' for url ...",
+                request=req,
+                response=httpx.Response(500, request=req),
+            )
+
+        caplog.set_level(logging.WARNING, logger="app.registration")
+        with patch(
+            "app.identity.load_or_create_identity",
+            return_value=("0x" + "ab" * 32, "0x" + "cd" * 20),
+        ), patch("app.registration.deregister_node", side_effect=_boom):
+            ok = deregister_best_effort_sync(settings)
+
+        # rc.8 #7b regression: still returns False on coord HTTP error.
+        assert ok is False
+
+        # Find the warning the wrapper emits when the inner helper raises.
+        relevant = [
+            r for r in caplog.records
+            if r.name == "app.registration"
+            and "deregister" in r.getMessage().lower()
+        ]
+        assert relevant, (
+            "expected a warning from app.registration on coord failure"
+        )
+        # rc.10 #3 regression pin: NONE of those records may carry
+        # exc_info — that's what triggers the traceback dump.
+        for record in relevant:
+            assert record.exc_info is None, (
+                f"log record carries exc_info — will leak traceback: "
+                f"{record.getMessage()!r}"
+            )
+            # Defensive: the formatted message itself should be a clean
+            # one-liner, not a multi-line traceback dump.
+            formatted = record.getMessage()
+            assert "Traceback" not in formatted
+            assert "developer.mozilla.org" not in formatted
+
+    def test_do_reset_no_traceback_leak_end_to_end(
+        self, plaintext_keystore_setup, capsys, caplog,
+    ):
+        """rc.10 #3 end-to-end: drive ``_do_reset`` through a real
+        ``deregister_best_effort_sync`` whose underlying ``deregister_node``
+        raises HTTPStatusError. Assert the honest message lands, the
+        wrapper does not log with ``exc_info``, and ``_do_reset``'s own
+        outer guard does not either."""
+        import logging
+
+        tmp_path, certs_dir, key_path = plaintext_keystore_setup
+
+        async def _boom(*args, **kwargs):
+            import httpx
+            req = httpx.Request(
+                "PATCH",
+                "https://spacerouter-coordination-api-test.fly.dev/nodes/0xabc/status",
+            )
+            raise httpx.HTTPStatusError(
+                "Server error '500 Internal Server Error' for url ...",
+                request=req,
+                response=httpx.Response(500, request=req),
+            )
+
+        caplog.set_level(logging.WARNING)
+        with patch("app.main.load_settings") as mock_settings, \
+             patch("app.paths.config_dir", return_value=tmp_path), \
+             patch("app.main.sys") as mock_sys, \
+             patch(
+                 "app.identity.load_or_create_identity",
+                 return_value=("0x" + "ab" * 32, "0x" + "cd" * 20),
+             ), \
+             patch("app.registration.deregister_node", side_effect=_boom):
+            mock_settings.return_value.IDENTITY_KEY_PATH = str(key_path)
+            mock_settings.return_value.COORDINATION_API_URL = (
+                "https://spacerouter-coordination-api-test.fly.dev"
+            )
+            mock_settings.return_value.IDENTITY_PASSPHRASE = ""
+            mock_sys.argv = ["prog", "--reset"]
+            mock_sys.stdin.isatty.return_value = False
+
+            from app.main import _do_reset
+            _do_reset()
+
+        # rc.8 #7b honest message MUST still print to stdout.
+        captured = capsys.readouterr()
+        combined = captured.out + captured.err
+        assert "Coord deregister failed" in combined
+        assert "local state still wiped" in combined.lower()
+
+        # No deregister-related log record may carry exc_info.
+        offenders = [
+            r for r in caplog.records
+            if r.name in {"app.registration", "app.main"}
+            and r.exc_info is not None
+            and "deregister" in r.getMessage().lower()
+        ]
+        assert not offenders, (
+            "exc_info=True on deregister warning will leak traceback to "
+            f"end users: {[r.getMessage() for r in offenders]}"
+        )
+
+        # Local wipe still proceeded.
+        assert not key_path.exists()
+
     def test_do_reset_prints_success_when_coord_healthy(
         self, plaintext_keystore_setup, capsys,
     ):
