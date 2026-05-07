@@ -627,13 +627,32 @@ async def _phase_register(ctx: _NodeContext) -> None:
     """REGISTERING: Register with the Coordination API."""
     from app.registration import register_node, save_gateway_ca_cert
 
-    node_id, gateway_ca_cert = await register_node(
-        ctx.http, ctx.s, ctx.public_ip,
-        identity_key=ctx.identity_key,
-        upnp_endpoint=ctx.upnp_endpoint,
-        wallet_address=ctx.wallet_address,
-        staking_address=ctx.staking_address,
-        collection_address=ctx.collection_address,
+    logger.info(
+        "[MAJ-6-diag] _phase_register ENTRY: public_ip=%s upnp_endpoint=%s "
+        "node_port=%s public_port=%s",
+        ctx.public_ip, ctx.upnp_endpoint,
+        getattr(ctx.s, "NODE_PORT", "?"),
+        getattr(ctx.s, "PUBLIC_PORT", "?"),
+    )
+    try:
+        node_id, gateway_ca_cert = await register_node(
+            ctx.http, ctx.s, ctx.public_ip,
+            identity_key=ctx.identity_key,
+            upnp_endpoint=ctx.upnp_endpoint,
+            wallet_address=ctx.wallet_address,
+            staking_address=ctx.staking_address,
+            collection_address=ctx.collection_address,
+        )
+    except Exception as exc:
+        logger.info(
+            "[MAJ-6-diag] _phase_register register_node RAISED: %s: %s",
+            type(exc).__name__, exc,
+        )
+        raise
+    logger.info(
+        "[MAJ-6-diag] _phase_register register_node OK: node_id=%s "
+        "gateway_ca_cert=%s — coord will now probe back at the advertised endpoint",
+        node_id, "yes" if gateway_ca_cert else "no",
     )
     ctx.node_id = node_id
     ctx.gateway_ca_cert = gateway_ca_cert

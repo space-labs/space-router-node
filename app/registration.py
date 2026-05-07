@@ -314,6 +314,10 @@ async def request_probe(
     signature, timestamp = sign_request(identity_key, "request_probe", node_id)
 
     url = f"{settings.COORDINATION_API_URL}/nodes/{node_id}/request-probe"
+    logger.info(
+        "[MAJ-6-diag] request_probe POST %s — coord will probe advertised endpoint",
+        url,
+    )
     try:
         resp = await http_client.post(url, json={
             "wallet_address": _effective_wallet(settings),
@@ -342,9 +346,17 @@ async def request_probe(
             )
             return ProbeRequestResult("rate_limited", retry_after)
         logger.warning("Probe request failed: %s %s", resp.status_code, resp.text)
+        logger.info(
+            "[MAJ-6-diag] request_probe FAILED: status=%s body=%s",
+            resp.status_code, resp.text[:200],
+        )
         return ProbeRequestResult("failed", None)
     except Exception as exc:
         logger.warning("Failed to request probe for node %s: %s", node_id, exc)
+        logger.info(
+            "[MAJ-6-diag] request_probe EXCEPTION: %s: %s",
+            type(exc).__name__, exc,
+        )
         return ProbeRequestResult("failed", None)
 
 

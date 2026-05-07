@@ -1268,8 +1268,18 @@ _singleton: ReceiptStore | None = None
 
 def get_store(db_path: str | os.PathLike) -> ReceiptStore:
     global _singleton
-    if _singleton is None or str(_singleton.path) != str(Path(db_path).expanduser()):
+    cached = _singleton is not None and str(_singleton.path) == str(Path(db_path).expanduser())
+    if not cached:
         _singleton = ReceiptStore(db_path)
+        logger.info(
+            "[MAJ-6-diag] receipt_store.get_store FRESH: id=%s path=%s",
+            id(_singleton), _singleton.path,
+        )
+    else:
+        logger.info(
+            "[MAJ-6-diag] receipt_store.get_store CACHED: id=%s path=%s",
+            id(_singleton), _singleton.path,
+        )
     return _singleton
 
 
@@ -1278,4 +1288,8 @@ def clear_singleton() -> None:
     that delete or replace receipts.db so the next get_store() returns
     a fresh instance whose ``_initialized`` reflects on-disk reality."""
     global _singleton
+    logger.info(
+        "[MAJ-6-diag] receipt_store.clear_singleton CALLED: prev id=%s",
+        id(_singleton) if _singleton is not None else "None",
+    )
     _singleton = None

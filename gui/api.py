@@ -368,7 +368,14 @@ class Api:
         the GUI had already displayed the staking-required modal,
         confusing operators about the actual order of operations.
         """
+        logger.info(
+            "[MAJ-6-diag] start_node ENTRY: is_running=%s has_live_thread=%s sm.state=%s",
+            self._node.is_running,
+            self._node.has_live_thread() if hasattr(self._node, "has_live_thread") else "n/a",
+            getattr(getattr(self._node, "_sm", None), "state", "n/a"),
+        )
         if self._node.is_running:
+            logger.info("[MAJ-6-diag] start_node EXIT early: already running")
             return {"ok": True, "message": "Already running"}
 
         self._config.apply_to_env()
@@ -385,18 +392,37 @@ class Api:
             needs_passphrase = False
 
         if needs_passphrase:
+            logger.info("[MAJ-6-diag] start_node EXIT: PASSPHRASE_REQUIRED gate hit")
             return {
                 "ok": False,
                 "error": "passphrase required",
                 "error_code": "PASSPHRASE_REQUIRED",
             }
 
+        # MAJ-6 diag: log receipt_store singleton id at start_node so we
+        # can compare against post-stop_node id (hypothesis A — module-level
+        # singleton survives Stop->Start in pywebview process).
+        try:
+            from app.payment import receipt_store as _rs
+            logger.info(
+                "[MAJ-6-diag] start_node receipt_store._singleton id=%s (None means cleared)",
+                id(_rs._singleton) if _rs._singleton is not None else "None",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         try:
             self._node.start()
         except Exception as exc:
             logger.exception("Failed to start node")
+            logger.info("[MAJ-6-diag] start_node EXIT: NodeManager.start raised %s", exc)
             return {"ok": False, "error": str(exc)}
 
+        logger.info(
+            "[MAJ-6-diag] start_node EXIT ok: is_running=%s sm.state=%s",
+            self._node.is_running,
+            getattr(getattr(self._node, "_sm", None), "state", "n/a"),
+        )
         return {"ok": True}
 
     def stop_node(self) -> dict:
@@ -410,6 +436,12 @@ class Api:
         registration poll. We blank it here so the GUI shows a coherent
         "stopped" view as soon as the click is processed.
         """
+        logger.info(
+            "[MAJ-6-diag] stop_node ENTRY: is_running=%s has_live_thread=%s sm.state=%s",
+            self._node.is_running,
+            self._node.has_live_thread() if hasattr(self._node, "has_live_thread") else "n/a",
+            getattr(getattr(self._node, "_sm", None), "state", "n/a"),
+        )
         try:
             # Blank the cached staking_status synchronously — the
             # subsequent get_status() call from the GUI poll will see
@@ -422,7 +454,22 @@ class Api:
             self._node.stop()
         except Exception as exc:
             logger.exception("Failed to stop node")
+            logger.info("[MAJ-6-diag] stop_node EXIT: NodeManager.stop raised %s", exc)
             return {"ok": False, "error": str(exc)}
+        # MAJ-6 diag: log receipt_store singleton state and live thread
+        # state right after stop returns, to pin down whether stop_node
+        # clears the singleton (it does NOT today — that's hypothesis A).
+        try:
+            from app.payment import receipt_store as _rs
+            logger.info(
+                "[MAJ-6-diag] stop_node EXIT ok: has_live_thread=%s sm.state=%s "
+                "receipt_store._singleton id=%s",
+                self._node.has_live_thread() if hasattr(self._node, "has_live_thread") else "n/a",
+                getattr(getattr(self._node, "_sm", None), "state", "n/a"),
+                id(_rs._singleton) if _rs._singleton is not None else "None",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return {"ok": True}
 
     def get_environments(self) -> list:

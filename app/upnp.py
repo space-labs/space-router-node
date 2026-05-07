@@ -194,14 +194,33 @@ async def setup_upnp_mapping(
     """
     internal_ip = _get_local_ip()
     logger.info("Local IP for UPnP: %s", internal_ip)
-    return await asyncio.to_thread(
+    logger.info(
+        "[MAJ-6-diag] setup_upnp_mapping CALL: internal_ip=%s internal_port=%d lease=%ds",
+        internal_ip, internal_port, lease_duration,
+    )
+    result = await asyncio.to_thread(
         _do_upnp_mapping, internal_ip, internal_port, lease_duration,
     )
+    if result is None:
+        logger.info(
+            "[MAJ-6-diag] setup_upnp_mapping RESULT: None (mapping failed) "
+            "internal_ip=%s internal_port=%d",
+            internal_ip, internal_port,
+        )
+    else:
+        logger.info(
+            "[MAJ-6-diag] setup_upnp_mapping RESULT: external_ip=%s external_port=%d "
+            "internal_ip=%s internal_port=%d",
+            result[0], result[1], internal_ip, internal_port,
+        )
+    return result
 
 
 async def remove_upnp_mapping(external_port: int) -> None:
     """Remove a previously created port mapping. Best-effort."""
+    logger.info("[MAJ-6-diag] remove_upnp_mapping CALL: external_port=%d", external_port)
     await asyncio.to_thread(_do_upnp_removal, external_port)
+    logger.info("[MAJ-6-diag] remove_upnp_mapping RETURN: external_port=%d", external_port)
 
 
 async def renew_upnp_mapping(
