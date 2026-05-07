@@ -3139,12 +3139,16 @@ def main() -> None:
     parser = _build_arg_parser()
     args = parser.parse_args()
 
-    # ``--receipts --json`` is consumed by tooling that reads stdout as
-    # JSON. Route INFO/WARNING/ERROR to stderr so log lines never bleed
-    # into the JSON payload. Also applies to ``--claim`` when run with
-    # any later ``--json`` flag (currently no such flag, but the same
-    # reasoning would apply).
-    log_to_stderr = bool(getattr(args, "output_json", False) and args.receipts)
+    # ``--receipts --json`` and ``--claim --json`` are consumed by tooling
+    # that reads stdout as JSON. Route INFO/WARNING/ERROR to stderr so
+    # log lines never bleed into the JSON payload. rc.9 #P1b: extended to
+    # cover --claim after #P1 wired --json into _cmd_claim — without this,
+    # the settings_loader INFO line lands on stdout right before the JSON
+    # envelope and `jq` chokes with "Extra data".
+    log_to_stderr = bool(
+        getattr(args, "output_json", False)
+        and (args.receipts or args.claim)
+    )
     setup_cli_logging(log_to_stderr=log_to_stderr)
     reset_activity()
 

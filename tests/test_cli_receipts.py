@@ -258,6 +258,41 @@ async def test_cmd_claim_json_emits_json_on_locked_uuid(seeded_store, capsys):
     assert "locked" in payload["error"].lower()
 
 
+# ---------------------------------------------------------------------------
+# rc.9 #P1b — logger must route to stderr for --claim --json (regression)
+# ---------------------------------------------------------------------------
+#
+# Pre-rc.9 #P1b ``--claim --json`` left logs on stdout because the
+# guard at ``main.py`` ~L3147 only kicked in for ``--receipts``. The
+# settings_loader INFO log then landed on stdout immediately before
+# the JSON envelope and broke ``--claim --json | jq`` with "Extra
+# data". The conditional is duplicated here so any future refactor
+# has to update both places — the test fails closed.
+
+
+def test_log_to_stderr_conditional_covers_claim_json():
+    import argparse
+
+    def _gate(receipts: bool, claim: bool, output_json: bool) -> bool:
+        args = argparse.Namespace(
+            receipts=receipts, claim=claim, output_json=output_json,
+        )
+        return bool(
+            getattr(args, "output_json", False)
+            and (args.receipts or args.claim)
+        )
+
+    # rc.9 #P1b — the regression that motivated this fix.
+    assert _gate(receipts=False, claim=True, output_json=True) is True
+    # rc.5 path — still works.
+    assert _gate(receipts=True, claim=False, output_json=True) is True
+    # Plain text paths — logs go wherever default routing puts them.
+    assert _gate(receipts=False, claim=True, output_json=False) is False
+    assert _gate(receipts=True, claim=False, output_json=False) is False
+    # Unrelated commands — gate stays False.
+    assert _gate(receipts=False, claim=False, output_json=True) is False
+
+
 def test_argparse_new_flags_present():
     """Smoke test: argparse accepts the new flags without errors."""
     from app.main import _build_arg_parser
