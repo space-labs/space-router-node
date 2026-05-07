@@ -2334,6 +2334,17 @@ function finishClaimTask() {
     btn.disabled = false;
     btn.textContent = "Claim All Outstanding";
   }
+  // rc.8 #4: Retry-all uses the same pollClaimTask machinery as
+  // Claim-all, so finishing the task must restore both buttons.
+  // Pre-rc.8 only the claim button was reset → on a CTC top-up cycle
+  // (insufficient_gas → top up → click Retry-all → poll completes),
+  // the retry button stayed disabled forever, requiring an app
+  // restart to recover (Jenna macOS rc.7 finding).
+  const retryBtn = $("#btn-retry-all");
+  if (retryBtn) {
+    retryBtn.disabled = false;
+    retryBtn.textContent = "Retry all";
+  }
 }
 
 function renderClaimOutcome(result) {

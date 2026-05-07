@@ -546,10 +546,19 @@ class ReceiptStore:
         def _do() -> int:
             placeholders = ",".join("?" * len(request_uuids))
             with self._connect() as conn:
+                # rc.8 #5: when a previously-failed receipt successfully
+                # claims, clear ``last_error_code``/``last_error_detail``
+                # so the GUI's "Identity wallet has no CTC for gas"
+                # banner (driven by any row matching CLAIM_INSUFFICIENT_GAS)
+                # stops surfacing stale state. Once on-chain, the prior
+                # transient error is irrelevant.
                 cur = conn.execute(
                     f"""
                     UPDATE signed_receipts
-                       SET claimed_at = ?, claim_tx_hash = ?
+                       SET claimed_at = ?,
+                           claim_tx_hash = ?,
+                           last_error_code = NULL,
+                           last_error_detail = NULL
                      WHERE request_uuid IN ({placeholders})
                        AND claimed_at IS NULL
                     """,

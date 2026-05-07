@@ -404,6 +404,45 @@ async def test_stored_receipt_view_derivation(store):
 
 
 # ---------------------------------------------------------------------------
+# rc.8 #5 — mark_claimed clears stale last_error_code
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mark_claimed_clears_last_error_code(store):
+    """When a previously-failed receipt successfully claims on-chain,
+    ``last_error_code`` and ``last_error_detail`` must be cleared. The
+    GUI's "Identity wallet has no CTC for gas" banner is driven by
+    *any* row matching ``last_error_code = CLAIM_INSUFFICIENT_GAS``; if
+    we leave the field populated after a successful claim, the banner
+    surfaces stale state forever (Jenna macOS rc.7 finding).
+    """
+    await store.initialize()
+
+    r = _mk_receipt()
+    await store.store(r, signature="0xa")
+
+    # Simulate a CTC-insufficient claim attempt that recorded an error.
+    await store.mark_claim_failed(
+        [r.request_uuid],
+        reasons.CLAIM_INSUFFICIENT_GAS,
+        detail="execution reverted: insufficient gas",
+    )
+    pre = await store.get_by_uuid(r.request_uuid)
+    assert pre.last_error_code == reasons.CLAIM_INSUFFICIENT_GAS
+
+    # CTC topped up; retry succeeds; mark_claimed fires.
+    await store.mark_claimed([r.request_uuid], "0xtx_success")
+
+    post = await store.get_by_uuid(r.request_uuid)
+    assert post.claimed_at is not None
+    assert post.last_error_code is None, (
+        "stale CLAIM_INSUFFICIENT_GAS should be cleared on successful claim"
+    )
+    assert post.last_error_detail is None
+
+
+# ---------------------------------------------------------------------------
 # rc.6 MAJ-4 — SUM(total_price) overflow on SQLite INT64
 # ---------------------------------------------------------------------------
 
