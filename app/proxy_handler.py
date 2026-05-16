@@ -386,11 +386,11 @@ async def handle_connect(
         await client_writer.drain()
         return
 
-    # Tell the Proxy Gateway the tunnel is established
-    client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-    await client_writer.drain()
-
     try:
+        # Tell the Proxy Gateway the tunnel is established
+        client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        await client_writer.drain()
+
         bytes_sent, bytes_received = await relay_streams(
             client_reader,
             client_writer,

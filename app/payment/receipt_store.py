@@ -17,6 +17,7 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass
+from contextlib import closing
 from pathlib import Path
 
 from app.payment import reasons
@@ -163,7 +164,7 @@ class ReceiptStore:
         attempt = 0
 
         def _do() -> None:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 cur = conn.execute("PRAGMA user_version")
                 current = cur.fetchone()[0]
                 if current == _SCHEMA_VERSION:
@@ -323,7 +324,7 @@ class ReceiptStore:
         now = int(time.time())
 
         def _do() -> None:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO signed_receipts
@@ -354,7 +355,7 @@ class ReceiptStore:
         sign-side counter state).
         """
         def _do() -> int:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 cur = conn.execute(
                     """
                     UPDATE signed_receipts
@@ -386,7 +387,7 @@ class ReceiptStore:
         now = int(time.time())
 
         def _do() -> int | None:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 cur = conn.execute(
                     """
                     UPDATE signed_receipts
@@ -414,7 +415,7 @@ class ReceiptStore:
     async def reset_transient_attempts(self, request_uuid: str) -> bool:
         """Clear ``transient_attempts`` without otherwise modifying the row."""
         def _do() -> int:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 cur = conn.execute(
                     """
                     UPDATE signed_receipts
@@ -432,7 +433,7 @@ class ReceiptStore:
         now = int(time.time())
 
         def _do() -> None:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 conn.execute(
                     """
                     INSERT INTO signed_receipts
@@ -520,7 +521,7 @@ class ReceiptStore:
             params = [int(limit)]
 
         def _do() -> list[StoredReceipt]:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 rows = conn.execute(
                     f"""
                     SELECT {self._STORED_COLUMNS}
@@ -545,7 +546,7 @@ class ReceiptStore:
 
         def _do() -> int:
             placeholders = ",".join("?" * len(request_uuids))
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 # rc.8 #5: when a previously-failed receipt successfully
                 # claims, clear ``last_error_code``/``last_error_detail``
                 # so the GUI's "Identity wallet has no CTC for gas"
@@ -575,7 +576,7 @@ class ReceiptStore:
         state so this number matches the UX promise of "ready to claim".
         """
         def _do() -> tuple[int, int]:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 row = conn.execute(
                     """
                     SELECT COUNT(*), COALESCE(SUM(total_price), 0)
@@ -592,7 +593,7 @@ class ReceiptStore:
 
     async def count_unsigned(self) -> int:
         def _do() -> int:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 row = conn.execute(
                     "SELECT COUNT(*) FROM signed_receipts WHERE signature IS NULL"
                 ).fetchone()
@@ -613,7 +614,7 @@ class ReceiptStore:
             now = int(time.time())
 
         def _do() -> int:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 row = conn.execute(
                     """
                     SELECT COUNT(*)
@@ -651,7 +652,7 @@ class ReceiptStore:
         now = int(time.time())
 
         def _do() -> list[str]:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 rows = conn.execute(
                     """
                     SELECT request_uuid FROM signed_receipts
@@ -702,7 +703,7 @@ class ReceiptStore:
         cap = reasons.MAX_SIGN_ATTEMPTS
 
         def _do() -> int:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 if counts:
                     cur = conn.execute(
                         """
@@ -757,7 +758,7 @@ class ReceiptStore:
 
         def _do() -> int:
             placeholders = ",".join("?" * len(request_uuids))
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 if counts:
                     cur = conn.execute(
                         f"""
@@ -800,7 +801,7 @@ class ReceiptStore:
         the row back into the normal claim queue.
         """
         def _do() -> int:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 cur = conn.execute(
                     """
                     UPDATE signed_receipts
@@ -818,7 +819,7 @@ class ReceiptStore:
     async def lock(self, request_uuid: str) -> bool:
         """Manually move a row to terminal-failed state."""
         def _do() -> int:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 cur = conn.execute(
                     """
                     UPDATE signed_receipts
@@ -841,7 +842,7 @@ class ReceiptStore:
         means a previously-terminal row can actually succeed now.
         """
         def _do() -> int:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 cur = conn.execute(
                     """
                     UPDATE signed_receipts
@@ -892,7 +893,7 @@ class ReceiptStore:
         await self.initialize()
 
         def _do() -> list[StoredReceipt]:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 rows = conn.execute(
                     f"""
                     SELECT {self._STORED_COLUMNS}
@@ -911,7 +912,7 @@ class ReceiptStore:
         await self.initialize()
 
         def _do() -> StoredReceipt | None:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 row = conn.execute(
                     f"SELECT {self._STORED_COLUMNS} FROM signed_receipts "
                     "WHERE request_uuid = ?",
@@ -926,7 +927,7 @@ class ReceiptStore:
         await self.initialize()
 
         def _do() -> dict:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 row = conn.execute(
                     """
                     SELECT
@@ -983,7 +984,7 @@ class ReceiptStore:
         cutoff = int(time.time()) - int(younger_than_seconds)
 
         def _do() -> list[StoredReceipt]:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 rows = conn.execute(
                     f"""
                     SELECT {self._STORED_COLUMNS}
@@ -1009,7 +1010,7 @@ class ReceiptStore:
         fault and shouldn't burn their retry budget.
         """
         def _do() -> int:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 cur = conn.execute(
                     """
                     UPDATE signed_receipts
@@ -1041,7 +1042,7 @@ class ReceiptStore:
         cutoff = int(time.time()) - int(older_than_seconds)
 
         def _do() -> list[StoredReceipt]:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 rows = conn.execute(
                     f"""
                     SELECT {self._STORED_COLUMNS}
@@ -1084,7 +1085,7 @@ class ReceiptStore:
 
         def _do() -> int:
             placeholders = ",".join("?" * len(request_uuids))
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 cur = conn.execute(
                     f"""
                     UPDATE signed_receipts
@@ -1117,7 +1118,7 @@ class ReceiptStore:
         soak_floor = int(current_block) - int(finality_blocks) + 1
 
         def _do() -> list[StoredReceipt]:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 rows = conn.execute(
                     f"""
                     SELECT {self._STORED_COLUMNS}
@@ -1145,7 +1146,7 @@ class ReceiptStore:
         operator didn't cause the stale-fork situation.
         """
         def _do() -> int:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 cur = conn.execute(
                     """
                     UPDATE signed_receipts
@@ -1185,7 +1186,7 @@ class ReceiptStore:
 
         def _do() -> int:
             placeholders = ",".join("?" * len(request_uuids))
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 cur = conn.execute(
                     f"""
                     UPDATE signed_receipts
@@ -1208,7 +1209,7 @@ class ReceiptStore:
         queue with a fresh attempt budget.
         """
         def _do() -> int:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 cur = conn.execute(
                     """
                     UPDATE signed_receipts
@@ -1229,7 +1230,7 @@ class ReceiptStore:
         burn the operator's retry budget on the next claim run.
         """
         def _do() -> int:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 cur = conn.execute(
                     """
                     UPDATE signed_receipts
@@ -1254,7 +1255,7 @@ class ReceiptStore:
         startup.
         """
         def _do() -> list[StoredReceipt]:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 rows = conn.execute(
                     f"""
                     SELECT {self._STORED_COLUMNS}
