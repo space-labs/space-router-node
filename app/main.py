@@ -236,22 +236,25 @@ def _first_run_setup() -> bool:
                 _, identity_address = load_or_create_identity(key_path, passphrase)
                 wizard_success(f"Generated identity address: {identity_address}")
 
-        # --- Staking Address ---
-        wizard_step(step, "Staking Address (optional)")
+        # --- Staking Address (required) ---
+        wizard_step(step, "Staking Address")
         step += 1
-        wizard_info(f"Leave blank to use identity address ({identity_address})")
+        wizard_info(
+            "Wallet that holds your SPACE stake. Don't have one? "
+            "Stake at https://penguinbase.com/dapp/spacestaking first.",
+        )
         while True:
             raw = wizard_input("Staking wallet address")
             if not raw:
-                staking_address = ""
-                break
+                wizard_error("Staking address is required.")
+                continue
             try:
                 staking_address = validate_wallet_address(raw)
                 break
             except ValueError as exc:
                 wizard_error(f"Invalid address: {exc}")
 
-        effective_staking = staking_address or identity_address
+        effective_staking = staking_address
 
         # --- Collection Address ---
         wizard_step(step, "Collection Address (optional)")
@@ -608,26 +611,30 @@ async def _phase_init(ctx: _NodeContext) -> None:
     staking = s.STAKING_ADDRESS.strip()
     collection = s.COLLECTION_ADDRESS.strip()
 
-    if staking:
+    if not staking:
+        raise NodeError(
+            NodeErrorCode.MISSING_WALLET,
+            "No staking address configured. Set wallet.staking_address in "
+            "settings.json (or SR_STAKING_ADDRESS) to the wallet that holds "
+            "your SPACE stake.",
+        )
+
+    try:
+        staking = validate_wallet_address(staking)
+    except ValueError as exc:
+        raise NodeError(NodeErrorCode.INVALID_WALLET, f"Invalid staking address: {exc}")
+    if collection:
         try:
-            staking = validate_wallet_address(staking)
+            collection = validate_wallet_address(collection)
         except ValueError as exc:
-            raise NodeError(NodeErrorCode.INVALID_WALLET, f"Invalid staking address: {exc}")
-        if collection:
-            try:
-                collection = validate_wallet_address(collection)
-            except ValueError as exc:
-                raise NodeError(NodeErrorCode.INVALID_WALLET, f"Invalid collection address: {exc}")
-        else:
-            collection = staking
-        ctx.staking_address = staking
-        ctx.collection_address = collection
-        ctx.wallet_address = staking
-        logger.info("Staking address: %s (v0.2.0)", staking)
-        logger.info("Collection address: %s", collection)
+            raise NodeError(NodeErrorCode.INVALID_WALLET, f"Invalid collection address: {exc}")
     else:
-        # No staking address configured — identity address will be used as fallback
-        logger.info("No staking address configured — will use identity address as fallback")
+        collection = staking
+    ctx.staking_address = staking
+    ctx.collection_address = collection
+    ctx.wallet_address = staking
+    logger.info("Staking address: %s (v0.2.0)", staking)
+    logger.info("Collection address: %s", collection)
 
     # 4. Identity keypair (with passphrase support)
     try:
@@ -639,13 +646,6 @@ async def _phase_init(ctx: _NodeContext) -> None:
     except Exception as exc:
         raise NodeError(NodeErrorCode.IDENTITY_KEY_ERROR, str(exc))
     logger.info("Node identity: %s", ctx.identity_address)
-
-    # Staking address falls back to identity address if not configured
-    if not ctx.staking_address:
-        ctx.staking_address = ctx.identity_address
-        ctx.wallet_address = ctx.identity_address
-        s.STAKING_ADDRESS = ctx.identity_address   # sync for proxy_handler challenge response
-        logger.info("Staking address (identity fallback): %s", ctx.staking_address)
 
     # 5. TLS certificates
     try:

@@ -404,10 +404,18 @@ function initOnboarding() {
     });
   }
 
-  // ── Optional address validation ──
-  function validateAddress(input, errorEl) {
+  // ── Address validation ──
+  // ``required=true`` makes empty input invalid (used by the staking
+  // field — see validateForm below). Optional fields (collection, etc.)
+  // call this without the flag and empty still passes.
+  function validateAddress(input, errorEl, required) {
     const val = input.value.trim();
     if (!val) {
+      if (required) {
+        errorEl.textContent = "Required — enter your staking wallet address.";
+        input.classList.add("invalid");
+        return false;
+      }
       errorEl.textContent = "";
       input.classList.remove("invalid");
       return true;
@@ -422,27 +430,24 @@ function initOnboarding() {
     return true;
   }
 
-  // rc.11 #4: ``stakingValidatedOk`` mirrors the async validation result
-  // from the coord lookup. ``null`` means "not yet checked" or "not
-  // applicable" (empty input falls through to the identity-address
-  // default). Pre-rc.11 the wizard accepted any well-formed hex including
-  // the zero address and unstaked wallets, then surfaced a confusing
-  // "Insufficient stake: 0.00 SPACE" badge after Start.
-  let stakingValidatedOk = true;     // tracks the lookup-side gate
+  // ``stakingValidatedOk`` mirrors the async validation result from the
+  // coord lookup. Staking address is now required — empty input is an
+  // invalid state (set by validateAddress(required=true)), not a fallback.
+  let stakingValidatedOk = false;    // tracks the lookup-side gate
   let stakingValidating = false;     // suppresses double-fires on rapid blur
   async function asyncValidateStaking() {
     const val = stakingInput.value.trim();
-    // Empty falls back to identity address — server re-checks at start.
+    // Empty is invalid — flag and bail before hitting the bridge.
     if (!val) {
-      stakingError.textContent = "";
+      stakingError.textContent = "Required — enter your staking wallet address.";
       stakingError.classList.remove("warn");
-      stakingInput.classList.remove("invalid");
-      stakingValidatedOk = true;
+      stakingInput.classList.add("invalid");
+      stakingValidatedOk = false;
       validateForm();
       return;
     }
     // Format gate first — saves the round-trip on typos.
-    if (!validateAddress(stakingInput, stakingError)) {
+    if (!validateAddress(stakingInput, stakingError, true)) {
       stakingValidatedOk = false;
       validateForm();
       return;
@@ -489,9 +494,9 @@ function initOnboarding() {
     // Format-only validation on input (cheap, immediate); reset the
     // lookup-side gate to "ok" so the user isn't blocked by stale
     // state while they're still typing. The blur handler re-runs the
-    // on-chain check.
-    validateAddress(stakingInput, stakingError);
-    stakingValidatedOk = true;
+    // on-chain check (and re-flips the gate to false on empty).
+    validateAddress(stakingInput, stakingError, true);
+    stakingValidatedOk = stakingInput.value.trim().length > 0;
     validateForm();
   });
   stakingInput.addEventListener("blur", asyncValidateStaking);
@@ -513,11 +518,10 @@ function initOnboarding() {
   function validateForm() {
     const importValid = radioGenerate.checked ||
       (radioImport.checked && HEX_KEY_RE.test(identityKeyInput.value.trim()));
-    // Format gate (cheap, runs every keystroke).  If it fails we don't
-    // bother checking the async lookup result.
-    const stakingFormatValid = validateAddress(stakingInput, stakingError);
-    // ``stakingValidatedOk`` is the on-chain lookup gate. Unstaked /
-    // zero-address wallets land here and disable Start.
+    // Staking address is REQUIRED (no fallback). Format gate runs on every
+    // keystroke; the async lookup gate (`stakingValidatedOk`) is set by the
+    // blur handler and stays false on empty/invalid/unstaked wallets.
+    const stakingFormatValid = validateAddress(stakingInput, stakingError, true);
     const stakingValid = stakingFormatValid && stakingValidatedOk;
     const collectionValid = validateAddress(collectionInput, collectionError);
     const passphraseValid = validatePassphrase();
@@ -543,17 +547,14 @@ function initOnboarding() {
       return;
     }
     const staking = stakingInput.value.trim();
-    // rc.11 #4: re-run the async stake check as a final submit-time
-    // gate.  Catches paste-then-click-Start sequences that bypass the
-    // blur handler.  Errors render the same as the blur path; we only
-    // proceed if the lookup-side gate is green.
-    if (staking) {
-      await asyncValidateStaking();
-      if (!stakingValidatedOk) {
-        btn.disabled = false;
-        btn.textContent = "Start Node";
-        return;
-      }
+    // Re-run the async stake check as a final submit-time gate. Catches
+    // paste-then-click-Start sequences that bypass the blur handler.
+    // Staking address is required — also fail closed if it's empty here.
+    await asyncValidateStaking();
+    if (!staking || !stakingValidatedOk) {
+      btn.disabled = false;
+      btn.textContent = "Start Node";
+      return;
     }
     const collection = collectionInput.value.trim();
     const identityKeyHex = radioImport.checked ? identityKeyInput.value.trim() : "";
@@ -1086,7 +1087,11 @@ async function updateStatus() {
         } else if (status.error_code === "network_unreachable") {
           detail.textContent = "Cannot reach coordination server. Check your internet connection.";
         } else if (status.error_code === "invalid_wallet") {
-          detail.textContent = "Invalid wallet address. Use Fresh Restart to reconfigure.";
+          detail.textContent = "Invalid wallet address. Open Settings → Staking address to fix.";
+        } else if (status.error_code === "missing_wallet") {
+          detail.textContent = status.error_message
+            || "No staking wallet configured. Open Settings → Staking address "
+               + "and enter the wallet that holds your SPACE stake.";
         } else if (status.error_code === "port_permission") {
           detail.textContent = "Port permission denied. Use a port above 1024.";
         } else if (status.error_code === "port_in_use") {
@@ -1347,6 +1352,12 @@ function initSettings() {
   const tunnelConfig = $("#settings-tunnel-config");
   const tunnelHost = $("#settings-tunnel-host");
   const tunnelPort = $("#settings-tunnel-port");
+  const stakingInput = $("#settings-staking-input");
+  const stakingError = $("#settings-staking-error");
+  // Tracks the value loaded into the field when the panel opens so we
+  // only call save_staking_address when the operator actually changed
+  // it. Avoids a no-op save+restart when only network mode changed.
+  let stakingOriginal = "";
 
   // Show test-only settings groups
   if (isTestBuild) {
@@ -1421,12 +1432,43 @@ function initSettings() {
       }
     }
 
+    // Load current staking address (all builds). Empty string is fine —
+    // the field stays empty and the save handler will gate on the
+    // validate_staking_address bridge.
+    try {
+      stakingOriginal = (await window.pywebview.api.get_staking_address()) || "";
+    } catch (e) {
+      stakingOriginal = "";
+    }
+    stakingInput.value = stakingOriginal;
+    stakingError.textContent = "";
+    stakingInput.classList.remove("invalid");
+
     // Auto-claim panel — load current config + status into the form.
     await loadAutoClaimPanel();
 
     statusEl.textContent = "";
     hideAll();
     show("screen-settings");
+  });
+
+  // Inline format validation on blur. The real on-chain check happens
+  // on save (single round-trip there is enough; bouncing the bridge on
+  // every focus loss would be wasteful).
+  stakingInput.addEventListener("blur", function () {
+    const val = stakingInput.value.trim();
+    if (!val) {
+      stakingError.textContent = "";
+      stakingInput.classList.remove("invalid");
+      return;
+    }
+    if (!/^0x[0-9a-fA-F]{40}$/.test(val)) {
+      stakingError.textContent = "Invalid address — expected 0x followed by 40 hex characters";
+      stakingInput.classList.add("invalid");
+    } else {
+      stakingError.textContent = "";
+      stakingInput.classList.remove("invalid");
+    }
   });
 
   // Back button
@@ -1453,6 +1495,22 @@ function initSettings() {
     statusEl.textContent = "";
 
     try {
+      // Save staking address (all builds) — only when changed.
+      const stakingNow = stakingInput.value.trim();
+      if (stakingNow !== stakingOriginal.trim()) {
+        const sResult = await window.pywebview.api.save_staking_address(stakingNow);
+        if (!sResult.ok) {
+          stakingError.textContent = sResult.error || "Failed to save staking address";
+          stakingInput.classList.add("invalid");
+          statusEl.textContent = sResult.error || "Failed to save staking address";
+          statusEl.style.color = "#e74c3c";
+          saveBtn.disabled = false;
+          saveBtn.textContent = "Save & Restart Node";
+          return;
+        }
+        stakingOriginal = sResult.staking_address || stakingNow;
+      }
+
       // Save network mode (all builds)
       await window.pywebview.api.save_network_mode(
         mode,

@@ -53,7 +53,9 @@ class NodeErrorCode(enum.Enum):
 
 _USER_MESSAGES: dict[NodeErrorCode, str] = {
     NodeErrorCode.INVALID_WALLET: "Wallet address is invalid. Check Settings.",
-    NodeErrorCode.MISSING_WALLET: "No wallet address configured.",
+    NodeErrorCode.MISSING_WALLET:
+        "No staking wallet configured. Open Settings → Staking address "
+        "and enter the wallet that holds your SPACE stake.",
     NodeErrorCode.IDENTITY_KEY_ERROR:
         "Cannot load node identity key — the file may be corrupted. "
         "Run Fresh Restart to generate a new identity (you'll need to "

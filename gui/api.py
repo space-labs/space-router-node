@@ -575,6 +575,36 @@ class Api:
             logger.exception("Failed to save settings")
             return {"ok": False, "error": str(exc)}
 
+    def get_staking_address(self) -> str:
+        """Return the currently configured staking address (or empty string)."""
+        return self._config.get("SR_STAKING_ADDRESS") or ""
+
+    def save_staking_address(self, address: str) -> dict:
+        """Validate and persist the staking-wallet address.
+
+        Unlike ``save_settings``, this is allowed in production builds —
+        the staking-address field is the remediation path for operators
+        whose node sits in ``missing_wallet`` state, so it must be
+        editable everywhere. Format + on-chain stake validation are
+        re-run via ``validate_staking_address`` so a 0-stake wallet
+        never makes it to disk.
+        """
+        check = self.validate_staking_address(address)
+        if not check.get("ok"):
+            return {"ok": False, "error": check.get("message", "Invalid staking address.")}
+        try:
+            # Preserve any explicit collection_address the operator
+            # configured at onboarding. Passing "" would default it to
+            # the staking address, silently overwriting a custom value.
+            current_collection = self._config.get("SR_COLLECTION_ADDRESS") or ""
+            normalised, _ = self._config.save_wallets(address.strip(), current_collection)
+            return {"ok": True, "restart_required": True, "staking_address": normalised}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            logger.exception("Failed to save staking address")
+            return {"ok": False, "error": str(exc)}
+
     def get_network_mode(self) -> dict:
         """Return current network mode (upnp or tunnel)."""
         return self._config.get_network_mode()
@@ -624,13 +654,17 @@ class Api:
         - ``lookup_failed`` returns ``ok=True`` so a transient coord
           outage doesn't block onboarding entirely.
 
-        Empty input returns ``ok=True`` because the wizard treats a blank
-        staking field as "use the identity address" — the daemon will
-        re-run the same check after start with the resolved address.
+        Staking address is required — empty input returns ``ok=False`` so
+        the wizard's submit gate (and the Settings save bridge) refuse to
+        advance without a real wallet.
         """
         addr = (address or "").strip()
         if not addr:
-            return {"ok": True, "status": "unset", "message": ""}
+            return {
+                "ok": False,
+                "status": "required",
+                "message": "Required — enter your staking wallet address.",
+            }
 
         # Format gate first — keeps the round-trip cost down on typos.
         if not re.match(r"^0x[0-9a-fA-F]{40}$", addr):
