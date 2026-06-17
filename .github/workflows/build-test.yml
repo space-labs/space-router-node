@@ -32,11 +32,11 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            artifact: spacerouter-proxy-cli-v1.5.0-test.${{ github.run_number }}-macos-arm64
+            artifact: spacerouter-proxy-cli-v1.5.2-test.${{ github.run_number }}-macos-arm64
           - os: windows-latest
-            artifact: spacerouter-proxy-cli-v1.5.0-test.${{ github.run_number }}-windows-x64
+            artifact: spacerouter-proxy-cli-v1.5.2-test.${{ github.run_number }}-windows-x64
           - os: ubuntu-latest
-            artifact: spacerouter-proxy-cli-v1.5.0-test.${{ github.run_number }}-linux-x64
+            artifact: spacerouter-proxy-cli-v1.5.2-test.${{ github.run_number }}-linux-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +51,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          VERSION="v1.5.0-test.${{ github.run_number }}"
+          VERSION="v1.5.2-test.${{ github.run_number }}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building test version: ${VERSION}"
 
@@ -117,8 +117,8 @@ jobs:
           export PATH="$(go env GOPATH)/bin:$PATH"
 
           VERSION="${{ steps.version.outputs.version }}"
-          # Strip leading 'v' for package version (nfpm wants 1.5.0-test.123,
-          # not v1.5.0-test.123).
+          # Strip leading 'v' for package version (nfpm wants 1.5.2-test.123,
+          # not v1.5.2-test.123).
           PKG_VERSION="${VERSION#v}"
           ARTIFACT="${{ matrix.artifact }}"
 
@@ -147,9 +147,9 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            artifact: spacerouter-proxy-gui-v1.5.0-test.${{ github.run_number }}-macos-arm64
+            artifact: spacerouter-proxy-gui-v1.5.2-test.${{ github.run_number }}-macos-arm64
           - os: windows-latest
-            artifact: spacerouter-proxy-gui-v1.5.0-test.${{ github.run_number }}-windows-x64
+            artifact: spacerouter-proxy-gui-v1.5.2-test.${{ github.run_number }}-windows-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -164,7 +164,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          VERSION="v1.5.0-test.${{ github.run_number }}"
+          VERSION="v1.5.2-test.${{ github.run_number }}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Building GUI test version: ${VERSION}"
 

@@ -241,6 +241,28 @@ class ConfigStore:
             logger.warning(
                 "passphrase-flag reconcile skipped due to error", exc_info=True
             )
+        # A1-A3: recover a staking address dropped by the v1.4→v1.5 migration
+        # skip-trap, and heal a persisted test coord url on production builds.
+        # The daemon's load_provider_settings already does both; the GUI's
+        # settings.json reads bypass that path, so mirror it here (same
+        # fail-soft pattern) — otherwise the GUI would still show a blank
+        # wallet even though the daemon self-heals.
+        try:
+            from app.settings_loader import (
+                heal_test_coord_url_in_place,
+                recover_staking_address_in_place,
+            )
+            if self._settings_json_path.exists():
+                s = self._load_settings_v2()
+                changed = recover_staking_address_in_place(s, self._dir)
+                changed = heal_test_coord_url_in_place(s) or changed
+                if changed:
+                    self._save_settings_v2(s)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "staking-address recovery / coord-url heal skipped due to error",
+                exc_info=True,
+            )
 
     def migrate_to_settings_json(self) -> "object | None":
         """Migrate an existing v1.4 ``spacerouter.env`` to ``settings.json``.
@@ -356,20 +378,51 @@ class ConfigStore:
     def save_wallets(self, staking_address: str, collection_address: str = "") -> tuple[str, str]:
         """Validate and persist staking and collection addresses.
 
-        Returns ``(normalised_staking, normalised_collection)``.
+        Returns ``(normalised_staking, normalised_collection)`` where the
+        collection is the effective value (staking when none was set).
+
+        B2 (QA Build 129, MED 2): when no explicit collection is given we
+        now persist ``None`` rather than eagerly copying the staking address
+        into ``collection_address``. The daemon already defaults a blank
+        collection to the staking address at runtime
+        (``registration.py``: ``collection or staking``), so storing the copy
+        bought nothing — and it stranded rewards at the OLD wallet when the
+        operator later changed only their staking address (the copy was
+        treated as an explicit value and preserved). Storing ``None`` lets
+        the collection follow the staking address unless the operator picks
+        a different one on purpose.
         """
         normalised_staking = validate_wallet_address(staking_address)
         if collection_address.strip():
-            normalised_collection = validate_wallet_address(collection_address)
+            normalised_collection: str | None = validate_wallet_address(collection_address)
         else:
-            normalised_collection = normalised_staking
+            normalised_collection = None
 
         s = self._load_settings_v2()
         s.wallet.staking_address = normalised_staking
         s.wallet.collection_address = normalised_collection
         self._save_settings_v2(s)
 
-        return normalised_staking, normalised_collection
+        # Effective collection for display/callers is the staking address
+        # when none was explicitly set.
+        return normalised_staking, normalised_collection or normalised_staking
+
+    def save_collection_address(self, collection_address: str = "") -> "str | None":
+        """Persist the collection (rewards) wallet address.
+
+        Blank → ``None``, meaning "follow the staking address" (the daemon
+        defaults a blank collection to the staking address at runtime). A
+        non-blank value is validated and stored as the explicit collection.
+        Returns the normalised value or ``None``.
+        """
+        if collection_address.strip():
+            normalised: str | None = validate_wallet_address(collection_address)
+        else:
+            normalised = None
+        s = self._load_settings_v2()
+        s.wallet.collection_address = normalised
+        self._save_settings_v2(s)
+        return normalised
 
     def save_environment(self, env_key: str) -> str:
         """Switch the coordination API URL to the given environment.

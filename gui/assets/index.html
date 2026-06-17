@@ -341,6 +341,15 @@
         <span id="settings-staking-error" class="error"></span>
       </div>
 
+      <!-- Collection address — optional. Blank follows the staking address.
+           Editable so operators can route rewards to a different wallet or
+           correct a mismatch (B2). -->
+      <div class="input-group">
+        <label for="settings-collection-input">Collection address</label>
+        <input type="text" id="settings-collection-input" placeholder="Defaults to staking address" spellcheck="false" autocomplete="off">
+        <span id="settings-collection-error" class="error"></span>
+      </div>
+
       <!-- Network mode (tunnel hostname/port) — all builds -->
       <div class="input-group">
         <label>Network</label>

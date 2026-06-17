@@ -25,6 +25,24 @@ from app.tls import ensure_certificates  # noqa: E402
 TEST_WALLET_ADDRESS = "0xcf53850b0674e149f95a942f4f311cb1cd0f4958"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_home(monkeypatch, tmp_path_factory):
+    """Repoint HOME at a fresh per-test dir so the suite never reads the
+    developer's real ``~/.spacerouter`` or
+    ``~/Library/Application Support/SpaceRouter`` config.
+
+    Without this, code that scans those locations (legacy migration, the
+    new staking-address recovery, the passphrase-flag reconcile) leaks real
+    machine state into tests and makes "empty install" assertions flaky on
+    any developer box that has actually run the node. Tests that need a
+    specific HOME still override it with their own ``monkeypatch.setenv``
+    inside the test body (last writer wins).
+    """
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+
 @pytest.fixture
 def settings(tmp_path):
     cert_path = str(tmp_path / "node.crt")

@@ -56,6 +56,19 @@ hiddenimports += collect_submodules("eth_account")
 hiddenimports += collect_submodules("web3")
 hiddenimports += collect_submodules("rich")
 
+# C4 (QA Build 129, finding 9): force the CI-stamped build-identity modules
+# into the bundle. app/version.py and app/variant.py import them via
+# try/except at runtime, which PyInstaller's static analysis can miss; a
+# missing app/_build_variant flips the frozen binary to the fallback variant.
+# Conditional so local dev builds (no stamped files) don't warn.
+_app_dir = os.path.join(
+    os.path.abspath(SPECPATH if "SPECPATH" in dir() else "."), "app",
+)
+for _mod, _fname in (("app._build_version", "_build_version.py"),
+                     ("app._build_variant", "_build_variant.py")):
+    if os.path.exists(os.path.join(_app_dir, _fname)):
+        hiddenimports.append(_mod)
+
 a = Analysis(
     ["app/main.py"],
     pathex=[],

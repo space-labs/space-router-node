@@ -37,6 +37,10 @@ from app.wallet import validate_wallet_address
 
 logger = logging.getLogger(__name__)
 
+# All-zero EVM address — never holds stake and cannot receive rewards.
+# validate_wallet_address lowercases, so compare against the lowercase form.
+_ZERO_ADDRESS = "0x" + "0" * 40
+
 # Health check intervals
 _HEARTBEAT_INTERVAL = 300  # 5 minutes
 _CERT_CHECK_INTERVAL = 86400  # 24 hours
@@ -250,9 +254,17 @@ def _first_run_setup() -> bool:
                 continue
             try:
                 staking_address = validate_wallet_address(raw)
-                break
             except ValueError as exc:
                 wizard_error(f"Invalid address: {exc}")
+                continue
+            # B3: block the zero address here, matching the GUI Settings
+            # gate (gui/api.py validate_staking_address). Previously the CLI
+            # accepted it and only coord rejected it at register time
+            # (QA Build 129, MED 3 — CLI/GUI validation inconsistency).
+            if staking_address == _ZERO_ADDRESS:
+                wizard_error("Zero address cannot stake. Enter your real wallet address.")
+                continue
+            break
 
         effective_staking = staking_address
 
@@ -267,9 +279,13 @@ def _first_run_setup() -> bool:
                 break
             try:
                 collection_address = validate_wallet_address(raw)
-                break
             except ValueError as exc:
                 wizard_error(f"Invalid address: {exc}")
+                continue
+            if collection_address == _ZERO_ADDRESS:
+                wizard_error("Zero address cannot receive rewards.")
+                continue
+            break
 
         # --- Referral Code ---
         wizard_step(step, "Referral Code (optional)")
