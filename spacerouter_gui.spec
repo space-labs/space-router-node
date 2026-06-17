@@ -55,6 +55,19 @@ hiddenimports = [
     "webview",
 ]
 
+# C4 (QA Build 129, finding 9): force the CI-stamped build-identity modules
+# into the bundle. They're imported via try/except at runtime (app/version.py,
+# app/variant.py, settings_v2._seed_build_variant), so PyInstaller's static
+# analysis can miss them. A missing app/_build_variant silently flips the
+# frozen app to the fallback variant — which is what made the clean-install
+# Environment default differ across platforms (macOS → Production, Windows →
+# Test). Conditional so local dev builds (no stamped files) don't warn.
+_app_dir = os.path.dirname(_build_version_path)
+for _mod, _fname in (("app._build_version", "_build_version.py"),
+                     ("app._build_variant", "_build_variant.py")):
+    if os.path.exists(os.path.join(_app_dir, _fname)):
+        hiddenimports.append(_mod)
+
 # Platform-specific webview backends
 if sys.platform == "darwin":
     hiddenimports += [

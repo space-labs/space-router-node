@@ -18,11 +18,19 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from pathlib import Path
 
 from app.settings_v2 import Settings
 
 logger = logging.getLogger(__name__)
+
+# v1.5.0 production footgun: the coord url default was hardcoded to the test
+# fly.dev hostname and ``Settings.save()`` persisted it. ``coordination.spacerouter.org``
+# and ``spacerouter-coordination-api.fly.dev`` are the same prod backend, so only the
+# test hostname below is the wrong-network value we heal on production builds.
+_OLD_TEST_COORD_URL = "https://spacerouter-coordination-api-test.fly.dev"
+_PROD_COORD_URL = "https://coordination.spacerouter.org"
 
 
 def _spacerouter_dir() -> Path:
@@ -118,12 +126,21 @@ def load_provider_settings(directory: Path | None = None) -> Settings:
         # is the cache; the keystore file is the source of truth.
         if _reconcile_passphrase_flag_in_place(s):
             dirty = True
+        # A1/A2: recover a staking address dropped by the v1.4→v1.5 migration
+        # skip-trap (settings.json present but staking_address blank). Reads
+        # the legacy env directly, so it works even when the full-dir
+        # migration was skipped because ~/.spacerouter was non-empty.
+        if _recover_staking_address_in_place(s, directory):
+            dirty = True
+        # A3: heal a persisted test coord url on production builds (v1.5.0).
+        if _heal_test_coord_url_in_place(s):
+            dirty = True
         if dirty:
             try:
                 s.save(s_path)
                 logger.info(
                     "Reconciled %s with on-disk state (escrow defaults / "
-                    "passphrase flag).",
+                    "passphrase flag / staking address / coord url).",
                     s_path,
                 )
             except OSError as e:
@@ -163,6 +180,11 @@ def load_provider_settings(directory: Path | None = None) -> Settings:
     # (only ``daemon.lock`` was created). See v1.5.0-test.80 E2E report.
     s = Settings()
     _backfill_test_escrow_in_place(s)
+    # A1/A2: a lock-file or stray file in ~/.spacerouter makes the full-dir
+    # migration skip, so we land here with bare defaults even though a v1.4
+    # config still exists. Recover the staking address from the legacy env.
+    _recover_staking_address_in_place(s, directory)
+    _heal_test_coord_url_in_place(s)
     try:
         directory.mkdir(parents=True, exist_ok=True)
         s.save(s_path)
@@ -201,6 +223,159 @@ def reconcile_passphrase_flag_in_place(s: Settings) -> bool:
     full rationale.
     """
     return _reconcile_passphrase_flag_in_place(s)
+
+
+def recover_staking_address_in_place(
+    s: Settings, directory: Path | None = None
+) -> bool:
+    """Public wrapper for :py:func:`_recover_staking_address_in_place`.
+
+    Exposed for the GUI's :py:class:`gui.config_store.ConfigStore`, whose
+    settings.json reads bypass :py:func:`load_provider_settings`. Without
+    this the GUI would still show a blank wallet after the migration
+    skip-trap even though the daemon self-heals.
+    """
+    return _recover_staking_address_in_place(s, directory or _spacerouter_dir())
+
+
+def heal_test_coord_url_in_place(s: Settings) -> bool:
+    """Public wrapper for :py:func:`_heal_test_coord_url_in_place` (GUI path)."""
+    return _heal_test_coord_url_in_place(s)
+
+
+def _read_staking_address_from_env(path: Path) -> str | None:
+    """Best-effort read of a staking address from a v1.4-style env file.
+
+    Looks for ``SR_STAKING_ADDRESS`` first, then the legacy single-wallet
+    ``SR_WALLET_ADDRESS``. Returns a checksummed address when valid, else
+    None. Tolerant of quotes, ``export`` prefixes, and ``#`` comments.
+    """
+    try:
+        if not path.is_file():
+            return None
+        text = path.read_text()
+    except OSError:
+        return None
+
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key in ("SR_STAKING_ADDRESS", "SR_WALLET_ADDRESS") and val:
+            values[key] = val
+
+    candidate = values.get("SR_STAKING_ADDRESS") or values.get("SR_WALLET_ADDRESS")
+    if not candidate:
+        return None
+    try:
+        from app.wallet import validate_wallet_address
+        return validate_wallet_address(candidate)
+    except Exception:  # noqa: BLE001 — malformed address in a legacy file; skip
+        return None
+
+
+def _legacy_env_candidates(directory: Path, variant: str | None) -> list[Path]:
+    """Env files that may hold a previously-configured staking address.
+
+    Order: the migrated/renamed env in the canonical dir first (in case the
+    main migration ran but the address never reached settings.json), then
+    the per-platform v1.4 dirs. On macOS the variant-matching Application
+    Support dir comes first so a production build never adopts a test
+    wallet (the v1.5.0-test.85 footgun in reverse).
+
+    *variant* is the already-resolved ``Settings.build_variant`` passed in
+    by the caller. We deliberately do NOT import ``app.variant`` here: this
+    runs *inside* ``load_provider_settings``, and ``app.variant`` resolves
+    the build variant by calling ``load_provider_settings`` again — that
+    re-entrancy recurses until a swallowed ``RecursionError`` and floods
+    the log with migration-skip warnings (caught during real end-to-end
+    boot). The settings object already carries the resolved variant, so use
+    it directly.
+    """
+    out = [
+        directory / "spacerouter.env",
+        directory / "spacerouter.env.migrated.bak",
+    ]
+    bv = (variant or "").lower()
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+        names = (
+            ["SpaceRouter-Test", "SpaceRouter"]
+            if bv == "test"
+            else ["SpaceRouter", "SpaceRouter-Test"]
+        )
+        out.extend(base / n / "spacerouter.env" for n in names)
+    elif sys.platform.startswith("linux"):
+        # Linux v1.4 used the XDG default and never shipped a -Test variant.
+        out.append(Path.home() / ".config" / "spacerouter" / "spacerouter.env")
+    # Windows v1.4 already used ~/.spacerouter — covered by the canonical dir.
+    return out
+
+
+def _recover_staking_address_in_place(s: Settings, directory: Path) -> bool:
+    """Recover a staking address lost by the v1.4→v1.5 migration skip-trap.
+
+    The macOS migration (:py:mod:`app.legacy_migration`) copies the legacy
+    Application Support dir only when ``~/.spacerouter`` is empty. If
+    anything (a prior launch, a cold-start settings.json, logs) populated it
+    first, the migration silently skips and the operator's staking address
+    never reaches settings.json — the node then registers with the identity
+    fallback and coord reports "no stake".
+
+    When ``staking_address`` is blank we scan the known legacy env files and
+    adopt the first valid address. This is a safe *targeted* recovery: it
+    reads only the address (never a full-dir merge) and never touches a
+    populated value. Returns True when a value was recovered.
+    """
+    if (s.wallet.staking_address or "").strip():
+        return False
+    for candidate in _legacy_env_candidates(directory, s.build_variant):
+        addr = _read_staking_address_from_env(candidate)
+        if addr:
+            logger.info(
+                "Recovered staking address from legacy config %s "
+                "(settings.json had none after upgrade): %s",
+                candidate, addr,
+            )
+            s.wallet.staking_address = addr
+            return True
+    return False
+
+
+def _heal_test_coord_url_in_place(s: Settings) -> bool:
+    """Heal a persisted test coord url on production builds (v1.5.0 footgun).
+
+    v1.5.0 shipped ``CoordinationSection.url`` hardcoded to the test fly.dev
+    hostname; ``Settings.save()`` persisted it. v1.5.1's variant-aware
+    default only fixes *fresh* installs, so an existing settings.json keeps
+    pointing at the isolated test coord and a genuinely-staked prod wallet
+    reads as unstaked.
+
+    On production builds only, if the persisted url is exactly that old test
+    default, rewrite it to the prod url. Test builds (``build_variant=test``)
+    legitimately use the test url and are left alone; an operator-set custom
+    url never matches the exact known-bad default, so it's preserved too.
+    """
+    bv = (s.build_variant or "").lower()
+    if bv not in ("production", "prod"):
+        return False
+    if s.coordination.url == _OLD_TEST_COORD_URL:
+        logger.info(
+            "Healing coordination.url on production build: %s → %s "
+            "(v1.5.0 persisted test-url footgun)",
+            _OLD_TEST_COORD_URL, _PROD_COORD_URL,
+        )
+        s.coordination.url = _PROD_COORD_URL
+        return True
+    return False
 
 
 def _reconcile_passphrase_flag_in_place(s: Settings) -> bool:

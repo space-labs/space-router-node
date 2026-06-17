@@ -39,10 +39,11 @@
       </div>
 
       <!-- Staking address — main onboarding field (rc.11: promoted out of Advanced).
-           Validated against the coord API on blur via Api.validate_staking_address. -->
+           Validated against the coord API on blur via Api.validate_staking_address.
+           Required: empty input blocks Start. -->
       <div class="input-group">
-        <label for="staking-input">Staking address</label>
-        <input type="text" id="staking-input" placeholder="Defaults to identity address" spellcheck="false" autocomplete="off">
+        <label for="staking-input">Staking address <span class="badge required-badge">Required</span></label>
+        <input type="text" id="staking-input" placeholder="0x… (wallet holding your stake)" spellcheck="false" autocomplete="off">
         <span id="staking-error" class="error"></span>
       </div>
 
@@ -330,6 +331,23 @@
       <div class="settings-header">
         <button id="btn-back" class="btn-back">&larr; Back</button>
         <h2>Settings</h2>
+      </div>
+
+      <!-- Staking address — editable in all builds (remediation path
+           for nodes stuck in missing_wallet state). -->
+      <div class="input-group">
+        <label for="settings-staking-input">Staking address</label>
+        <input type="text" id="settings-staking-input" placeholder="0x… (wallet holding your stake)" spellcheck="false" autocomplete="off">
+        <span id="settings-staking-error" class="error"></span>
+      </div>
+
+      <!-- Collection address — optional. Blank follows the staking address.
+           Editable so operators can route rewards to a different wallet or
+           correct a mismatch (B2). -->
+      <div class="input-group">
+        <label for="settings-collection-input">Collection address</label>
+        <input type="text" id="settings-collection-input" placeholder="Defaults to staking address" spellcheck="false" autocomplete="off">
+        <span id="settings-collection-error" class="error"></span>
       </div>
 
       <!-- Network mode (tunnel hostname/port) — all builds -->

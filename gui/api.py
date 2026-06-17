@@ -575,6 +575,76 @@ class Api:
             logger.exception("Failed to save settings")
             return {"ok": False, "error": str(exc)}
 
+    def get_staking_address(self) -> str:
+        """Return the currently configured staking address (or empty string)."""
+        return self._config.get("SR_STAKING_ADDRESS") or ""
+
+    def save_staking_address(self, address: str) -> dict:
+        """Validate and persist the staking-wallet address.
+
+        Unlike ``save_settings``, this is allowed in production builds —
+        the staking-address field is the remediation path for operators
+        whose node sits in ``missing_wallet`` state, so it must be
+        editable everywhere. Format + on-chain stake validation are
+        re-run via ``validate_staking_address`` so a 0-stake wallet
+        never makes it to disk.
+        """
+        check = self.validate_staking_address(address)
+        if not check.get("ok"):
+            return {"ok": False, "error": check.get("message", "Invalid staking address.")}
+        try:
+            # B2 (QA Build 129, MED 2): only preserve a collection address
+            # the operator explicitly set to a DIFFERENT wallet. A collection
+            # equal to the current staking address was auto-defaulted (or
+            # auto-copied by the pre-v1.5.2 save_wallets bug); passing it
+            # through would strand rewards at the OLD wallet when the staking
+            # address changes. Passing "" lets it follow the new staking
+            # address (the daemon defaults blank collection → staking).
+            current_staking = (self._config.get("SR_STAKING_ADDRESS") or "").strip().lower()
+            current_collection = (self._config.get("SR_COLLECTION_ADDRESS") or "").strip()
+            if current_collection and current_collection.lower() != current_staking:
+                collection_to_save = current_collection
+            else:
+                collection_to_save = ""
+            normalised, _ = self._config.save_wallets(address.strip(), collection_to_save)
+            return {"ok": True, "restart_required": True, "staking_address": normalised}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            logger.exception("Failed to save staking address")
+            return {"ok": False, "error": str(exc)}
+
+    def get_collection_address(self) -> str:
+        """Return the explicitly-configured collection address.
+
+        Empty string means it follows the staking address (B2: a blank
+        collection is stored as None, not an eager copy of staking).
+        """
+        return self._config.get("SR_COLLECTION_ADDRESS") or ""
+
+    def save_collection_address(self, address: str) -> dict:
+        """Validate and persist the collection (rewards) wallet (B2).
+
+        Blank is allowed and means "follow the staking address". A
+        non-blank value must be a valid, non-zero address. Editable in all
+        builds so operators can route rewards to a different wallet or
+        correct a mismatch.
+        """
+        addr = (address or "").strip()
+        if addr:
+            if not re.match(r"^0x[0-9a-fA-F]{40}$", addr):
+                return {"ok": False, "error": "Invalid address — expected 0x followed by 40 hex characters"}
+            if addr.lower() == "0x" + "0" * 40:
+                return {"ok": False, "error": "Zero address cannot receive rewards."}
+        try:
+            normalised = self._config.save_collection_address(addr)
+            return {"ok": True, "restart_required": True, "collection_address": normalised or ""}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            logger.exception("Failed to save collection address")
+            return {"ok": False, "error": str(exc)}
+
     def get_network_mode(self) -> dict:
         """Return current network mode (upnp or tunnel)."""
         return self._config.get_network_mode()
@@ -624,13 +694,17 @@ class Api:
         - ``lookup_failed`` returns ``ok=True`` so a transient coord
           outage doesn't block onboarding entirely.
 
-        Empty input returns ``ok=True`` because the wizard treats a blank
-        staking field as "use the identity address" — the daemon will
-        re-run the same check after start with the resolved address.
+        Staking address is required — empty input returns ``ok=False`` so
+        the wizard's submit gate (and the Settings save bridge) refuse to
+        advance without a real wallet.
         """
         addr = (address or "").strip()
         if not addr:
-            return {"ok": True, "status": "unset", "message": ""}
+            return {
+                "ok": False,
+                "status": "required",
+                "message": "Required — enter your staking wallet address.",
+            }
 
         # Format gate first — keeps the round-trip cost down on typos.
         if not re.match(r"^0x[0-9a-fA-F]{40}$", addr):

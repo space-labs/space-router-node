@@ -207,6 +207,12 @@ h2 {
   vertical-align: middle;
 }
 
+.required-badge {
+  color: #E27676;
+  background: rgba(226, 118, 118, 0.12);
+  border-color: rgba(226, 118, 118, 0.3);
+}
+
 /* Advanced settings */
 .advanced-toggle {
   display: flex;

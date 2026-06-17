@@ -283,6 +283,13 @@ function initOnboarding() {
   const collectionInput = $("#collection-input");
   const collectionError = $("#collection-error");
   const btn = $("#btn-start");
+  // B1 (QA Build 129, MED 1): the clone above copies the live button's
+  // current label/disabled state. After a Reset → wizard re-entry the
+  // button can carry a stale "Starting..." label and disabled=true, which
+  // then never clears because validateForm() only toggles `disabled`, not
+  // the text. Reset it explicitly here so it can never stick.
+  btn.textContent = "Start Node";
+  btn.disabled = false;
   const advancedToggle = $("#advanced-toggle");
   const advancedSection = $("#advanced-section");
   const advancedArrow = $("#advanced-arrow");
@@ -404,10 +411,18 @@ function initOnboarding() {
     });
   }
 
-  // ── Optional address validation ──
-  function validateAddress(input, errorEl) {
+  // ── Address validation ──
+  // ``required=true`` makes empty input invalid (used by the staking
+  // field — see validateForm below). Optional fields (collection, etc.)
+  // call this without the flag and empty still passes.
+  function validateAddress(input, errorEl, required) {
     const val = input.value.trim();
     if (!val) {
+      if (required) {
+        errorEl.textContent = "Required — enter your staking wallet address.";
+        input.classList.add("invalid");
+        return false;
+      }
       errorEl.textContent = "";
       input.classList.remove("invalid");
       return true;
@@ -422,27 +437,24 @@ function initOnboarding() {
     return true;
   }
 
-  // rc.11 #4: ``stakingValidatedOk`` mirrors the async validation result
-  // from the coord lookup. ``null`` means "not yet checked" or "not
-  // applicable" (empty input falls through to the identity-address
-  // default). Pre-rc.11 the wizard accepted any well-formed hex including
-  // the zero address and unstaked wallets, then surfaced a confusing
-  // "Insufficient stake: 0.00 SPACE" badge after Start.
-  let stakingValidatedOk = true;     // tracks the lookup-side gate
+  // ``stakingValidatedOk`` mirrors the async validation result from the
+  // coord lookup. Staking address is now required — empty input is an
+  // invalid state (set by validateAddress(required=true)), not a fallback.
+  let stakingValidatedOk = false;    // tracks the lookup-side gate
   let stakingValidating = false;     // suppresses double-fires on rapid blur
   async function asyncValidateStaking() {
     const val = stakingInput.value.trim();
-    // Empty falls back to identity address — server re-checks at start.
+    // Empty is invalid — flag and bail before hitting the bridge.
     if (!val) {
-      stakingError.textContent = "";
+      stakingError.textContent = "Required — enter your staking wallet address.";
       stakingError.classList.remove("warn");
-      stakingInput.classList.remove("invalid");
-      stakingValidatedOk = true;
+      stakingInput.classList.add("invalid");
+      stakingValidatedOk = false;
       validateForm();
       return;
     }
     // Format gate first — saves the round-trip on typos.
-    if (!validateAddress(stakingInput, stakingError)) {
+    if (!validateAddress(stakingInput, stakingError, true)) {
       stakingValidatedOk = false;
       validateForm();
       return;
@@ -489,9 +501,9 @@ function initOnboarding() {
     // Format-only validation on input (cheap, immediate); reset the
     // lookup-side gate to "ok" so the user isn't blocked by stale
     // state while they're still typing. The blur handler re-runs the
-    // on-chain check.
-    validateAddress(stakingInput, stakingError);
-    stakingValidatedOk = true;
+    // on-chain check (and re-flips the gate to false on empty).
+    validateAddress(stakingInput, stakingError, true);
+    stakingValidatedOk = stakingInput.value.trim().length > 0;
     validateForm();
   });
   stakingInput.addEventListener("blur", asyncValidateStaking);
@@ -513,19 +525,24 @@ function initOnboarding() {
   function validateForm() {
     const importValid = radioGenerate.checked ||
       (radioImport.checked && HEX_KEY_RE.test(identityKeyInput.value.trim()));
-    // Format gate (cheap, runs every keystroke).  If it fails we don't
-    // bother checking the async lookup result.
-    const stakingFormatValid = validateAddress(stakingInput, stakingError);
-    // ``stakingValidatedOk`` is the on-chain lookup gate. Unstaked /
-    // zero-address wallets land here and disable Start.
+    // Staking address is REQUIRED (no fallback). Format gate runs on every
+    // keystroke; the async lookup gate (`stakingValidatedOk`) is set by the
+    // blur handler and stays false on empty/invalid/unstaked wallets.
+    const stakingFormatValid = validateAddress(stakingInput, stakingError, true);
     const stakingValid = stakingFormatValid && stakingValidatedOk;
     const collectionValid = validateAddress(collectionInput, collectionError);
     const passphraseValid = validatePassphrase();
     btn.disabled = !(importValid && stakingValid && collectionValid && passphraseValid);
   }
 
-  // Enable button immediately for generate mode
-  validateForm();
+  // Enable button immediately for generate mode. If the staking field is
+  // pre-filled (wizard re-entry after Reset), run the on-chain check now so
+  // a valid address re-enables Start without forcing a manual edit (B1).
+  if (stakingInput.value.trim()) {
+    asyncValidateStaking();
+  } else {
+    validateForm();
+  }
 
   // ── Submit ──
   btn.addEventListener("click", async function () {
@@ -543,17 +560,14 @@ function initOnboarding() {
       return;
     }
     const staking = stakingInput.value.trim();
-    // rc.11 #4: re-run the async stake check as a final submit-time
-    // gate.  Catches paste-then-click-Start sequences that bypass the
-    // blur handler.  Errors render the same as the blur path; we only
-    // proceed if the lookup-side gate is green.
-    if (staking) {
-      await asyncValidateStaking();
-      if (!stakingValidatedOk) {
-        btn.disabled = false;
-        btn.textContent = "Start Node";
-        return;
-      }
+    // Re-run the async stake check as a final submit-time gate. Catches
+    // paste-then-click-Start sequences that bypass the blur handler.
+    // Staking address is required — also fail closed if it's empty here.
+    await asyncValidateStaking();
+    if (!staking || !stakingValidatedOk) {
+      btn.disabled = false;
+      btn.textContent = "Start Node";
+      return;
     }
     const collection = collectionInput.value.trim();
     const identityKeyHex = radioImport.checked ? identityKeyInput.value.trim() : "";
@@ -1086,7 +1100,11 @@ async function updateStatus() {
         } else if (status.error_code === "network_unreachable") {
           detail.textContent = "Cannot reach coordination server. Check your internet connection.";
         } else if (status.error_code === "invalid_wallet") {
-          detail.textContent = "Invalid wallet address. Use Fresh Restart to reconfigure.";
+          detail.textContent = "Invalid wallet address. Open Settings → Staking address to fix.";
+        } else if (status.error_code === "missing_wallet") {
+          detail.textContent = status.error_message
+            || "No staking wallet configured. Open Settings → Staking address "
+               + "and enter the wallet that holds your SPACE stake.";
         } else if (status.error_code === "port_permission") {
           detail.textContent = "Port permission denied. Use a port above 1024.";
         } else if (status.error_code === "port_in_use") {
@@ -1219,6 +1237,11 @@ function initFreshRestart() {
     // Reset button state — RESET-typing gating starts disabled.
     confirmBtn.disabled = true;
     confirmBtn.textContent = "Confirm Reset";
+    // B4: ensure Cancel is enabled on (re)entry — it gets locked while a
+    // reset is in flight (see doFreshRestart) and a prior failed attempt
+    // must not leave it stuck disabled.
+    const cancelBtn = $("#btn-restart-cancel");
+    if (cancelBtn) cancelBtn.disabled = false;
     if (confirmInput) {
       confirmInput.value = "";
     }
@@ -1252,14 +1275,19 @@ function initFreshRestart() {
 
 async function doFreshRestart() {
   const btn = $("#btn-restart-confirm");
+  const cancelBtn = $("#btn-restart-cancel");
   btn.disabled = true;
   btn.textContent = "Resetting...";
+  // B4 (QA Build 129, MED 4): lock Cancel while the reset is in flight so
+  // the user can't navigate away mid-wipe and land in a half-reset state.
+  if (cancelBtn) cancelBtn.disabled = true;
 
   try {
     const result = await window.pywebview.api.fresh_restart();
     if (!result.ok) {
       btn.disabled = false;
       btn.textContent = "Confirm Reset";
+      if (cancelBtn) cancelBtn.disabled = false;
       return;
     }
 
@@ -1271,6 +1299,7 @@ async function doFreshRestart() {
   } catch (e) {
     btn.disabled = false;
     btn.textContent = "Confirm Reset";
+    if (cancelBtn) cancelBtn.disabled = false;
   }
 }
 
@@ -1347,6 +1376,15 @@ function initSettings() {
   const tunnelConfig = $("#settings-tunnel-config");
   const tunnelHost = $("#settings-tunnel-host");
   const tunnelPort = $("#settings-tunnel-port");
+  const stakingInput = $("#settings-staking-input");
+  const stakingError = $("#settings-staking-error");
+  const collectionInput = $("#settings-collection-input");
+  const collectionError = $("#settings-collection-error");
+  // Tracks the value loaded into the field when the panel opens so we
+  // only call save_staking_address when the operator actually changed
+  // it. Avoids a no-op save+restart when only network mode changed.
+  let stakingOriginal = "";
+  let collectionOriginal = "";
 
   // Show test-only settings groups
   if (isTestBuild) {
@@ -1421,6 +1459,32 @@ function initSettings() {
       }
     }
 
+    // Load current staking address (all builds). Empty string is fine —
+    // the field stays empty and the save handler will gate on the
+    // validate_staking_address bridge.
+    try {
+      stakingOriginal = (await window.pywebview.api.get_staking_address()) || "";
+    } catch (e) {
+      stakingOriginal = "";
+    }
+    stakingInput.value = stakingOriginal;
+    stakingError.textContent = "";
+    stakingInput.classList.remove("invalid");
+
+    // Load current collection address (all builds). Empty means it follows
+    // the staking address — the placeholder communicates that (B2).
+    try {
+      collectionOriginal = (await window.pywebview.api.get_collection_address()) || "";
+    } catch (e) {
+      collectionOriginal = "";
+    }
+    collectionInput.value = collectionOriginal;
+    collectionError.textContent = "";
+    collectionInput.classList.remove("invalid");
+    // C1: gate Save to the loaded address state (e.g. disabled when a
+    // stuck node opens Settings with an empty staking address).
+    refreshSaveEnabled();
+
     // Auto-claim panel — load current config + status into the form.
     await loadAutoClaimPanel();
 
@@ -1428,6 +1492,63 @@ function initSettings() {
     hideAll();
     show("screen-settings");
   });
+
+  // Inline format validation on blur. The real on-chain check happens
+  // on save (single round-trip there is enough; bouncing the bridge on
+  // every focus loss would be wasteful).
+  stakingInput.addEventListener("blur", function () {
+    const val = stakingInput.value.trim();
+    if (!val) {
+      stakingError.textContent = "";
+      stakingInput.classList.remove("invalid");
+      return;
+    }
+    if (!/^0x[0-9a-fA-F]{40}$/.test(val)) {
+      stakingError.textContent = "Invalid address — expected 0x followed by 40 hex characters";
+      stakingInput.classList.add("invalid");
+    } else {
+      stakingError.textContent = "";
+      stakingInput.classList.remove("invalid");
+    }
+  });
+
+  // Collection address inline validation on blur. Blank is valid (follows
+  // staking). Non-blank must be a valid, non-zero address (B2).
+  collectionInput.addEventListener("blur", function () {
+    const val = collectionInput.value.trim();
+    if (!val) {
+      collectionError.textContent = "";
+      collectionInput.classList.remove("invalid");
+      return;
+    }
+    if (!/^0x[0-9a-fA-F]{40}$/.test(val)) {
+      collectionError.textContent = "Invalid address — expected 0x followed by 40 hex characters";
+      collectionInput.classList.add("invalid");
+    } else if (val.toLowerCase() === "0x" + "0".repeat(40)) {
+      collectionError.textContent = "Zero address cannot receive rewards.";
+      collectionInput.classList.add("invalid");
+    } else {
+      collectionError.textContent = "";
+      collectionInput.classList.remove("invalid");
+    }
+  });
+
+  // C1 (QA Build 129, finding 7 + macOS/Windows inconsistency): gate Save
+  // on address validity so an empty / invalid / zero staking address can't
+  // be saved. macOS previously left Save enabled (and an empty save slipped
+  // through); Windows blocked it. Now both block consistently.
+  function refreshSaveEnabled() {
+    const ZERO = "0x" + "0".repeat(40);
+    const sv = stakingInput.value.trim();
+    const stakingOk = /^0x[0-9a-fA-F]{40}$/.test(sv) && sv.toLowerCase() !== ZERO;
+    const cv = collectionInput.value.trim();
+    const collectionOk = !cv || (/^0x[0-9a-fA-F]{40}$/.test(cv) && cv.toLowerCase() !== ZERO);
+    saveBtn.disabled = !(stakingOk && collectionOk);
+  }
+  stakingInput.addEventListener("input", refreshSaveEnabled);
+  stakingInput.addEventListener("blur", refreshSaveEnabled);
+  collectionInput.addEventListener("input", refreshSaveEnabled);
+  collectionInput.addEventListener("blur", refreshSaveEnabled);
 
   // Back button
   $("#btn-back").addEventListener("click", function () {
@@ -1453,6 +1574,40 @@ function initSettings() {
     statusEl.textContent = "";
 
     try {
+      // Save staking address (all builds) — only when changed.
+      const stakingNow = stakingInput.value.trim();
+      if (stakingNow !== stakingOriginal.trim()) {
+        const sResult = await window.pywebview.api.save_staking_address(stakingNow);
+        if (!sResult.ok) {
+          stakingError.textContent = sResult.error || "Failed to save staking address";
+          stakingInput.classList.add("invalid");
+          statusEl.textContent = sResult.error || "Failed to save staking address";
+          statusEl.style.color = "#e74c3c";
+          saveBtn.disabled = false;
+          saveBtn.textContent = "Save & Restart Node";
+          return;
+        }
+        stakingOriginal = sResult.staking_address || stakingNow;
+      }
+
+      // Save collection address (all builds) — only when changed. Runs
+      // AFTER the staking save (which may reset collection to follow the
+      // new staking address) so an explicit collection wins (B2).
+      const collectionNow = collectionInput.value.trim();
+      if (collectionNow !== collectionOriginal.trim()) {
+        const cResult = await window.pywebview.api.save_collection_address(collectionNow);
+        if (!cResult.ok) {
+          collectionError.textContent = cResult.error || "Failed to save collection address";
+          collectionInput.classList.add("invalid");
+          statusEl.textContent = cResult.error || "Failed to save collection address";
+          statusEl.style.color = "#e74c3c";
+          saveBtn.disabled = false;
+          saveBtn.textContent = "Save & Restart Node";
+          return;
+        }
+        collectionOriginal = cResult.collection_address || "";
+      }
+
       // Save network mode (all builds)
       await window.pywebview.api.save_network_mode(
         mode,
