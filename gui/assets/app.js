@@ -966,22 +966,40 @@ async function updateStatus() {
     // show "Initializing…" instead of the bare placeholder so the UI
     // matches the QA-guide spec.
     let stakingStatusLabel;
+    let stakingStatusClass = "";
     if (ss === "unstaked") {
       stakingStatusLabel = "Unstaked — stake required";
-    } else if (ss === "earning" || ss === "qualifying") {
+      stakingStatusClass = " staking-unstaked";
+    } else if (ss === "earning" || ss === "qualifying" || ss === "inactive") {
       // Capitalise for consistency with the new "Unstaked" label.
+      // BUG-05a: include "inactive" so it shows "Inactive" (red), not the
+      // raw lowercase token rendered in the default grey/white.
       stakingStatusLabel = ss.charAt(0).toUpperCase() + ss.slice(1);
+      stakingStatusClass = ss === "earning" ? " staking-earning"
+        : ss === "qualifying" ? " staking-qualifying"
+        : " staking-inactive";
     } else if ((ss === "—" || !ss) && ["initializing", "binding", "registering"].includes(ssState)) {
       stakingStatusLabel = "Initializing…";
+    } else if ((ss === "—" || !ss) && ["error_transient", "reconnecting"].includes(ssState)) {
+      // BUG-05b: while retrying registration (e.g. the coordination API is
+      // offline) the node cycles error_transient -> initializing without ever
+      // getting a staking_status, which flickered between "Initializing…" and
+      // "-". Show a single stable status instead, and mark it red when the
+      // error is a coordination/network reach failure so the operator can see
+      // it's not progressing.
+      const ec = (status.error_code || "").toLowerCase();
+      if (["network_unreachable", "endpoint_unreachable", "connection_lost",
+           "coordination_unreachable"].includes(ec)) {
+        stakingStatusLabel = "Coordination offline";
+        stakingStatusClass = " staking-inactive";
+      } else {
+        stakingStatusLabel = "Reconnecting…";
+      }
     } else {
       stakingStatusLabel = ss;
     }
     stakingStatusEl.textContent = stakingStatusLabel;
-    stakingStatusEl.className = "wallet-value"
-      + (ss === "earning" ? " staking-earning"
-        : ss === "qualifying" ? " staking-qualifying"
-        : ss === "unstaked" ? " staking-unstaked"
-        : "");
+    stakingStatusEl.className = "wallet-value" + stakingStatusClass;
 
     // State-based display
     const state = status.state || "idle";
@@ -1385,6 +1403,25 @@ function initSettings() {
   // it. Avoids a no-op save+restart when only network mode changed.
   let stakingOriginal = "";
   let collectionOriginal = "";
+  // BUG-01: snapshot of every Settings control when the panel opens, so Save
+  // can be gated on a real change (not just address validity). Without this
+  // the Save & Restart button was active with no edits, and clicking it ran
+  // a needless restart that flickered the node to "inactive".
+  let openSnapshot = "";
+  function snapshotSettings() {
+    const screen = document.getElementById("screen-settings");
+    if (!screen) return "";
+    const parts = [];
+    screen.querySelectorAll("input, select, textarea").forEach(function (el) {
+      const key = el.id || el.name || "";
+      if (el.type === "checkbox" || el.type === "radio") {
+        parts.push(key + "=" + (el.checked ? "1" : "0"));
+      } else {
+        parts.push(key + "=" + (el.value || "").trim());
+      }
+    });
+    return parts.join("|");
+  }
 
   // Show test-only settings groups
   if (isTestBuild) {
@@ -1481,17 +1518,28 @@ function initSettings() {
     collectionInput.value = collectionOriginal;
     collectionError.textContent = "";
     collectionInput.classList.remove("invalid");
-    // C1: gate Save to the loaded address state (e.g. disabled when a
-    // stuck node opens Settings with an empty staking address).
-    refreshSaveEnabled();
 
     // Auto-claim panel — load current config + status into the form.
     await loadAutoClaimPanel();
+
+    // BUG-01: capture the baseline AFTER every field is loaded, then gate
+    // Save on validity AND a real change.
+    openSnapshot = snapshotSettings();
+    refreshSaveEnabled();
 
     statusEl.textContent = "";
     hideAll();
     show("screen-settings");
   });
+
+  // BUG-01: re-evaluate the Save gate on any change to any settings control
+  // (addresses, network, env/mtls, and the auto-claim form), so it only
+  // enables once something actually differs from the loaded state.
+  const _settingsScreen = document.getElementById("screen-settings");
+  if (_settingsScreen) {
+    _settingsScreen.addEventListener("input", refreshSaveEnabled);
+    _settingsScreen.addEventListener("change", refreshSaveEnabled);
+  }
 
   // Inline format validation on blur. The real on-chain check happens
   // on save (single round-trip there is enough; bouncing the bridge on
@@ -1503,7 +1551,7 @@ function initSettings() {
       stakingInput.classList.remove("invalid");
       return;
     }
-    if (!/^0x[0-9a-fA-F]{40}$/.test(val)) {
+    if (!/^(0x)?[0-9a-fA-F]{40}$/.test(val)) {
       stakingError.textContent = "Invalid address — expected 0x followed by 40 hex characters";
       stakingInput.classList.add("invalid");
     } else {
@@ -1521,7 +1569,7 @@ function initSettings() {
       collectionInput.classList.remove("invalid");
       return;
     }
-    if (!/^0x[0-9a-fA-F]{40}$/.test(val)) {
+    if (!/^(0x)?[0-9a-fA-F]{40}$/.test(val)) {
       collectionError.textContent = "Invalid address — expected 0x followed by 40 hex characters";
       collectionInput.classList.add("invalid");
     } else if (val.toLowerCase() === "0x" + "0".repeat(40)) {
@@ -1538,12 +1586,17 @@ function initSettings() {
   // be saved. macOS previously left Save enabled (and an empty save slipped
   // through); Windows blocked it. Now both block consistently.
   function refreshSaveEnabled() {
-    const ZERO = "0x" + "0".repeat(40);
+    // Accept bare 40-hex too (BUG-06 consistency with the CLI); the zero
+    // check is prefix-agnostic.
+    const okFmt = (v) => /^(0x)?[0-9a-fA-F]{40}$/.test(v)
+      && v.toLowerCase().replace(/^0x/, "") !== "0".repeat(40);
     const sv = stakingInput.value.trim();
-    const stakingOk = /^0x[0-9a-fA-F]{40}$/.test(sv) && sv.toLowerCase() !== ZERO;
     const cv = collectionInput.value.trim();
-    const collectionOk = !cv || (/^0x[0-9a-fA-F]{40}$/.test(cv) && cv.toLowerCase() !== ZERO);
-    saveBtn.disabled = !(stakingOk && collectionOk);
+    const stakingOk = okFmt(sv);
+    const collectionOk = !cv || okFmt(cv);
+    // BUG-01: only enable Save when something actually changed.
+    const dirty = snapshotSettings() !== openSnapshot;
+    saveBtn.disabled = !(stakingOk && collectionOk && dirty);
   }
   stakingInput.addEventListener("input", refreshSaveEnabled);
   stakingInput.addEventListener("blur", refreshSaveEnabled);

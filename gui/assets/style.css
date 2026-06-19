@@ -898,6 +898,13 @@ body.has-test-banner .screen {
   font-weight: 600;
 }
 
+/* BUG-05a: inactive was unstyled, so it fell back to the grey .wallet-value
+   and read as white. Show it red like the other "not earning" states. */
+.staking-inactive {
+  color: #f44336;
+  font-weight: 600;
+}
+
 /* ── Staking Modal Overlay ── */
 
 .staking-modal-overlay {

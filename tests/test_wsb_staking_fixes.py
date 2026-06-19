@@ -175,3 +175,36 @@ def test_cli_wizard_blocks_zero_then_accepts_valid(monkeypatch):
     env_file = main._wizard_env_file()
     from dotenv import get_key
     assert (get_key(env_file, "SR_STAKING_ADDRESS") or "").lower() == VALID.lower()
+
+
+def test_cli_staking_flag_skips_prompt(monkeypatch):
+    """BUG-02: `--staking-address` must be honored by the wizard, not ignored.
+    Drive the real _first_run_setup with args.staking_address set and confirm
+    the staking prompt is never shown and the flag value is persisted."""
+    import argparse
+    import app.cli_ui as cli_ui
+    import app.main as main
+
+    prompted: list[str] = []
+
+    def fake_input(prompt, default="", password=False):
+        prompted.append(prompt)
+        return ""  # if the staking prompt is reached, blank would error/re-loop
+
+    monkeypatch.setattr(cli_ui, "wizard_input", fake_input)
+    monkeypatch.setattr(cli_ui, "wizard_select", lambda *a, **k: 0)
+    monkeypatch.setattr(cli_ui, "wizard_confirm", lambda *a, **k: False)
+    monkeypatch.setattr(cli_ui, "wizard_error", lambda msg: None)
+    for noop in ("wizard_banner", "wizard_step", "wizard_info",
+                 "wizard_success", "wizard_done"):
+        monkeypatch.setattr(cli_ui, noop, lambda *a, **k: None)
+
+    args = argparse.Namespace(staking_address=VALID, collection_address=None)
+    ok = main._first_run_setup(args)
+    assert ok is True
+    # The flag was honored: the wizard never prompted for the staking address.
+    assert "Staking wallet address" not in prompted, prompted
+
+    env_file = main._wizard_env_file()
+    from dotenv import get_key
+    assert (get_key(env_file, "SR_STAKING_ADDRESS") or "").lower() == VALID.lower()
