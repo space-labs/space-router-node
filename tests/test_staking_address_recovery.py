@@ -44,6 +44,9 @@ def _isolated_env(monkeypatch, tmp_path_factory):
     home = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("USERPROFILE", raising=False)
+    # BUG-03 added a cwd-relative .env scan; chdir to a clean dir so the
+    # recovery never picks up a stray .env from the repo/working directory.
+    monkeypatch.chdir(tmp_path_factory.mktemp("cwd"))
 
 
 def _write_settings(directory, *, staking=None, coord_url=None, variant="production"):
@@ -178,8 +181,61 @@ def test_heal_in_place_returns_flag(tmp_path):
 
 def test_legacy_candidates_scan_canonical_dir_first(tmp_path):
     cands = _legacy_env_candidates(tmp_path, "production")
-    assert cands[0] == tmp_path / "spacerouter.env"
-    assert tmp_path / "spacerouter.env.migrated.bak" in cands
+    paths = [p for p, _ in cands]
+    assert paths[0] == tmp_path / "spacerouter.env"
+    assert tmp_path / "spacerouter.env.migrated.bak" in paths
+    # canonical dir entries are not marker-gated
+    assert cands[0][1] is False
+
+
+def test_legacy_candidates_cwd_and_home_env_are_marker_gated(tmp_path):
+    cands = _legacy_env_candidates(tmp_path, "production")
+    gated = {p for p, req in cands if req}
+    # cwd .env and ~/.env are scanned but require a SpaceRouter marker
+    from pathlib import Path
+    assert (Path.cwd() / ".env") in gated
+    assert (Path.home() / ".env") in gated
+
+
+def test_legacy_candidates_linux_includes_both_xdg_variants(tmp_path, monkeypatch):
+    import app.settings_loader as sl
+    monkeypatch.setattr(sl.sys, "platform", "linux")
+    paths = [p for p, _ in sl._legacy_env_candidates(tmp_path, "test")]
+    home = __import__("pathlib").Path.home()
+    # test build: -test dir comes first (variant-matching), prod dir still present
+    assert home / ".config" / "spacerouter-test" / "spacerouter.env" in paths
+    assert home / ".config" / "spacerouter" / "spacerouter.env" in paths
+    assert paths.index(home / ".config" / "spacerouter-test" / "spacerouter.env") \
+        < paths.index(home / ".config" / "spacerouter" / "spacerouter.env")
+
+
+def test_cwd_env_recovered_only_with_marker(tmp_path, monkeypatch):
+    """A cwd .env with a SpaceRouter marker is recovered; one without is not."""
+    monkeypatch.chdir(tmp_path)
+    # without a marker → ignored (could be an unrelated dev .env)
+    (tmp_path / ".env").write_text(f"SR_STAKING_ADDRESS={ADDR_A}\n")
+    s = Settings(build_variant="production")
+    s.wallet.staking_address = None
+    assert _recover_staking_address_in_place(s, tmp_path / "nope") is False
+    assert not s.wallet.staking_address
+    # with a wizard marker → recovered
+    (tmp_path / ".env").write_text(
+        f"SR_STAKING_ADDRESS={ADDR_A}\nSR_UPNP_ENABLED=false\n"
+    )
+    s2 = Settings(build_variant="production")
+    s2.wallet.staking_address = None
+    assert _recover_staking_address_in_place(s2, tmp_path / "nope") is True
+    assert s2.wallet.staking_address == ADDR_A_LC
+
+
+def test_read_env_require_marker(tmp_path):
+    env = tmp_path / "x.env"
+    env.write_text(f"SR_STAKING_ADDRESS={ADDR_A}\n")
+    # no marker → None when required, but fine when not required
+    assert _read_staking_address_from_env(env, require_marker=True) is None
+    assert _read_staking_address_from_env(env, require_marker=False) == ADDR_A_LC
+    env.write_text(f"SR_STAKING_ADDRESS={ADDR_A}\nSR_REFERRAL_CODE=ALPHA\n")
+    assert _read_staking_address_from_env(env, require_marker=True) == ADDR_A_LC
 
 
 def test_recovery_does_not_reenter_variant_resolver(tmp_path, monkeypatch):

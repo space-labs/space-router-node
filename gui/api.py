@@ -707,12 +707,17 @@ class Api:
             }
 
         # Format gate first — keeps the round-trip cost down on typos.
-        if not re.match(r"^0x[0-9a-fA-F]{40}$", addr):
+        # BUG-06: accept a bare 40-hex address (no 0x) and normalise it,
+        # matching the CLI (app/wallet.py validate_wallet_address). Without
+        # this the GUI's permissive client regex enabled Start for bare hex
+        # but this stricter gate rejected it on submit, so Start did nothing.
+        if not re.match(r"^(0x)?[0-9a-fA-F]{40}$", addr):
             return {
                 "ok": False,
                 "status": "invalid",
                 "message": "Invalid address — expected 0x followed by 40 hex characters",
             }
+        addr = "0x" + addr.removeprefix("0x").removeprefix("0X").lower()
         # Zero address never has stake; reject up front.
         if addr.lower() == "0x" + "0" * 40:
             return {

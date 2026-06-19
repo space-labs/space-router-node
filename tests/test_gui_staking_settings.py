@@ -67,6 +67,27 @@ def test_validate_zero_address_rejected():
     assert result["status"] == "invalid"
 
 
+def test_validate_bare_hex_accepted_bug06(monkeypatch):
+    """BUG-06: a bare 40-hex address (no 0x) must pass the format gate and be
+    normalised, matching the CLI. Previously the GUI enabled Start for it but
+    this gate rejected it on submit. (Stub the coord lookup — network only.)"""
+    import httpx
+    def _boom(*a, **k):
+        raise httpx.ConnectError("offline")
+    monkeypatch.setattr(httpx, "get", _boom)
+
+    api, _ = _make_api()
+    res = api.validate_staking_address("ab" * 20)  # 40 hex, no 0x
+    # format gate accepted it (would be status "invalid" if rejected)
+    assert res["status"] != "invalid", res
+    assert res["ok"] is True  # lookup_failed is permissive
+
+    # a bare-hex ZERO address is still blocked (zero check runs after normalise)
+    zres = api.validate_staking_address("00" * 20)
+    assert zres["ok"] is False
+    assert zres["status"] == "invalid"
+
+
 # ── get_staking_address ────────────────────────────────────────────
 
 

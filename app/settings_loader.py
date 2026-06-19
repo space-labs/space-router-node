@@ -243,12 +243,29 @@ def heal_test_coord_url_in_place(s: Settings) -> bool:
     return _heal_test_coord_url_in_place(s)
 
 
-def _read_staking_address_from_env(path: Path) -> str | None:
+# Keys the v1.4 wizard always wrote alongside the wallet. Used to confirm a
+# loose ``.env`` (e.g. a cwd-relative file) really is a SpaceRouter config
+# before we adopt an address from it (BUG-03 — Linux CLI cwd .env recovery).
+_WIZARD_MARKER_KEYS = (
+    "SR_UPNP_ENABLED",
+    "SR_REFERRAL_CODE",
+    "SR_PUBLIC_PORT",
+    "SR_COORDINATION_API_URL",
+    "SR_NODE_PORT",
+)
+
+
+def _read_staking_address_from_env(path: Path, require_marker: bool = False) -> str | None:
     """Best-effort read of a staking address from a v1.4-style env file.
 
     Looks for ``SR_STAKING_ADDRESS`` first, then the legacy single-wallet
     ``SR_WALLET_ADDRESS``. Returns a checksummed address when valid, else
     None. Tolerant of quotes, ``export`` prefixes, and ``#`` comments.
+
+    When *require_marker* is True (used for ambiguous locations like a
+    cwd-relative ``.env``), the file must also contain a SpaceRouter-wizard
+    marker key, otherwise we refuse it — an unrelated dev ``.env`` that
+    happens to have an ``SR_STAKING_ADDRESS`` line must not be adopted.
     """
     try:
         if not path.is_file():
@@ -258,6 +275,7 @@ def _read_staking_address_from_env(path: Path) -> str | None:
         return None
 
     values: dict[str, str] = {}
+    has_marker = False
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -271,9 +289,17 @@ def _read_staking_address_from_env(path: Path) -> str | None:
         val = val.strip().strip('"').strip("'")
         if key in ("SR_STAKING_ADDRESS", "SR_WALLET_ADDRESS") and val:
             values[key] = val
+        if key in _WIZARD_MARKER_KEYS:
+            has_marker = True
 
     candidate = values.get("SR_STAKING_ADDRESS") or values.get("SR_WALLET_ADDRESS")
     if not candidate:
+        return None
+    if require_marker and not has_marker:
+        logger.info(
+            "Skipping %s for staking recovery: no SpaceRouter wizard markers "
+            "(looks like an unrelated .env)", path,
+        )
         return None
     try:
         from app.wallet import validate_wallet_address
@@ -300,9 +326,9 @@ def _legacy_env_candidates(directory: Path, variant: str | None) -> list[Path]:
     boot). The settings object already carries the resolved variant, so use
     it directly.
     """
-    out = [
-        directory / "spacerouter.env",
-        directory / "spacerouter.env.migrated.bak",
+    out: list[tuple[Path, bool]] = [
+        (directory / "spacerouter.env", False),
+        (directory / "spacerouter.env.migrated.bak", False),
     ]
     bv = (variant or "").lower()
     if sys.platform == "darwin":
@@ -312,11 +338,34 @@ def _legacy_env_candidates(directory: Path, variant: str | None) -> list[Path]:
             if bv == "test"
             else ["SpaceRouter", "SpaceRouter-Test"]
         )
-        out.extend(base / n / "spacerouter.env" for n in names)
+        out.extend((base / n / "spacerouter.env", False) for n in names)
     elif sys.platform.startswith("linux"):
-        # Linux v1.4 used the XDG default and never shipped a -Test variant.
-        out.append(Path.home() / ".config" / "spacerouter" / "spacerouter.env")
+        # v1.4 Linux GUI used the XDG default; the test build used a
+        # ``-test`` suffix (BUG-03: the -test dir was previously missing).
+        # Variant-matching dir first so a production build never adopts a
+        # test wallet.
+        cfg = Path.home() / ".config"
+        names = (
+            ["spacerouter-test", "spacerouter"]
+            if bv == "test"
+            else ["spacerouter", "spacerouter-test"]
+        )
+        out.extend((cfg / n / "spacerouter.env", False) for n in names)
     # Windows v1.4 already used ~/.spacerouter — covered by the canonical dir.
+
+    # BUG-03: v1.4 Linux CLI wrote a *cwd-relative* ``.env`` (no fixed path).
+    # Scan the current cwd and the home dir as a best effort, but marker-gated
+    # (require a SpaceRouter wizard key) and last so we never adopt an
+    # unrelated ``.env``. Deduped because cwd may equal home.
+    seen: set[Path] = set()
+    for envp in (Path.cwd() / ".env", Path.home() / ".env"):
+        try:
+            rp = envp.resolve()
+        except OSError:
+            rp = envp
+        if rp not in seen:
+            seen.add(rp)
+            out.append((envp, True))
     return out
 
 
@@ -337,8 +386,8 @@ def _recover_staking_address_in_place(s: Settings, directory: Path) -> bool:
     """
     if (s.wallet.staking_address or "").strip():
         return False
-    for candidate in _legacy_env_candidates(directory, s.build_variant):
-        addr = _read_staking_address_from_env(candidate)
+    for candidate, require_marker in _legacy_env_candidates(directory, s.build_variant):
+        addr = _read_staking_address_from_env(candidate, require_marker=require_marker)
         if addr:
             logger.info(
                 "Recovered staking address from legacy config %s "

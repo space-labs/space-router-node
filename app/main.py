@@ -163,7 +163,7 @@ def _persist_wizard_results(
     merged.save(sp)
 
 
-def _first_run_setup() -> bool:
+def _first_run_setup(args=None) -> bool:
     """Interactive first-time setup wizard with rich prompts.
 
     Creates the identity key file and writes settings to .env.
@@ -247,7 +247,22 @@ def _first_run_setup() -> bool:
             "Wallet that holds your SPACE stake. Don't have one? "
             "Stake at https://penguinbase.com/dapp/spacestaking first.",
         )
-        while True:
+        # BUG-02: honor --staking-address. If the flag carries a valid,
+        # non-zero address, use it and skip the prompt. If it's invalid/zero,
+        # warn and fall into the interactive loop so the operator can fix it.
+        staking_address = None
+        _flag_staking = getattr(args, "staking_address", None) if args else None
+        if _flag_staking:
+            try:
+                _cand = validate_wallet_address(_flag_staking)
+                if _cand == _ZERO_ADDRESS:
+                    wizard_error("--staking-address is the zero address; enter a real wallet.")
+                else:
+                    staking_address = _cand
+                    wizard_success(f"Using --staking-address: {staking_address}")
+            except ValueError as exc:
+                wizard_error(f"--staking-address invalid: {exc}")
+        while staking_address is None:
             raw = wizard_input("Staking wallet address")
             if not raw:
                 wizard_error("Staking address is required.")
@@ -263,6 +278,7 @@ def _first_run_setup() -> bool:
             # (QA Build 129, MED 3 — CLI/GUI validation inconsistency).
             if staking_address == _ZERO_ADDRESS:
                 wizard_error("Zero address cannot stake. Enter your real wallet address.")
+                staking_address = None
                 continue
             break
 
@@ -272,7 +288,20 @@ def _first_run_setup() -> bool:
         wizard_step(step, "Collection Address (optional)")
         step += 1
         wizard_info(f"Leave blank to use staking address ({effective_staking})")
-        while True:
+        # BUG-02: honor --collection-address the same way (optional field).
+        collection_address = None
+        _flag_collection = getattr(args, "collection_address", None) if args else None
+        if _flag_collection:
+            try:
+                _cand = validate_wallet_address(_flag_collection)
+                if _cand == _ZERO_ADDRESS:
+                    wizard_error("--collection-address is the zero address.")
+                else:
+                    collection_address = _cand
+                    wizard_success(f"Using --collection-address: {collection_address}")
+            except ValueError as exc:
+                wizard_error(f"--collection-address invalid: {exc}")
+        while collection_address is None:
             raw = wizard_input("Collection wallet address")
             if not raw:
                 collection_address = ""
@@ -284,6 +313,7 @@ def _first_run_setup() -> bool:
                 continue
             if collection_address == _ZERO_ADDRESS:
                 wizard_error("Zero address cannot receive rewards.")
+                collection_address = None
                 continue
             break
 
@@ -3280,7 +3310,7 @@ def main() -> None:
             sys.exit(0)
         # Fall through to onboarding wizard
         if sys.stdin.isatty():
-            if not _first_run_setup():
+            if not _first_run_setup(args):
                 sys.exit(0)
             _show_version_check()
             _show_staking_prompt()
@@ -3316,7 +3346,7 @@ def main() -> None:
         or (not s.STAKING_ADDRESS and s.COORDINATION_API_URL == _default_coordination_url())
     )
     if needs_setup and sys.stdin.isatty():
-        if not _first_run_setup():
+        if not _first_run_setup(args):
             sys.exit(0)
         _show_version_check()
         _show_staking_prompt()
