@@ -732,6 +732,30 @@ _FIRST_LAUNCH_RETRY_MAX_ATTEMPTS = 3
 _FIRST_LAUNCH_RETRY_SLEEP_S = 5
 
 
+# Sentinel shown while the real coord-side staking_status is unknown. Mirrors
+# ``NodeStatus.staking_status``'s default (app/state.py) so a reset matches a
+# fresh status object rather than hard-coding a duplicate magic literal.
+_STAKING_STATUS_SENTINEL: str = NodeStateMachine().status.staking_status
+
+
+def _reset_staking_status(ctx: _NodeContext) -> None:
+    """Blank the stale ``staking_status`` on (re)registration.
+
+    The self-probe loop only refreshes ``sm.status.staking_status`` every ~60s,
+    and re-registration reuses the same node_id, so a staking-address change to
+    a different/unstaked wallet would otherwise keep showing the old "Earning"
+    value until the next probe. Resetting to the sentinel here means any
+    registration blanks the stale value until the next fresh probe writes the
+    real status. Routed through ``_phase_register`` so it covers both first
+    registration and the RECONNECTING re-registration path.
+    """
+    # getattr (not ctx.sm) so this is safe even if the context was built
+    # without the state machine attribute set (e.g. partial-init/test paths).
+    sm = getattr(ctx, "sm", None)
+    if sm is not None:
+        sm.status.staking_status = _STAKING_STATUS_SENTINEL
+
+
 async def _phase_register(ctx: _NodeContext) -> None:
     """REGISTERING: Register with the Coordination API."""
     from app.errors import NodeError, NodeErrorCode, classify_error
@@ -780,6 +804,12 @@ async def _phase_register(ctx: _NodeContext) -> None:
 
     ctx.node_id = node_id
     ctx.gateway_ca_cert = gateway_ca_cert
+
+    # Blank any stale coord-side staking_status so a staking-address change to a
+    # different/unstaked wallet doesn't keep showing the old value until the
+    # next ~60s self-probe. Covers first registration and reconnect re-register
+    # since both flow through here.
+    _reset_staking_status(ctx)
 
     # Save gateway CA cert if provided
     if gateway_ca_cert:

@@ -267,8 +267,15 @@ async function showNetworkSetup(onComplete) {
 // ── Onboarding Screen ──
 
 function initOnboarding() {
-  // Strip old listeners by replacing elements
-  for (const sel of ["#btn-start"]) {
+  // Strip old listeners by replacing elements.
+  // BUG-NEW (MED): initOnboarding() runs on every wizard entry, including
+  // each Reset Node. The advanced and passphrase toggles re-bind a fresh
+  // click handler every time, and each handler FLIPS state, so N stacked
+  // handlers = N toggles per click — even counts cancel out (the section
+  // looks unclickable), odd counts work. Strip these toggles alongside
+  // #btn-start so each init starts from a single clean handler.
+  for (const sel of ["#btn-start", "#advanced-toggle",
+                     "#passphrase-show-toggle", "#passphrase-confirm-show-toggle"]) {
     const el = $(sel);
     el.replaceWith(el.cloneNode(true));
   }
@@ -293,6 +300,11 @@ function initOnboarding() {
   const advancedToggle = $("#advanced-toggle");
   const advancedSection = $("#advanced-section");
   const advancedArrow = $("#advanced-arrow");
+  // BUG-NEW (MED): normalise the Advanced section to a known collapsed
+  // state on every init, so a stale-open state left over from a prior
+  // wizard cycle (or odd/even handler stacking) can't carry across.
+  advancedSection.style.display = "none";
+  advancedArrow.textContent = "▸";
 
   // Environment selector: test builds only
   const envGroup = $("#env-select").parentElement;
@@ -357,6 +369,10 @@ function initOnboarding() {
     const input = document.getElementById(inputId);
     const toggle = document.getElementById(toggleId);
     if (!input || !toggle) return;
+    // BUG-NEW (MED): normalise to a hidden ("password") state on each init,
+    // so a stale-open visibility state from a prior wizard cycle can't stick.
+    input.type = "password";
+    toggle.textContent = "Show";
     toggle.addEventListener("click", function () {
       if (input.type === "password") {
         input.type = "text";
@@ -978,7 +994,11 @@ async function updateStatus() {
       stakingStatusClass = ss === "earning" ? " staking-earning"
         : ss === "qualifying" ? " staking-qualifying"
         : " staking-inactive";
-    } else if ((ss === "—" || !ss) && ["initializing", "binding", "registering"].includes(ssState)) {
+    } else if ((ss === "—" || !ss) && ["initializing", "binding", "registering", "running"].includes(ssState)) {
+      // rc.11 #9 + v1.5.2: also cover `running` here. On (re)registration the
+      // daemon resets staking_status to the em-dash sentinel, so the node can
+      // briefly be `running` with "—" before the first probe returns. Show the
+      // neutral "Initializing…" rather than a bare "-"/stale-looking token.
       stakingStatusLabel = "Initializing…";
     } else if ((ss === "—" || !ss) && ["error_transient", "reconnecting"].includes(ssState)) {
       // BUG-05b: while retrying registration (e.g. the coordination API is
