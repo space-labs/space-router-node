@@ -738,6 +738,44 @@ _FIRST_LAUNCH_RETRY_SLEEP_S = 5
 _STAKING_STATUS_SENTINEL: str = NodeStateMachine().status.staking_status
 
 
+# Grace window after (re)registration during which a *transient* coord-side
+# "inactive" is suppressed (kept at the sentinel → GUI "Initializing…") rather
+# than flashed red. Bounded so a genuinely offline/draining node still reports
+# "inactive" once the grace elapses (BUG-05a preserved). ~2 min covers the
+# post-register window where coord has marked the node offline and its first
+# probe hasn't succeeded yet, plus the ~60s self-probe interval.
+_STAKING_INACTIVE_GRACE_SECONDS = 120
+
+
+def _resolve_staking_status_after_register(
+    fetched_status: str,
+    grace_until: float | None,
+    now: float,
+    sentinel: str = _STAKING_STATUS_SENTINEL,
+) -> str:
+    """Decide what ``staking_status`` value to store given a fresh coord read.
+
+    Pure helper (no I/O, no state mutation) so the grace decision is unit
+    testable in isolation. ``grace_until`` is the unix timestamp at which the
+    post-(re)register grace window expires (``None`` ⇒ no active grace).
+
+    Rule (BUG-132-01): a coord-reported ``"inactive"`` seen *within* the grace
+    window is treated as a transient post-register artefact and suppressed —
+    we keep the ``sentinel`` ("—", rendered "Initializing…") instead of
+    flashing red. Any non-inactive status writes through immediately (and, in
+    the caller, ends the grace). Once the grace elapses, a persistent
+    ``"inactive"`` writes through as normal so a genuinely offline/draining
+    node still goes red (BUG-05a preserved).
+    """
+    if (
+        fetched_status == "inactive"
+        and grace_until is not None
+        and now < grace_until
+    ):
+        return sentinel
+    return fetched_status
+
+
 def _reset_staking_status(ctx: _NodeContext) -> None:
     """Blank the stale ``staking_status`` on (re)registration.
 
@@ -748,12 +786,23 @@ def _reset_staking_status(ctx: _NodeContext) -> None:
     registration blanks the stale value until the next fresh probe writes the
     real status. Routed through ``_phase_register`` so it covers both first
     registration and the RECONNECTING re-registration path.
+
+    Also stamps ``ctx._staking_grace_until`` (BUG-132-01): the moment up to
+    which the self-probe loop suppresses a *transient* post-register coord
+    "inactive" (keeping the sentinel → GUI "Initializing…") instead of flashing
+    red. See ``_resolve_staking_status_after_register``.
     """
     # getattr (not ctx.sm) so this is safe even if the context was built
     # without the state machine attribute set (e.g. partial-init/test paths).
     sm = getattr(ctx, "sm", None)
     if sm is not None:
         sm.status.staking_status = _STAKING_STATUS_SENTINEL
+    # Stamp the grace deadline on ctx (mirrors the ``_last_probe_request_time``
+    # dynamic-attribute pattern). Done unconditionally so the probe loop can
+    # read it via getattr even on partial contexts.
+    import time as _time
+
+    ctx._staking_grace_until = _time.time() + _STAKING_INACTIVE_GRACE_SECONDS
 
 
 async def _phase_register(ctx: _NodeContext) -> None:
@@ -1452,6 +1501,20 @@ async def _self_probe_loop(
         status = node_data.get("status", "unknown")
         health_score = float(node_data.get("health_score", 0.0))
         staking_status = node_data.get("staking_status", "—")
+
+        # BUG-132-01: suppress a *transient* post-(re)register coord "inactive"
+        # so the GUI keeps showing "—" ("Initializing…") rather than flashing
+        # red for the few seconds before the node's first probe lands. Bounded
+        # by the grace deadline stamped at register time — a persistent
+        # "inactive" past the grace still writes through (BUG-05a preserved).
+        grace_until = getattr(ctx, "_staking_grace_until", None)
+        staking_status = _resolve_staking_status_after_register(
+            staking_status, grace_until, now=_time.time(),
+        )
+        # Any non-inactive observation ends the grace early so a later genuine
+        # "inactive" (e.g. the wallet unstakes) goes red immediately.
+        if staking_status != "inactive":
+            ctx._staking_grace_until = None
 
         # Plumb coord-side observations through to GUI / dashboard.
         sm.status.coord_status = status

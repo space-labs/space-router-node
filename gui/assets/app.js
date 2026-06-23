@@ -372,6 +372,10 @@ function initOnboarding() {
     // BUG-NEW (MED): normalise to a hidden ("password") state on each init,
     // so a stale-open visibility state from a prior wizard cycle can't stick.
     input.type = "password";
+    // BUG-132-02 (LOW): the onboarding DOM persists across resets, so a
+    // passphrase typed in a prior wizard cycle is retained/exposed here on
+    // the next init (e.g. after Reset Node). Clear the value on each init.
+    input.value = "";
     toggle.textContent = "Show";
     toggle.addEventListener("click", function () {
       if (input.type === "password") {

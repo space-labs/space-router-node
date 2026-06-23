@@ -426,7 +426,17 @@ async def _submit_batch(
         )
 
     def _build_and_sign() -> tuple:
-        """Build tx, sign locally, return (tx_hash_hex, signed, w3_state)."""
+        """Build tx, sign locally, return (w3, signed, tx_hash_hex, gas_limit).
+
+        Pre-flight gas-balance guard (BUG-132): before signing/broadcast
+        we compare the claim wallet's native balance against the worst-
+        case gas cost (``gas_limit * gas_price``). If it can't cover gas
+        we return ``("insufficient_gas", ...)`` as the first element so
+        the caller aborts the whole run WITHOUT broadcasting or entering
+        the long ``wait_for_transaction_receipt``. Failing fast here is
+        what releases ``claim.lock`` promptly so a later "Retry all"
+        isn't blocked behind a doomed claim (see BUG-132-03).
+        """
         from web3 import Web3
         from eth_account import Account
 
@@ -455,6 +465,28 @@ async def _submit_batch(
             gas_limit = min(350_000 * len(kept_batch), GAS_CAP)
             logger.warning("Gas estimation failed (%s); falling back to %d", e, gas_limit)
 
+        gas_price = w3.eth.gas_price
+
+        # Pre-flight balance check — fund-the-wallet failures are by far
+        # the most common claim failure (BUG-132). Detecting them before
+        # broadcast turns a 120s doomed receipt-wait (lock held the whole
+        # time) into an immediate, actionable abort. Best-effort: if the
+        # balance read itself raises, fall through and let broadcast-time
+        # detection (``_is_insufficient_funds_error``) classify it.
+        try:
+            balance = w3.eth.get_balance(account.address)
+            required = gas_limit * gas_price
+            if balance < required:
+                logger.warning(
+                    "Pre-flight: claim wallet %s has %d wei, needs ~%d wei "
+                    "for gas (gas_limit=%d * gas_price=%d) — aborting before "
+                    "broadcast.",
+                    account.address, balance, required, gas_limit, gas_price,
+                )
+                return "insufficient_gas", balance, required, account.address
+        except Exception as e:
+            logger.debug("Pre-flight balance check skipped (%s)", e)
+
         nonce = w3.eth.get_transaction_count(account.address)
         tx = contract.functions.claimBatch(
             receipts_tuples, signatures,
@@ -462,7 +494,7 @@ async def _submit_batch(
             "from": account.address,
             "nonce": nonce,
             "gas": gas_limit,
-            "gasPrice": w3.eth.gas_price,
+            "gasPrice": gas_price,
             "chainId": settings.ESCROW_CHAIN_ID,
         })
         signed = account.sign_transaction(tx)
@@ -484,6 +516,29 @@ async def _submit_batch(
             submitted=len(kept_batch), tx_hash=None, gas_used=None,
             error=f"RPC unreachable: {settings.ESCROW_CHAIN_RPC}",
             reason_code=reasons.CLAIM_RPC_UNREACHABLE,
+            sig_verify_dropped=len(dropped_uuids),
+        )
+        kept_uuids = [sr.receipt.request_uuid for sr in kept_batch]
+        await store.mark_claim_failed(
+            kept_uuids, result.reason_code, result.error,
+        )
+        return result
+
+    if w3 == "insufficient_gas":
+        # Pre-flight detected the claim wallet can't cover gas. Abort the
+        # batch BEFORE broadcasting — no tx is sent, no receipt-wait, so
+        # the lock is released immediately and a later "Retry all" isn't
+        # blocked behind a doomed run. No breadcrumb was set (nothing in
+        # flight). Transient code → receipts stay queued, no retry budget
+        # consumed (CLAIM_INSUFFICIENT_GAS is in TRANSIENT_CODES).
+        _flag, balance, required, wallet = built
+        result = ClaimResult(
+            submitted=len(kept_batch), tx_hash=None, gas_used=None,
+            error=(
+                f"insufficient gas — fund the wallet and retry "
+                f"(wallet {wallet} has {balance} wei, needs ~{required} wei)"
+            ),
+            reason_code=reasons.CLAIM_INSUFFICIENT_GAS,
             sig_verify_dropped=len(dropped_uuids),
         )
         kept_uuids = [sr.receipt.request_uuid for sr in kept_batch]
