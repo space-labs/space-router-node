@@ -29,6 +29,20 @@ from app.version import __version__
 
 logger = logging.getLogger(__name__)
 
+# The coordination server verifies our inbound endpoint INSIDE the register
+# request: a CONNECT challenge back to this node, an egress-IP check routed
+# through our proxy, then an IP classification. Each carries its own
+# multi-second timeout, so its honest answer -- including the 422 that tells an
+# operator their port is not reachable -- can legitimately arrive tens of
+# seconds in.
+#
+# At 15s we often gave up first, reported "Connection to coordination server
+# interrupted", and then retried a registration the server had already
+# completed. 45s outwaits the server's worst realistic budget (~40s) while
+# still bounding the call. Registration is retried with backoff, so waiting
+# longer for a truthful answer beats answering sooner with a wrong one.
+REGISTER_TIMEOUT_SECONDS = 45.0
+
 # Services tried in order for IP detection
 _IP_SERVICES = [
     ("https://httpbin.org/ip", "origin"),
@@ -158,7 +172,9 @@ async def _do_register(
         url, endpoint_url, log_wallet, "v0.2.0" if use_v2 else "v0.1.2",
     )
 
-    resp = await http_client.post(url, json=payload, timeout=15.0)
+    resp = await http_client.post(
+        url, json=payload, timeout=REGISTER_TIMEOUT_SECONDS,
+    )
     resp.raise_for_status()
     data = resp.json()
 
