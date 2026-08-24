@@ -3,10 +3,37 @@
 
 import os
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
 block_cipher = None
 _codesign_identity = os.environ.get("CODESIGN_IDENTITY")
+
+# Distribution METADATA, not just module code. eth-keyfile >= 0.10 performs an
+# importlib.metadata lookup at import time, so a frozen build that bundles the
+# module but not its .dist-info dies with:
+#   PackageNotFoundError: No package metadata was found for py_ecc
+# ...from `from eth_account import Account`, which the node does on every cold
+# start to load or create its identity key. The build stayed green for months
+# and then broke with zero code change, because eth-account/eth-keyfile are
+# range-pinned (`>=0.13,<1`) and 0.14.0 / 0.10.0 landed upstream.
+#
+# Tolerant of absence so the spec does not hard-fail if a package is dropped.
+_metadata_packages = [
+    "py_ecc",
+    "eth_account",
+    "eth_keyfile",
+    "eth_keys",
+    "eth_hash",
+    "eth_utils",
+    "hexbytes",
+    "web3",
+]
+metadatas = []
+for _pkg in _metadata_packages:
+    try:
+        metadatas += copy_metadata(_pkg)
+    except Exception:
+        pass
 
 hiddenimports = [
     # Conditionally imported at runtime
@@ -86,7 +113,7 @@ a = Analysis(
         # fails on ``--claim``/startup with FileNotFoundError.
         ("app/payment/escrow_abi.json", "payment"),
         ("app/payment/escrow_abi.json", "app/payment"),
-    ],
+    ] + metadatas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
