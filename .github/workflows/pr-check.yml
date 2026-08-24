@@ -20,6 +20,33 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: pytest tests/ -v
 
+  # GUI frontend tests. These load the real gui/assets/index.html +
+  # gui/assets/app.js into jsdom and drive updateStatus() with status payloads
+  # generated from the real app.state.NodeStateMachine, so a regression in the
+  # status-rendering logic fails the PR instead of reaching QA.
+  gui-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+      # The status fixtures are generated from app/state.py — fail the PR if
+      # they have drifted from the backend rather than testing a stale shape.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Fixtures match the current NodeStatus
+        run: |
+          python tests/js/fixtures/gen_status_sequence.py
+          git diff --quiet -- tests/js/fixtures/status_sequence.json \
+            || { echo "::error::status fixtures are stale — rerun tests/js/fixtures/gen_status_sequence.py"; \
+                 git diff -- tests/js/fixtures/status_sequence.json; exit 1; }
+
   # Lightweight build check — single platform (Linux), no signing, no
   # installers. Catches PyInstaller/import breakage without burning macOS
   # or Windows runner minutes. Full multi-platform build runs on merge.

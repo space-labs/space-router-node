@@ -42,3 +42,7 @@ htmlcov/
 Thumbs.db
 
 certs/
+
+# Node (GUI frontend test harness only — see package.json)
+node_modules/
+npm-debug.log*

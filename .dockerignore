@@ -1,0 +1,15 @@
+# The Dockerfile does `COPY . .`, so keep local build/test artefacts out of the
+# image (and out of the build context, which is otherwise sent to the daemon).
+.git/
+.venv/
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+dist/
+build/
+
+# GUI frontend test harness (dev-only, see package.json / tests/js/)
+node_modules/
+package-lock.json

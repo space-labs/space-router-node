@@ -134,6 +134,21 @@ pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
 
+The desktop GUI frontend (`gui/assets/app.js`) has its own suite. It loads the
+real `index.html` + `app.js` into jsdom and drives `updateStatus()` with status
+payloads generated from the real `app.state.NodeStateMachine`:
+
+```bash
+npm install        # once — installs jsdom (dev-only, not shipped)
+npm test           # == node --test "tests/js/**/*.test.mjs"
+```
+
+Regenerate the status fixtures after changing `NodeStatus.to_dict()`:
+
+```bash
+python tests/js/fixtures/gen_status_sequence.py
+```
+
 ## API contract
 
 The Home Node communicates with two components:

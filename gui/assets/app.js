@@ -693,6 +693,27 @@ async function showStakingModal(onContinue) {
 
 let errorReportShownForKey = null;  // track to show only once per error
 
+// BUG-A: this guard used to be cleared unconditionally by every start-phase
+// case in updateStatus()'s switch. That defeated it entirely during a retry
+// loop: NodeManager._schedule_retry restarts the whole lifecycle, so a node
+// stuck on one error replays initializing -> binding -> registering on every
+// attempt and cleared the guard three times per cycle. Once retry_count
+// crossed 3 the "Send Error Report?" modal reappeared on every single cycle
+// (QA, v1.5.2-test.134).
+//
+// Clear it only when this really is a *fresh* lifecycle rather than a replayed
+// attempt. retry_count is exactly that signal: NodeStateMachine keeps it across
+// error_transient -> initializing -> ... and only zeroes it on running/idle/
+// passphrase_required or when NodeManager.start()/retry() calls _sm.reset().
+// The unconditional resets on `idle` and `running` are deliberately kept — a
+// node that genuinely recovered or was stopped should be able to raise the
+// modal again for the next incident.
+function resetErrorReportGuardOnFreshStart(status) {
+  if ((status.retry_count || 0) === 0) {
+    errorReportShownForKey = null;
+  }
+}
+
 function showErrorReportModal() {
   const overlay = $("#error-report-overlay");
   // Reset to initial state
@@ -925,6 +946,96 @@ function renderCoordRecoveryHint(status) {
   el.style.display = "block";
 }
 
+// ── Retry-loop latch (BUG-A / BUG-B) ──
+//
+// A node that cannot register does NOT sit in error_transient. After the
+// backoff, NodeManager._schedule_retry restarts _run_loop from scratch and
+// app.main._run replays the whole lifecycle, so what the GUI actually polls is
+//
+//   initializing -> binding -> registering -> error_transient
+//   -> initializing -> binding -> registering -> error_transient -> ...
+//
+// with two backend quirks that matter here (app/state.py):
+//   * NodeStateMachine.transition() clears error_code/error_message on the way
+//     out of an error state, so the code is visible on only one poll in four;
+//   * it keeps retry_count until the node reaches running/idle/passphrase,
+//     i.e. retry_count > 0 in a start phase means "this is a replayed attempt,
+//     not a fresh start".
+//
+// Latching the error across the loop is what lets the status line hold one
+// honest phrase (BUG-B), and retry_count is the signal that tells a replayed
+// attempt apart from an operator-driven restart (BUG-A).
+let retryLoop = null;  // { code, message, count } while a retry loop is running
+
+// Error codes that mean "the coordination link is down". Kept identical to the
+// staking-status mapping in updateStatus() (BUG-05b).
+const COORD_OFFLINE_CODES = [
+  "network_unreachable",
+  "endpoint_unreachable",
+  "connection_lost",
+  "coordination_unreachable",
+];
+
+// The states a retry loop passes through: the error state itself plus the
+// lifecycle phases the daemon replays on every attempt.
+const RETRY_LOOP_STATES = [
+  "initializing",
+  "binding",
+  "registering",
+  "reconnecting",
+  "error_transient",
+];
+
+// Recompute the latch from one status poll. Returns the live loop, or null.
+function updateRetryLoop(status) {
+  const state = status.state || "idle";
+  const count = status.retry_count || 0;
+  if (count === 0 || !RETRY_LOOP_STATES.includes(state)) {
+    // retry_count is zeroed by the state machine on idle/running/passphrase
+    // and by NodeManager.start()/retry() calling _sm.reset(), so this covers
+    // both "the node recovered" and "the operator restarted it".
+    retryLoop = null;
+    return null;
+  }
+  const code = (status.error_code || "").toLowerCase();
+  if (code) {
+    retryLoop = {
+      code: code,
+      message: status.error_message || status.detail || "",
+      count: count,
+    };
+  } else {
+    // Either a mid-cycle poll (the backend has already wiped the code) or the
+    // GUI was opened part-way through an outage and hasn't seen an
+    // error_transient poll yet. Keep whatever we know and advance the attempt
+    // counter; an unknown code still gives a stable line rather than a flicker,
+    // and the specific label arrives on the next error_transient poll.
+    retryLoop = {
+      code: retryLoop ? retryLoop.code : "",
+      message: retryLoop ? retryLoop.message : "",
+      count: count,
+    };
+  }
+  return retryLoop;
+}
+
+// The one detail line shown for the whole loop. It stays live — the attempt
+// number climbs and the backoff counts down — without the phrase itself
+// changing out from under the operator.
+function retryLoopDetail(status, loop) {
+  const base = loop.message || "Retrying registration";
+  // next_retry_at is only meaningful while the node is parked in
+  // error_transient waiting out the backoff. During the replayed
+  // initializing/binding/registering phases it is a stale past timestamp.
+  if (status.state === "error_transient" && status.next_retry_at) {
+    const secsLeft = Math.max(0, Math.ceil(status.next_retry_at - Date.now() / 1000));
+    if (secsLeft > 0) {
+      return base + " (Attempt " + loop.count + ", retry in " + secsLeft + "s)";
+    }
+  }
+  return base + " (Attempt " + loop.count + ", reconnecting…)";
+}
+
 function showStatus() {
   show("screen-status");
   updateStatus();
@@ -972,6 +1083,14 @@ async function updateStatus() {
       identityEl.title = fullIdentity;
     }
 
+    // BUG-A / BUG-B: work out up-front whether this poll is part of a
+    // registration/reconnect retry loop. Both the staking-status label below
+    // and the main status line need the answer, and the answer depends on
+    // state the backend has already cleared from this payload.
+    const retryInfo = updateRetryLoop(status);
+    const retryOffline = retryInfo !== null
+      && COORD_OFFLINE_CODES.includes(retryInfo.code);
+
     // Staking status display
     const stakingStatusEl = $("#staking-status");
     const ss = status.staking_status || "—";
@@ -998,27 +1117,42 @@ async function updateStatus() {
       stakingStatusClass = ss === "earning" ? " staking-earning"
         : ss === "qualifying" ? " staking-qualifying"
         : " staking-inactive";
-    } else if ((ss === "—" || !ss) && ["initializing", "binding", "registering", "running"].includes(ssState)) {
-      // rc.11 #9 + v1.5.2: also cover `running` here. On (re)registration the
-      // daemon resets staking_status to the em-dash sentinel, so the node can
-      // briefly be `running` with "—" before the first probe returns. Show the
-      // neutral "Initializing…" rather than a bare "-"/stale-looking token.
-      stakingStatusLabel = "Initializing…";
-    } else if ((ss === "—" || !ss) && ["error_transient", "reconnecting"].includes(ssState)) {
-      // BUG-05b: while retrying registration (e.g. the coordination API is
-      // offline) the node cycles error_transient -> initializing without ever
-      // getting a staking_status, which flickered between "Initializing…" and
-      // "-". Show a single stable status instead, and mark it red when the
-      // error is a coordination/network reach failure so the operator can see
-      // it's not progressing.
-      const ec = (status.error_code || "").toLowerCase();
-      if (["network_unreachable", "endpoint_unreachable", "connection_lost",
-           "coordination_unreachable"].includes(ec)) {
+    } else if ((ss === "—" || !ss) && retryInfo) {
+      // BUG-B — this is the branch BUG-05b was reaching for and missed.
+      //
+      // "retrying registration, coord unreachable, no staking_status yet" was
+      // rendered by TWO branches with two different strings: the
+      // initializing/binding/registering branch below said "Initializing…" and
+      // the error_transient/reconnecting branch said "Coordination offline".
+      // Because the daemon replays initializing -> binding -> registering on
+      // every retry attempt, the operator saw those two strings alternate on a
+      // 3s poll. BUG-05b only renamed the error_transient side of the flicker
+      // (from "-" to "Coordination offline"); it did not remove it.
+      //
+      // Keyed off the latched retry loop (which survives the polls where the
+      // backend has already wiped error_code) this one branch now owns the
+      // whole condition and renders one string for the whole loop.
+      if (retryOffline) {
         stakingStatusLabel = "Coordination offline";
         stakingStatusClass = " staking-inactive";
       } else {
         stakingStatusLabel = "Reconnecting…";
       }
+    } else if ((ss === "—" || !ss) && ["initializing", "binding", "registering", "running"].includes(ssState)) {
+      // rc.11 #9 + v1.5.2: also cover `running` here. On (re)registration the
+      // daemon resets staking_status to the em-dash sentinel, so the node can
+      // briefly be `running` with "—" before the first probe returns. Show the
+      // neutral "Initializing…" rather than a bare "-"/stale-looking token.
+      //
+      // Reached only on a genuine first attempt now — a replayed attempt has
+      // retry_count > 0 and is caught by the retry-loop branch above.
+      stakingStatusLabel = "Initializing…";
+    } else if ((ss === "—" || !ss) && ["error_transient", "reconnecting"].includes(ssState)) {
+      // BUG-05b, residual case: an error/reconnect state that is not part of a
+      // latched retry loop yet — the first RUNNING -> RECONNECTING poll, where
+      // transition() has already zeroed retry_count and no error has been
+      // classified. Everything with retry_count > 0 is handled above.
+      stakingStatusLabel = "Reconnecting…";
     } else {
       stakingStatusLabel = ss;
     }
@@ -1063,19 +1197,19 @@ async function updateStatus() {
         dot.className = "dot dot-starting";
         text.textContent = "Initializing...";
         detail.textContent = status.detail || "Loading certificates";
-        errorReportShownForKey = null;
+        resetErrorReportGuardOnFreshStart(status);
         break;
       case "binding":
         dot.className = "dot dot-starting";
         text.textContent = "Starting server...";
         detail.textContent = status.detail || "";
-        errorReportShownForKey = null;
+        resetErrorReportGuardOnFreshStart(status);
         break;
       case "registering":
         dot.className = "dot dot-starting";
         text.textContent = "Registering...";
         detail.textContent = status.detail || "";
-        errorReportShownForKey = null;
+        resetErrorReportGuardOnFreshStart(status);
         break;
       case "running":
         dot.className = "dot dot-running";
@@ -1091,7 +1225,7 @@ async function updateStatus() {
         dot.className = "dot dot-reconnecting";
         text.textContent = "Reconnecting...";
         detail.textContent = status.detail || "";
-        errorReportShownForKey = null;
+        resetErrorReportGuardOnFreshStart(status);
         break;
       case "error_transient":
         dot.className = "dot dot-reconnecting";
@@ -1176,6 +1310,22 @@ async function updateStatus() {
         dot.className = "dot dot-stopped";
         text.textContent = "Stopped";
         detail.textContent = "";
+    }
+
+    // BUG-B: hold the main status line steady for the duration of a retry
+    // loop. The switch above picked a different phrase for each of the four
+    // states the daemon replays per attempt, so an operator watching a node
+    // that could not register saw "Initializing..." / "Starting server..." /
+    // "Registering..." / "Retrying..." cycling on a 3s poll and could not tell
+    // whether anything was progressing. Collapse them to the one phrase that is
+    // true for the whole loop and keep the live information (attempt number,
+    // backoff countdown) in the detail line, which is a tick rather than a
+    // flicker. A first, non-retry attempt is untouched: retryInfo is null while
+    // retry_count is 0, so a normal cold start still shows its real phases.
+    if (retryInfo) {
+      dot.className = "dot dot-reconnecting";
+      text.textContent = "Retrying...";
+      detail.textContent = retryLoopDetail(status, retryInfo);
     }
 
     // Show error report modal:
