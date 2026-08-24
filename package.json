@@ -1,0 +1,12 @@
+{
+  "name": "space-router-node-gui-tests",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Test-only harness for the Space Router node GUI frontend (gui/assets/app.js).",
+  "scripts": {
+    "test": "node --test \"tests/js/**/*.test.mjs\""
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}
