@@ -247,7 +247,7 @@ class Settings(BaseModel):
             return cls()
 
         try:
-            raw = json.loads(path.read_text())
+            raw = json.loads(path.read_text(encoding="utf-8-sig"))
         except json.JSONDecodeError as e:
             raise ValueError(
                 f"settings.json at {path} is not valid JSON: {e.msg} "

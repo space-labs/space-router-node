@@ -318,3 +318,29 @@ test("BUG B: a genuine cold start still shows real per-phase progress", async ()
     gui.close();
   }
 });
+
+// ── QA .136 regression: duplicated retry text ────────────────────────────────
+
+test("BUG: the retry detail must not carry two attempt suffixes", async () => {
+  const gui = await bootGui();
+
+  // The exact shape that produced it: no error_message, so app.js falls back
+  // to status.detail, which the state machine already suffixed.
+  const frame = await gui.render({
+    state: "error_transient",
+    error_code: "endpoint_unreachable",
+    error_message: null,
+    detail: "Coordination server cannot reach this node. Retrying... (Attempt 1, retry in 3s)",
+    retry_count: 1,
+    next_retry_at: Date.now() / 1000 + 3,
+    error_report_available: true,
+    staking_status: "-",
+  });
+
+  const detail = frame.detail;
+  const attempts = (detail.match(/\(Attempt/gi) || []).length;
+  assert.strictEqual(
+    attempts, 1,
+    `status detail shows ${attempts} attempt suffixes: ${JSON.stringify(detail)}`,
+  );
+});

@@ -5,6 +5,7 @@ Provides:
 - Live status dashboard that updates in place while the node runs
 """
 
+import sys
 import logging
 import logging.handlers
 import time
@@ -88,7 +89,23 @@ def wizard_select(prompt: str, choices: list[tuple[str, str]], default: int = 0)
         console.print(f"     [red]Please enter a number between 1 and {len(choices)}[/]")
 
 
+class NonInteractiveError(RuntimeError):
+    """Raised when the wizard needs input but there is no usable stdin."""
+
+
 def wizard_input(prompt: str, default: str = "", password: bool = False) -> str:
+    # Running with stdin closed or redirected (a service manager, `nohup`, a
+    # CI step, `< /dev/null`) used to surface as a bare EOFError traceback the
+    # moment the wizard asked its first question. Fail with an actionable
+    # message instead, and honour a default when one exists.
+    if not _stdin_is_interactive():
+        if default:
+            return default
+        raise NonInteractiveError(
+            f"{prompt}: no interactive terminal available. Re-run attached to a "
+            f"terminal, or supply this value via a flag / environment variable "
+            f"(see --help)."
+        )
     return Prompt.ask(
         f"     {prompt}",
         default=default or None,
@@ -97,7 +114,18 @@ def wizard_input(prompt: str, default: str = "", password: bool = False) -> str:
     ) or ""
 
 
+def _stdin_is_interactive() -> bool:
+    try:
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except Exception:
+        return False
+
+
 def wizard_confirm(prompt: str, default: bool = False) -> bool:
+    # Same non-interactive guard as wizard_input; a confirm always has a
+    # default, so it can answer without a terminal.
+    if not _stdin_is_interactive():
+        return default
     return Confirm.ask(f"     {prompt}", default=default, console=console)
 
 

@@ -485,6 +485,19 @@ class Api:
             return {"ok": False, "error": str(exc)}
         return {"ok": True}
 
+    @staticmethod
+    def _identity_address() -> str | None:
+        """The node's EVM identity address, or None when not yet known.
+
+        app/main.py exports this into the environment once the daemon has
+        loaded or created the identity key. Deliberately does NOT fall back to
+        load_or_create_identity: a status poll must never create a key or
+        block on a passphrase prompt. None is honest; the node UUID that used
+        to be sent here is not an address at all.
+        """
+        import os
+        return os.environ.get("_SR_IDENTITY_ADDRESS") or None
+
     def get_status(self) -> dict:
         """Return current node status for the dashboard."""
         staking = self._config.get("SR_STAKING_ADDRESS")
@@ -493,6 +506,10 @@ class Api:
         api_url = self._config.get("SR_COORDINATION_API_URL")
         ns = self._node.status
         return {
+            # Everything NodeStatus publishes, so this payload cannot drift
+            # from what the dashboard reads. It used to be hand-rolled and
+            # silently lost error_message / rpc_status / rpc_status_detail.
+            **ns.to_dict(),
             # New state machine fields
             "state": ns.state.value,
             "detail": ns.detail,
@@ -503,7 +520,7 @@ class Api:
             # rc.5 F2: surface the identity address explicitly so the
             # GUI's Wallet panel doesn't have to know that node_id IS
             # the identity address (a coincidence of the architecture).
-            "identity_address": ns.node_id,
+            "identity_address": self._identity_address(),
             "cert_expiry_warning": ns.cert_expiry_warning,
             # Backward-compatible fields
             "running": self._node.is_running,
