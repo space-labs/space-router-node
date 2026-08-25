@@ -1023,7 +1023,12 @@ function updateRetryLoop(status) {
 // number climbs and the backoff counts down — without the phrase itself
 // changing out from under the operator.
 function retryLoopDetail(status, loop) {
-  const base = loop.message || "Retrying registration";
+  // Strip any attempt suffix the backend already baked in. status.detail is
+  // built as "<message> (Attempt N, retry in Xs)", and app.js falls back to it
+  // when error_message is absent, so appending our own suffix produced
+  // "(Attempt 1, retry in 3s) (Attempt 1, reconnecting...)" (QA, .136).
+  const base = (loop.message || "Retrying registration")
+    .replace(/\s*\(Attempt[^)]*\)\s*$/i, "");
   // next_retry_at is only meaningful while the node is parked in
   // error_transient waiting out the backoff. During the replayed
   // initializing/binding/registering phases it is a stale past timestamp.
@@ -1069,7 +1074,10 @@ async function updateStatus() {
     // Wallet addresses (truncated, full on hover)
     const fullStaking = status.staking_address || status.wallet || "";
     const fullCollection = status.collection_address || "";
-    const fullIdentity = status.identity_address || status.node_id || "";
+    // Never fall back to node_id here: it is a UUID, and a UUID rendered
+    // in an "Identity" chip reads as a wrong address rather than as an
+    // absent one. "-" is the honest placeholder until the daemon reports it.
+    const fullIdentity = status.identity_address || "";
     stakingEl.textContent = truncateAddress(fullStaking) || "-";
     stakingEl.title = fullStaking;
     collectionEl.textContent = truncateAddress(fullCollection) || "-";
@@ -1926,7 +1934,7 @@ function showUnlockDialog(hint) {
   }
 
   const btn = $("#btn-unlock");
-  const input = $("#unlock-passphrase");
+  let input = $("#unlock-passphrase");
   const errEl = $("#unlock-error");
 
   // Pre-populate the error label when we re-enter this dialog after a
@@ -1941,12 +1949,15 @@ function showUnlockDialog(hint) {
   const newBtn = btn.cloneNode(true);
   btn.parentNode.replaceChild(newBtn, btn);
 
-  newBtn.addEventListener("click", async function () {
+  async function submitUnlock() {
     const passphrase = input.value;
     if (!passphrase) {
       errEl.textContent = "Passphrase is required";
       return;
     }
+    // Clear immediately, so a rejected passphrase is never left sitting in the
+    // box for the next attempt (BUG-132-02: it was only cleared on success).
+    input.value = "";
     newBtn.disabled = true;
     newBtn.textContent = "Unlocking...";
     errEl.textContent = "";
@@ -1955,7 +1966,6 @@ function showUnlockDialog(hint) {
       const result = await window.pywebview.api.unlock_and_start(passphrase);
       if (result.ok) {
         hide("dialog-overlay");
-        input.value = "";
         showStatus();
       } else {
         errEl.textContent = result.error || "Incorrect passphrase";
@@ -1967,7 +1977,22 @@ function showUnlockDialog(hint) {
       newBtn.disabled = false;
       newBtn.textContent = "Unlock";
     }
+  }
+
+  newBtn.addEventListener("click", submitUnlock);
+
+  // Enter submits. A passphrase box that ignores Enter reads as broken, and
+  // clicking Unlock was previously the only way through (QA, .136).
+  const newInput = input.cloneNode(true);
+  input.parentNode.replaceChild(newInput, input);
+  input = newInput;
+  input.addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      submitUnlock();
+    }
   });
+  input.focus();
 }
 
 // ── Initialisation ──

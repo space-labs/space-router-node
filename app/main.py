@@ -190,9 +190,34 @@ def _first_run_setup(args=None) -> bool:
                 _, identity_address = load_or_create_identity(s.IDENTITY_KEY_PATH)
                 wizard_success(f"Identity key found: {identity_address}")
             except KeystorePassphraseRequired:
-                passphrase = wizard_input("Identity key is encrypted. Passphrase", password=True)
-                _, identity_address = load_or_create_identity(s.IDENTITY_KEY_PATH, passphrase)
-                wizard_success(f"Unlocked identity: {identity_address}")
+                # A wrong passphrase raises KeystoreWrongPassphrase, which is a
+                # SUBCLASS of KeystorePassphraseRequired. Calling the loader
+                # again outside a try meant one wrong entry escaped as a full
+                # traceback and killed the wizard (QA, .136). Retry instead,
+                # and fail with a readable message.
+                for _attempt in range(_PASSPHRASE_MAX_ATTEMPTS):
+                    passphrase = wizard_input(
+                        "Identity key is encrypted. Passphrase", password=True,
+                    )
+                    try:
+                        _, identity_address = load_or_create_identity(
+                            s.IDENTITY_KEY_PATH, passphrase,
+                        )
+                    except KeystoreWrongPassphrase:
+                        remaining = _PASSPHRASE_MAX_ATTEMPTS - _attempt - 1
+                        if remaining:
+                            wizard_error(
+                                f"Passphrase is incorrect — {remaining} attempt(s) left."
+                            )
+                            continue
+                        wizard_error(
+                            "Passphrase is incorrect. Re-run setup, or use "
+                            "--password-file to supply it non-interactively."
+                        )
+                        sys.exit(1)
+                    else:
+                        wizard_success(f"Unlocked identity: {identity_address}")
+                        break
         else:
             # --- Step 1: Identity Key ---
             wizard_step(step, "Identity Key")
@@ -728,6 +753,7 @@ _first_register_attempted: bool = False
 # succeeds. Bound the retry to first-launch only; runtime re-registrations
 # (the reconnect loop near line 2073) keep their own backoff and must not
 # get a second free pass on every reentry.
+_PASSPHRASE_MAX_ATTEMPTS = 3
 _FIRST_LAUNCH_RETRY_MAX_ATTEMPTS = 3
 _FIRST_LAUNCH_RETRY_SLEEP_S = 5
 
@@ -2666,11 +2692,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     wallet = parser.add_argument_group("wallet")
     wallet.add_argument(
         "--staking-address", metavar="ADDR",
-        help="EVM staking wallet address (0x followed by 40 hex chars)",
+        help="EVM staking wallet address (40 hex chars, 0x prefix optional)",
     )
     wallet.add_argument(
         "--collection-address", metavar="ADDR",
-        help="EVM collection wallet address (0x followed by 40 hex chars)",
+        help="EVM collection wallet address (40 hex chars, 0x prefix optional)",
     )
     wallet.add_argument(
         "--password-file", metavar="PATH",
@@ -3452,4 +3478,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from app.cli_ui import NonInteractiveError
+
+    try:
+        main()
+    except NonInteractiveError as exc:
+        # No usable stdin (service manager, nohup, CI, `< /dev/null`) and the
+        # node needed to ask something — typically the keystore passphrase.
+        # Exit with a readable message instead of a bare EOFError traceback.
+        print(f"space-router-node: {exc}", file=sys.stderr)
+        sys.exit(1)

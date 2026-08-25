@@ -270,7 +270,7 @@ def _read_staking_address_from_env(path: Path, require_marker: bool = False) -> 
     try:
         if not path.is_file():
             return None
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8-sig")
     except OSError:
         return None
 
