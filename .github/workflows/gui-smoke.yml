@@ -192,6 +192,65 @@ jobs:
           Get-Process -Name SpaceRouter -ErrorAction SilentlyContinue |
             ForEach-Object { try { Stop-Process -Id $_.Id -Force } catch {} }
 
+      - name: Scenario C — fresh profile, normal launch (onboarding screen)
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem gui-rc -Filter *.exe -Recurse | Select-Object -First 1).FullName
+          $iso = Join-Path $env:RUNNER_TEMP 'iso-onboard'
+          $cap = Join-Path $env:RUNNER_TEMP 'capture'
+          New-Item -ItemType Directory -Force -Path $iso | Out-Null
+          $env:USERPROFILE  = $iso
+          $env:HOME         = $iso
+          $env:APPDATA      = Join-Path $iso 'AppData\Roaming'
+          $env:LOCALAPPDATA = Join-Path $iso 'AppData\Local'
+          New-Item -ItemType Directory -Force -Path $env:APPDATA, $env:LOCALAPPDATA | Out-Null
+          $p = Start-Process -FilePath $exe -PassThru `
+            -RedirectStandardOutput (Join-Path $cap 'C-stdout.txt') `
+            -RedirectStandardError  (Join-Path $cap 'C-stderr.txt')
+          Start-Sleep -Seconds 30
+          "still alive after 30s: $(-not $p.HasExited)"
+          try {
+            Add-Type -AssemblyName System.Windows.Forms
+            Add-Type -AssemblyName System.Drawing
+            $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+            $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $bmp.Size)
+            $bmp.Save((Join-Path $cap 'C-onboarding.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+            "C screenshot saved"
+          } catch { "C screenshot failed: $($_.Exception.Message)" }
+          "=== C profile tree ==="
+          Get-ChildItem -Recurse $iso -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+          $log = Join-Path $iso '.spacerouter\logs\spacerouter-node.log'
+          if (Test-Path $log) { Copy-Item $log (Join-Path $cap 'C-spacerouter-node.log'); Get-Content $log }
+          try { Stop-Process -Id $p.Id -Force } catch {}
+          Get-Process -Name SpaceRouter -ErrorAction SilentlyContinue |
+            ForEach-Object { try { Stop-Process -Id $_.Id -Force } catch {} }
+
+      - name: Packaged Windows CLI — same miniupnpc question
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $cap = Join-Path $env:RUNNER_TEMP 'capture'
+          $iso = Join-Path $env:RUNNER_TEMP 'iso-cli'
+          New-Item -ItemType Directory -Force -Path (Join-Path $iso '.spacerouter\certs') | Out-Null
+          Set-Content -Path (Join-Path $iso '.spacerouter\certs\node-identity.key') -Value $env:SEED_KEY
+          gh run download $env:DEFAULT_RUN_ID -R ${{ github.repository }} `
+            -n 'spacerouter-proxy-cli-v1.5.2-test.140-windows-x64' -D cli-rc
+          $cli = (Get-ChildItem cli-rc -Filter *.exe -Recurse | Select-Object -First 1).FullName
+          "cli: $cli"
+          $env:USERPROFILE = $iso
+          $env:HOME        = $iso
+          $p = Start-Process -FilePath $cli -ArgumentList '--log-level', 'INFO' -PassThru `
+            -RedirectStandardOutput (Join-Path $cap 'E-cli-stdout.txt') `
+            -RedirectStandardError  (Join-Path $cap 'E-cli-stderr.txt')
+          if (-not $p.WaitForExit(120000)) { try { Stop-Process -Id $p.Id -Force } catch {} }
+          "=== E cli stdout ==="; Get-Content (Join-Path $cap 'E-cli-stdout.txt') -ErrorAction SilentlyContinue
+          "=== E cli stderr ==="; Get-Content (Join-Path $cap 'E-cli-stderr.txt') -ErrorAction SilentlyContinue
+          exit 0
+
       - name: miniupnpc diagnosis
         if: always()
         shell: pwsh
@@ -393,6 +452,27 @@ jobs:
             cat "$ISO/.spacerouter/logs/spacerouter-node.log"
           else
             echo "NO LOG FILE"
+          fi
+
+      - name: Scenario C — fresh HOME, normal launch (onboarding screen)
+        shell: bash
+        run: |
+          ISO="$RUNNER_TEMP/iso-onboard"; CAP="$RUNNER_TEMP/capture"
+          mkdir -p "$ISO"
+          APP="$RUNNER_TEMP/SpaceRouter Proxy.app/Contents/MacOS/SpaceRouter"
+          HOME="$ISO" "$APP" > "$CAP/C-stdout.txt" 2>&1 &
+          APP_PID=$!
+          sleep 30
+          if kill -0 $APP_PID 2>/dev/null; then echo "still alive after 30s: yes"; else echo "still alive after 30s: NO"; fi
+          screencapture -x "$CAP/C-onboarding.png" 2>&1 || echo "screencapture failed"
+          kill -TERM $APP_PID 2>/dev/null || true
+          sleep 3
+          kill -9 $APP_PID 2>/dev/null || true
+          pkill -9 -f "SpaceRouter Proxy.app" 2>/dev/null || true
+          echo "=== C stdout ==="; cat "$CAP/C-stdout.txt" || true
+          echo "=== C HOME tree ==="; find "$ISO" | head -30
+          if [ -f "$ISO/.spacerouter/logs/spacerouter-node.log" ]; then
+            cp "$ISO/.spacerouter/logs/spacerouter-node.log" "$CAP/C-spacerouter-node.log"
           fi
 
       - name: Embedded CLI inside the app bundle
