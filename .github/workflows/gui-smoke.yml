@@ -259,6 +259,19 @@ jobs:
                   pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
                   machine = hex(pe.FILE_HEADER.Machine)
                   print(f"  {p.name} machine={machine}")
+                  chars = pe.OPTIONAL_HEADER.DllCharacteristics
+                  dynamic_base = bool(chars & 0x0040)
+                  nx = bool(chars & 0x0100)
+                  reloc_size = 0
+                  for d in pe.OPTIONAL_HEADER.DATA_DIRECTORY:
+                      if d.name == "IMAGE_DIRECTORY_ENTRY_BASERELOC":
+                          reloc_size = d.Size
+                  print(f"    ImageBase=0x{pe.OPTIONAL_HEADER.ImageBase:x} DllCharacteristics=0x{chars:04x}")
+                  print(f"    DYNAMIC_BASE(ASLR)={dynamic_base} NX_COMPAT={nx} reloc_dir_size={reloc_size}")
+                  if not dynamic_base or reloc_size == 0:
+                      print("    ^ no ASLR / no relocation table: this image cannot be rebased,")
+                      print("      so LoadLibrary fails with ERROR_NOACCESS (998, 'Invalid access to")
+                      print("      memory location') if its preferred base is already occupied.")
                   for entry in getattr(pe, "DIRECTORY_ENTRY_IMPORT", []):
                       dep = entry.dll.decode()
                       where = "IN BUNDLE" if dep.lower() in meipass_names else "not in bundle"
