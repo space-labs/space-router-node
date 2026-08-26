@@ -16,14 +16,14 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact: spacerouter-proxy-cli-v1.5.2-test.139-windows-x64
-            binary: spacerouter-proxy-cli-v1.5.2-test.139-windows-x64.exe
+            artifact: spacerouter-proxy-cli-v1.5.2-test.140-windows-x64
+            binary: spacerouter-proxy-cli-v1.5.2-test.140-windows-x64.exe
           - os: macos-14
-            artifact: spacerouter-proxy-cli-v1.5.2-test.139-macos-arm64
-            binary: spacerouter-proxy-cli-v1.5.2-test.139-macos-arm64
+            artifact: spacerouter-proxy-cli-v1.5.2-test.140-macos-arm64
+            binary: spacerouter-proxy-cli-v1.5.2-test.140-macos-arm64
           - os: ubuntu-latest
-            artifact: spacerouter-proxy-cli-v1.5.2-test.139-linux-x64
-            binary: spacerouter-proxy-cli-v1.5.2-test.139-linux-x64
+            artifact: spacerouter-proxy-cli-v1.5.2-test.140-linux-x64
+            binary: spacerouter-proxy-cli-v1.5.2-test.140-linux-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +40,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ inputs.run_id }}
         run: |
-          gh run download "${RUN_ID:-32961643682}" -R ${{ github.repository }} \
+          gh run download "${RUN_ID:-32962545771}" -R ${{ github.repository }} \
             -n "${{ matrix.artifact }}" -D rc
           ls -la rc
 
