@@ -46,6 +46,8 @@ jobs:
 
       - name: Regression
         shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
         run: |
           chmod +x "rc/${{ matrix.binary }}" 2>/dev/null || true
           python tests/e2e/regression.py --binary "rc/${{ matrix.binary }}"
