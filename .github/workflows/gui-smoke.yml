@@ -196,6 +196,7 @@ jobs:
           Start-Sleep -Seconds 5
           $held = (Get-NetTCPConnection -LocalPort 47891 -State Listen -ErrorAction SilentlyContinue)
           if ($held) { "port 47891 still held by pid(s): $($held.OwningProcess -join ',')" } else { "port 47891 free" }
+          exit 0
 
       - name: Scenario C — fresh profile, normal launch (onboarding screen)
         shell: pwsh
@@ -236,6 +237,7 @@ jobs:
           Start-Sleep -Seconds 5
           $held = (Get-NetTCPConnection -LocalPort 47891 -State Listen -ErrorAction SilentlyContinue)
           if ($held) { "port 47891 still held by pid(s): $($held.OwningProcess -join ',')" } else { "port 47891 free" }
+          exit 0
 
       - name: Packaged Windows CLI — same miniupnpc question
         if: always()
