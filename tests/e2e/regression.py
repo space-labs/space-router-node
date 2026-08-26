@@ -29,10 +29,13 @@ IS_WIN = sys.platform == "win32"
 results: list[tuple[str, bool, str]] = []
 
 
-def record(name: str, ok: bool, detail: str = "") -> None:
+def record(name: str, ok: bool, detail: str = "", output: str = "") -> None:
     results.append((name, ok, detail))
-    print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""),
+    print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" - {detail}" if detail else ""),
           flush=True)
+    if not ok and output:
+        excerpt = "\n".join(f"      | {line}" for line in output.splitlines()[:15])
+        print(excerpt, flush=True)
 
 
 def fresh_home(**settings) -> str:
@@ -118,9 +121,9 @@ def case_help_prefix_optional(b):
 
 def case_setup_no_tty(b):
     code, out = run(b, ["--setup"], fresh_home())
-    ok = ("requires a TTY" in out and "Traceback" not in out
+    ok = ("requires a TTY" in out and code == 2 and "Traceback" not in out
           and "Failed to execute script" not in out)
-    record("--setup without a TTY exits cleanly", ok, f"exit={code}")
+    record("--setup without a TTY exits cleanly", ok, f"exit={code}", out)
 
 
 def case_no_stdin_staking_prompt(b, staking):
@@ -170,9 +173,9 @@ def case_flag_overrides_settings(b):
 def case_missing_staking_refused(b):
     home = fresh_home(coordination={"url": COORD}, node={"port": 9099})
     code, out = run(b, ["--no-upnp"], home, timeout=40)
-    ok = ("staking" in out.lower() and "Traceback" not in out
+    ok = ("staking" in out.lower() and code == 1 and "Traceback" not in out
           and "Failed to execute script" not in out)
-    record("missing staking address is refused cleanly", ok, f"exit={code}")
+    record("missing staking address is refused cleanly", ok, f"exit={code}", out)
 
 
 # ── network cases ───────────────────────────────────────────────────────────
@@ -230,7 +233,7 @@ def case_wrong_password_file(b, staking):
     code, out = run(b, ["--no-upnp", "--password-file", pw], home, timeout=60)
     ok = ("Traceback" not in out and "Failed to execute script" not in out
           and "eth_keyfile" not in out and "passphrase" in out.lower())
-    record("wrong --password-file exits cleanly, no traceback", ok, f"exit={code}")
+    record("wrong --password-file exits cleanly, no traceback", ok, f"exit={code}", out)
 
 
 def main() -> int:
