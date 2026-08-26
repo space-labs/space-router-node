@@ -54,6 +54,7 @@ def run(binary, args, home, timeout=25, stdin_devnull=True):
             env=env,
             stdin=subprocess.DEVNULL if stdin_devnull else None,
             capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace",
         )
         return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
     except subprocess.TimeoutExpired as exc:
@@ -68,7 +69,7 @@ def run_until(binary, args, home, seconds, needle=None):
     env = dict(os.environ, HOME=home, USERPROFILE=home)
     env.pop("SR_STAKING_ADDRESS", None)
     log = os.path.join(home, "run.log")
-    with open(log, "w") as fh:
+    with open(log, "w", encoding="utf-8", errors="replace") as fh:
         kwargs = {}
         if IS_WIN:
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -81,7 +82,7 @@ def run_until(binary, args, home, seconds, needle=None):
             if proc.poll() is not None:
                 break
             if needle:
-                with open(log, errors="replace") as rh:
+                with open(log, encoding="utf-8", errors="replace") as rh:
                     if needle in rh.read():
                         break
         if proc.poll() is None:
@@ -90,7 +91,7 @@ def run_until(binary, args, home, seconds, needle=None):
                 proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 proc.kill()
-    with open(log, errors="replace") as rh:
+    with open(log, encoding="utf-8", errors="replace") as rh:
         return rh.read()
 
 
