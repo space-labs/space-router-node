@@ -13,10 +13,11 @@ budget on receipts that are actually settled.
 This module provides one canonical lock acquisition path used from both
 surfaces (P3/L3 in the v1.5 plan). The lock file is
 ``~/.spacerouter/claim.lock`` — ``fcntl.flock`` on POSIX,
-``msvcrt.locking`` on Windows. Stale-lock recovery is automatic: on
-Windows ``LK_NBLCK`` is released by the OS when the holder process
-exits; on POSIX ``flock`` likewise releases when the owning fd is
-closed (process death drops the fd).
+``msvcrt.locking`` on Windows. Stale-lock recovery is automatic: the
+OS releases the lock when the holder dies, and anything the OS holds on
+to past that point (a delayed Windows release, an orphaned child that
+inherited the descriptor, a recycled PID) is resolved by the holder-stamp
+check in :func:`acquire_claim_lock`.
 
 Use as a context manager::
 
@@ -40,10 +41,15 @@ import contextlib
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Iterator
 
 logger = logging.getLogger(__name__)
+
+_RECLAIM_ATTEMPTS = 8
+_RECLAIM_DELAY_S = 0.25
+_COMM_MAX_LEN = 15
 
 
 class ClaimLockHeld(Exception):
@@ -65,22 +71,51 @@ def claim_lock_path(settings) -> Path:
     return receipts_db.parent / "claim.lock"
 
 
-def _stamped_pid(lock_path: Path) -> int | None:
-    """Read the holder PID stamped into the lock file, or ``None``.
+def _image_name(name: str | None) -> str:
+    """Normalize a process image name so two spellings of it compare equal.
 
-    The PID is best-effort metadata (see :func:`acquire_claim_lock`), so
-    an empty, partially-written, or non-integer file all return ``None``.
+    Linux ``/proc/<pid>/comm`` truncates to 15 bytes and Windows adds an
+    ``.exe`` suffix, so both sides are lowercased, de-suffixed and cut to
+    that width before comparison.
+    """
+    if not name:
+        return ""
+    base = os.path.basename(name.strip()).lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+    return base[:_COMM_MAX_LEN]
+
+
+def _our_image_name() -> str:
+    """Image name of this claim process — frozen binary or interpreter."""
+    return _image_name(sys.executable)
+
+
+def _stamped_holder(lock_path: Path) -> tuple[int | None, str | None]:
+    """Read the ``(pid, image name)`` stamped into the lock file.
+
+    Line 1 is the holder PID, line 2 its image name. The image line is
+    optional: a stamp written by a pre-v1.5.2 build carries the PID
+    alone and yields ``(pid, None)``. An empty, partially-written or
+    non-integer file yields ``(None, None)``.
     """
     try:
-        text = lock_path.read_text().strip()
+        lines = [ln.strip() for ln in lock_path.read_text().splitlines()]
     except Exception:
-        return None
-    if not text:
-        return None
+        return None, None
+    lines = [ln for ln in lines if ln]
+    if not lines:
+        return None, None
     try:
-        return int(text.splitlines()[0])
+        pid = int(lines[0].split()[0])
     except (ValueError, IndexError):
-        return None
+        return None, None
+    return pid, (_image_name(lines[1]) if len(lines) > 1 else None)
+
+
+def _stamped_pid(lock_path: Path) -> int | None:
+    """Holder PID stamped into the lock file, or ``None``."""
+    return _stamped_holder(lock_path)[0]
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -109,38 +144,66 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
-@contextlib.contextmanager
-def acquire_claim_lock(settings) -> Iterator[Path]:
-    """Acquire ``claim.lock`` exclusively or raise :class:`ClaimLockHeld`.
+def _pid_image_name(pid: int) -> str | None:
+    """Image name of a live PID, or ``None`` when it cannot be determined."""
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{pid}/comm") as fh:
+                return _image_name(fh.read()) or None
+        except Exception:
+            return None
+    if sys.platform == "win32":
+        return None
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True, text=True, timeout=2,
+        )
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    return _image_name(out.stdout) or None
 
-    Yields the resolved lock path so callers can surface it in error
-    messages. Releases the lock on exit. Stale-lock recovery is
-    inherited from the OS primitive (POSIX ``flock`` releases on fd
-    close → process death; Windows ``msvcrt.locking`` with
-    ``LK_NBLCK`` releases on holder process exit).
 
-    Implementation note: the underlying file handle stays open for the
-    duration of the ``with`` block; we never close+reopen mid-flight,
-    which is what would let another process race in.
+def _holder_is_live_claim(pid: int | None, image: str | None) -> bool:
+    """True only when the stamped holder is a live process that is one of ours.
 
-    Stale-lock reclaim: when the exclusive lock is contended we read the
-    holder PID stamped in the file and probe it with ``os.kill(pid, 0)``.
-    If the holder is dead (crashed / killed) — or the stamp is
-    unreadable — we reclaim the lock and proceed; only a *live* holder
-    raises :class:`ClaimLockHeld`. This recovers the field case (BUG-132)
-    where a doomed claim was killed mid-flight and left the file behind,
-    which previously forced operators to ``rm`` ``claim.lock`` by hand.
-    A live sibling claim still loses the race (the concurrency guard is
-    preserved). On Windows ``msvcrt.locking`` is released by the OS on
-    process exit, so a contended lock there is always a live holder —
-    we keep raising without a PID probe.
+    Mirrors ``_pid_is_our_daemon`` behind ``daemon.lock`` in
+    :mod:`app.main`: a bare liveness probe is not enough, because a
+    recycled PID belonging to an unrelated process would otherwise look
+    like a running claim and wedge the lock forever (BUG-136). A live
+    PID whose image we cannot read, and a legacy stamp with no image
+    line at all, both stay "held" — refusing a claim is always safer
+    than broadcasting a second ``claimBatch``.
     """
-    lock_path = claim_lock_path(settings)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if pid is None or pid <= 0 or not _pid_is_alive(pid):
+        return False
+    if image is None:
+        return True
+    running = _pid_image_name(pid)
+    if running is None:
+        return True
+    return running == image
 
-    is_windows = sys.platform == "win32"
 
-    def _try_lock(handle) -> None:
+def _open_lock(lock_path: Path):
+    """Open the lock file read/write, creating it without truncating.
+
+    Deliberately not append mode: ``O_APPEND`` forces every write to
+    end-of-file, which would defeat the in-place PID stamp. Not ``"w"``
+    either — truncating on open would destroy the holder stamp the
+    contention path needs to read. Binary/untranslated so the stamp's
+    byte length matches its character length on Windows too.
+    """
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    return os.fdopen(os.open(lock_path, flags, 0o644), "r+", newline="")
+
+
+def _try_lock(handle, is_windows: bool) -> bool:
+    """Take the OS exclusive lock, returning ``False`` when contended."""
+    try:
         if is_windows:
             import msvcrt
             handle.seek(0)
@@ -148,84 +211,131 @@ def acquire_claim_lock(settings) -> Iterator[Path]:
         else:
             import fcntl
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except (BlockingIOError, OSError):
+        return False
 
-    # Windows msvcrt.locking() needs read+write; POSIX flock() works on
-    # any open fd. Append-mode ("a+") on BOTH platforms so the file
-    # exists without truncating any contents on open — we need the
-    # stamped holder PID to survive the open() so the contention branch
-    # below can probe its liveness (a plain "w" open would truncate the
-    # stamp before we ever read it, defeating stale-lock reclaim). The
-    # PID is rewritten via explicit seek/truncate once we own the lock.
-    fd = open(lock_path, "a+")
+
+def _stamp_holder(handle) -> None:
+    """Record this process's PID and image name in the locked file.
+
+    The new content is written before the file is truncated, so a
+    process killed part-way through the stamp leaves the previous line
+    intact rather than an empty file that the next acquirer would read
+    as an abandoned lock. Failures are non-fatal — the OS lock, not the
+    stamp, is the source of truth.
+    """
+    payload = f"{os.getpid()}\n{_our_image_name()}\n"
     try:
+        handle.seek(0)
+        handle.write(payload)
+        handle.flush()
+        handle.truncate(len(payload))
+    except Exception:
+        pass
+
+
+def _reclaim_stale_lock(lock_path: Path, handle, is_windows: bool):
+    """Ride out a contended lock whose holder is not a live claim.
+
+    Returns ``(handle, acquired)``. A live sibling claim is refused
+    immediately — that is the guard the lock exists for. Anything else
+    is retried for a short grace period first: the OS does not always
+    release the lock the instant the holder dies (``msvcrt`` after a
+    Windows ``TerminateProcess``, an orphaned child that inherited the
+    file descriptor from a ``kill -9``'d parent), and a holder killed in
+    the microseconds before it stamped itself needs one beat to be told
+    apart from a genuine sibling. Only once the grace has elapsed with
+    no identifiable owner do we unlink the abandoned inode and take a
+    fresh one — the automated form of the ``rm ~/.spacerouter/claim.lock``
+    workaround.
+    """
+    for _ in range(_RECLAIM_ATTEMPTS):
+        pid, image = _stamped_holder(lock_path)
+        if _holder_is_live_claim(pid, image):
+            return handle, False
+        time.sleep(_RECLAIM_DELAY_S)
         try:
-            _try_lock(fd)
-        except (BlockingIOError, OSError) as e:
-            # Contended. On POSIX, decide between a live holder (real
-            # concurrency — raise) and a stale holder (crashed/killed —
-            # reclaim). On Windows the OS guarantees release on exit, so
-            # contention always means a live holder.
-            reclaimed = False
-            if not is_windows:
-                pid = _stamped_pid(lock_path)
-                if pid is None or not _pid_is_alive(pid):
-                    # Holder is dead/unknown. Reclaim by unlinking the
-                    # stale file and reopening a FRESH inode — exactly
-                    # what the manual ``rm ~/.spacerouter/claim.lock``
-                    # workaround did. flock() guards an open file
-                    # *description*; a dead holder's flock on the old
-                    # inode can't block a flock on the new one. We only
-                    # ever reach here when the stamped PID is dead/absent,
-                    # so a LIVE sibling (which stamps its live PID) is
-                    # never unlinked — the concurrency guard holds.
-                    try:
-                        fd.close()
-                    except Exception:
-                        pass
-                    try:
-                        import os as _os
-                        _os.unlink(lock_path)
-                    except FileNotFoundError:
-                        pass
-                    except Exception:
-                        # Couldn't remove it (perms?) — fall through and
-                        # raise rather than risk an inconsistent state.
-                        pass
-                    fd = open(lock_path, "a+")
-                    try:
-                        _try_lock(fd)
-                        reclaimed = True
-                        logger.warning(
-                            "claim.lock at %s was held by a dead/stale "
-                            "holder (pid=%s) — reclaiming.",
-                            lock_path, pid,
-                        )
-                    except (BlockingIOError, OSError):
-                        # Lost a race: a live sibling grabbed the fresh
-                        # inode between our unlink and re-attempt. Fall
-                        # through to raise.
-                        reclaimed = False
-            if not reclaimed:
+            handle.close()
+        except Exception:
+            pass
+        handle = _open_lock(lock_path)
+        if _try_lock(handle, is_windows):
+            logger.warning(
+                "claim.lock at %s was held by a stale holder (pid=%s) — "
+                "reclaimed once the OS released it.", lock_path, pid,
+            )
+            return handle, True
+
+    pid, image = _stamped_holder(lock_path)
+    if _holder_is_live_claim(pid, image):
+        return handle, False
+    try:
+        handle.close()
+    except Exception:
+        pass
+    try:
+        os.unlink(lock_path)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    handle = _open_lock(lock_path)
+    if _try_lock(handle, is_windows):
+        logger.warning(
+            "claim.lock at %s was abandoned by pid=%s — reclaiming on a "
+            "fresh lock file.", lock_path, pid,
+        )
+        return handle, True
+    return handle, False
+
+
+@contextlib.contextmanager
+def acquire_claim_lock(settings) -> Iterator[Path]:
+    """Acquire ``claim.lock`` exclusively or raise :class:`ClaimLockHeld`.
+
+    Yields the resolved lock path so callers can surface it in error
+    messages. Releases the lock on exit. The first line of defence is
+    the OS primitive (POSIX ``flock`` releases on fd close → process
+    death; Windows ``msvcrt.locking`` with ``LK_NBLCK`` releases on
+    holder process exit), which covers the common crash.
+
+    Implementation note: once acquired, the underlying file handle stays
+    open for the duration of the ``with`` block; we never close+reopen
+    mid-flight, which is what would let another process race in.
+
+    Stale-lock reclaim: when the exclusive lock is contended we read the
+    holder stamp (PID + process image) and only refuse if that stamp
+    resolves to a *live process running one of our binaries*. A dead
+    holder, a PID recycled to an unrelated process, or a stamp we cannot
+    read is retried for a short grace period and then reclaimed, so a
+    ``kill -9`` mid-claim never wedges the next claim (BUG-136). A live
+    sibling claim still loses the race — the single-claim concurrency
+    guard is what stops two ``claimBatch`` broadcasts, and it is not
+    negotiable.
+    """
+    lock_path = claim_lock_path(settings)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    is_windows = sys.platform == "win32"
+
+    fd = _open_lock(lock_path)
+    try:
+        if not _try_lock(fd, is_windows):
+            fd, acquired = _reclaim_stale_lock(lock_path, fd, is_windows)
+            if not acquired:
                 try:
                     fd.close()
                 except Exception:
                     pass
+                pid, _image = _stamped_holder(lock_path)
                 logger.info(
-                    "claim.lock contended at %s — another claim is running",
-                    lock_path,
+                    "claim.lock contended at %s (holder pid=%s) — another "
+                    "claim is running", lock_path, pid,
                 )
-                raise ClaimLockHeld(str(lock_path)) from e
+                raise ClaimLockHeld(str(lock_path))
 
-        # Best-effort: stamp the holder PID so a stuck-lock investigation
-        # has something to look at. Failures here are non-fatal — the
-        # lock itself is the source of truth.
-        try:
-            fd.seek(0)
-            fd.truncate(0)
-            fd.write(f"{os.getpid()}\n")
-            fd.flush()
-        except Exception:
-            pass
+        _stamp_holder(fd)
 
         try:
             yield lock_path
@@ -239,8 +349,6 @@ def acquire_claim_lock(settings) -> Iterator[Path]:
                     import fcntl
                     fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
             except Exception:
-                # Process death drops the fd anyway; logging here would
-                # be noise on shutdown.
                 pass
     finally:
         try:

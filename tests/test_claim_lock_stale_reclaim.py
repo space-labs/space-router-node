@@ -26,6 +26,7 @@ lock/claim logic.
 
 from __future__ import annotations
 
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -363,3 +364,172 @@ async def test_preflight_funded_wallet_proceeds_to_broadcast(tmp_path):
     final = await store.get_by_uuid(r.request_uuid)
     assert final.claimed_at is not None
     assert final.claim_tx_hash == "0x" + "1" * 64
+
+
+# ── BUG-136: real kill -9 sequences, not simulated ones ────────────
+
+
+_HOLDER_SRC = """
+import os, sys, time
+sys.path.insert(0, {repo!r})
+import app.payment.claim_lock as cl
+
+class S:
+    RECEIPT_STORE_PATH = {store!r}
+
+with cl.acquire_claim_lock(S()) as p:
+    if {blank_for}:
+        open(p, "w").close()
+    sys.stdout.write("HELD %d\\n" % os.getpid())
+    sys.stdout.flush()
+    if {blank_for}:
+        time.sleep({blank_for})
+        open(p, "w").write(
+            "%d\\n%s\\n" % (os.getpid(), os.path.basename(sys.executable).lower())
+        )
+    time.sleep(120)
+"""
+
+
+def _spawn_holder(tmp_path, blank_for=0):
+    """Start a REAL separate process that holds claim.lock and blocks.
+
+    Returns ``(popen, pid)`` once the child reports it owns the lock.
+    Nothing is mocked: the child takes the same ``flock`` a live
+    ``--claim`` would. ``blank_for`` widens the window in which the
+    holder owns the lock but has no readable PID stamp in the file —
+    the state a claim killed between ``flock()`` and its stamp leaves,
+    and the state a live holder is briefly in on every acquire.
+    """
+    import subprocess
+
+    repo = str(Path(__file__).resolve().parent.parent)
+    src = _HOLDER_SRC.format(
+        repo=repo, store=str(tmp_path / "receipts.db"), blank_for=blank_for,
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", src],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    line = proc.stdout.readline()
+    if not line.startswith("HELD"):
+        proc.kill()
+        raise AssertionError(f"holder failed to start: {line!r} {proc.stderr.read()!r}")
+    return proc, int(line.split()[1])
+
+
+def _reap(proc):
+    """SIGKILL the holder — the field trigger, not a graceful close."""
+    import signal
+    try:
+        proc.send_signal(signal.SIGKILL)
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=10)
+    except Exception:
+        pass
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX kill -9 sequence.")
+def test_kill_9_mid_hold_does_not_block_the_next_claim(tmp_path):
+    """Jin's field sequence: ``--claim`` SIGKILLed mid-hold, re-run at once.
+
+    A real child process takes the lock, is ``kill -9``'d while holding
+    it, and the next acquire — from this process, exactly as a re-run of
+    ``--claim`` would — must succeed rather than report contention.
+    """
+    from app.payment.claim_lock import acquire_claim_lock, claim_lock_path
+
+    settings = _mk_settings(tmp_path / "receipts.db")
+    proc, pid = _spawn_holder(tmp_path)
+    lock_path = claim_lock_path(settings)
+    assert lock_path.read_text().splitlines()[0].strip() == str(pid)
+
+    _reap(proc)
+
+    with acquire_claim_lock(settings) as held:
+        assert held == lock_path
+        assert lock_path.read_text().splitlines()[0].strip() == str(os.getpid())
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only PID identity probe.")
+def test_recycled_pid_of_a_dead_holder_does_not_wedge_the_lock(tmp_path):
+    """A killed holder's PID recycled to an unrelated live process.
+
+    The lock is still pinned (an orphan that inherited the descriptor,
+    or an OS that has not released it yet) and the stamp names a PID
+    that IS alive — but the process wearing that PID is not one of ours.
+    Trusting the bare PID, as the .133 reclaim did, wedges the lock
+    forever; the image-name check must see through it and reclaim.
+    """
+    import fcntl
+    import subprocess
+
+    from app.payment.claim_lock import acquire_claim_lock, claim_lock_path
+
+    settings = _mk_settings(tmp_path / "receipts.db")
+    lock_path = claim_lock_path(settings)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    unrelated = subprocess.Popen(["sleep", "120"])
+    holder_fd = open(lock_path, "w")
+    fcntl.flock(holder_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    lock_path.write_text(f"{unrelated.pid}\nspace-router-node\n")
+    holder_fd.flush()
+    try:
+        with acquire_claim_lock(settings) as held:
+            assert held == lock_path
+    finally:
+        unrelated.kill()
+        unrelated.wait(timeout=10)
+        try:
+            holder_fd.close()
+        except Exception:
+            pass
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock semantics.")
+def test_live_holder_inside_the_stamp_window_is_not_stolen(tmp_path):
+    """A live sibling that has the lock but has not stamped itself yet.
+
+    The lock file is empty for the instant between ``flock()`` and the
+    PID stamp. Reading that as "no identifiable holder → reclaim" hands
+    a second process the claim lock while the first is still inside it —
+    two concurrent ``claimBatch`` broadcasts. It must be refused.
+    """
+    from app.payment.claim_lock import acquire_claim_lock, ClaimLockHeld, claim_lock_path
+
+    settings = _mk_settings(tmp_path / "receipts.db")
+    proc, _pid = _spawn_holder(tmp_path, blank_for=1.0)
+    try:
+        assert claim_lock_path(settings).read_text().strip() == ""
+        with pytest.raises(ClaimLockHeld):
+            with acquire_claim_lock(settings):
+                pytest.fail("stole the lock from a live holder mid-stamp")
+        assert proc.poll() is None
+    finally:
+        _reap(proc)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock semantics.")
+def test_concurrent_claim_from_another_process_is_refused(tmp_path):
+    """Two real processes, one lock: the second claim must lose.
+
+    This is the money guard — the lock exists to stop a second
+    ``claimBatch`` going out against the same nonces — so it is asserted
+    against a genuinely separate live process, not a nested acquire.
+    """
+    from app.payment.claim_lock import acquire_claim_lock, ClaimLockHeld
+
+    settings = _mk_settings(tmp_path / "receipts.db")
+    proc, _pid = _spawn_holder(tmp_path)
+    try:
+        with pytest.raises(ClaimLockHeld):
+            with acquire_claim_lock(settings):
+                pytest.fail("second concurrent claim must not acquire")
+    finally:
+        _reap(proc)
+
+    with acquire_claim_lock(settings):
+        pass
