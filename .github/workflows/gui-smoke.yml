@@ -143,14 +143,17 @@ jobs:
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if ($mei) {
             "MEIPASS: $($mei.FullName)"
-            Get-ChildItem $mei.FullName -Recurse -Include '*miniupnpc*', '*upnp*' -ErrorAction SilentlyContinue |
-              Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize | Out-String -Width 200
-            $pyd = Get-ChildItem $mei.FullName -Recurse -Filter 'miniupnpc*.pyd' -ErrorAction SilentlyContinue |
-              Select-Object -First 1
-            if ($pyd) {
-              Copy-Item $pyd.FullName (Join-Path $cap $pyd.Name)
-              "copied $($pyd.Name) ($($pyd.Length) bytes) to the capture dir"
-            } else { "no miniupnpc*.pyd found under MEIPASS" }
+            $bundleDir = Join-Path $env:RUNNER_TEMP 'bundle-upnp'
+            New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
+            Get-ChildItem $mei.FullName -Filter 'miniupnpc*' -ErrorAction SilentlyContinue |
+              ForEach-Object {
+                "bundled: $($_.Name) $($_.Length) bytes"
+                Copy-Item $_.FullName $bundleDir
+              }
+            Get-ChildItem $mei.FullName -Recurse -File -ErrorAction SilentlyContinue |
+              Select-Object -ExpandProperty Name | Sort-Object |
+              Set-Content (Join-Path $cap 'B-meipass-listing.txt')
+            "MEIPASS file count: $((Get-Content (Join-Path $cap 'B-meipass-listing.txt')).Count)"
           } else { "no _MEI* dir under $env:TEMP" }
 
           Start-Sleep -Seconds 45
@@ -189,23 +192,85 @@ jobs:
           Get-Process -Name SpaceRouter -ErrorAction SilentlyContinue |
             ForEach-Object { try { Stop-Process -Id $_.Id -Force } catch {} }
 
-      - name: miniupnpc control test (unfrozen CPython 3.12)
+      - name: miniupnpc diagnosis
         if: always()
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Continue'
           $cap = Join-Path $env:RUNNER_TEMP 'capture'
+          $bundleDir = Join-Path $env:RUNNER_TEMP 'bundle-upnp'
           python -VV
-          python -m pip install --quiet "miniupnpc>=2.2,<3"
-          python -c "import miniupnpc, sys; print('pip-installed miniupnpc import OK:', miniupnpc.__file__); print('UPnP()', miniupnpc.UPnP())"
-          python -c "import miniupnpc, pathlib; print('pip pyd:', [str(p) for p in pathlib.Path(miniupnpc.__file__).parent.glob('miniupnpc*')])"
-          $pyd = Get-ChildItem $cap -Filter 'miniupnpc*.pyd' -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($pyd) {
-            "=== importing the pyd copied out of the frozen bundle ==="
-            $probe = Join-Path $env:RUNNER_TEMP 'pydprobe'
-            New-Item -ItemType Directory -Force -Path $probe | Out-Null
-            Copy-Item $pyd.FullName $probe
-            python -c "import sys; sys.path.insert(0, r'$probe'); import miniupnpc; print('bundled pyd import OK:', miniupnpc.__file__)"
-          } else { "no bundled pyd captured — skipping" }
+          python -m pip install --quiet "miniupnpc>=2.2,<3" pefile
+          $probe = Join-Path $env:RUNNER_TEMP 'probe.py'
+          @'
+          import hashlib, importlib.util, os, pathlib, subprocess, sys, sysconfig
+
+          bundle = pathlib.Path(sys.argv[1])
+          site = pathlib.Path(sysconfig.get_paths()["purelib"])
+
+          def sha(p):
+              return hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+
+          print("=== pip-installed files ===")
+          pip_files = sorted(site.glob("miniupnpc*"))
+          for p in pip_files:
+              if p.is_file():
+                  print(f"  {p.name}  {p.stat().st_size}  sha256:{sha(p)}")
+
+          print("=== files taken out of the frozen bundle ===")
+          bundle_files = sorted(bundle.glob("miniupnpc*"))
+          for p in bundle_files:
+              print(f"  {p.name}  {p.stat().st_size}  sha256:{sha(p)}")
+
+          pip_map = {p.name: sha(p) for p in pip_files if p.is_file()}
+          for p in bundle_files:
+              same = pip_map.get(p.name)
+              verdict = "IDENTICAL to the wheel" if same == sha(p) else f"DIFFERENT (wheel sha {same})"
+              print(f"  {p.name}: {verdict}")
+
+          print("=== import the bundled pair from an isolated dir ===")
+          sys.path.insert(0, str(bundle))
+          try:
+              import miniupnpc
+              print("  bundled pair imports OK:", miniupnpc.__file__)
+              print("  UPnP():", miniupnpc.UPnP())
+          except Exception as exc:
+              print(f"  bundled pair FAILED: {type(exc).__name__}: {exc}")
+
+          print("=== LoadLibrary the vendored dll directly ===")
+          import ctypes
+          for p in bundle_files:
+              if p.suffix.lower() == ".dll":
+                  try:
+                      ctypes.WinDLL(str(p))
+                      print(f"  WinDLL({p.name}) OK")
+                  except Exception as exc:
+                      print(f"  WinDLL({p.name}) FAILED: {type(exc).__name__}: {exc}")
+
+          print("=== PE imports of the bundled files ===")
+          try:
+              import pefile
+              listing = pathlib.Path(sys.argv[2])
+              meipass_names = set()
+              if listing.is_file():
+                  meipass_names = {n.strip().lower() for n in listing.read_text().splitlines() if n.strip()}
+              for p in bundle_files:
+                  pe = pefile.PE(str(p), fast_load=True)
+                  pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
+                  machine = hex(pe.FILE_HEADER.Machine)
+                  print(f"  {p.name} machine={machine}")
+                  for entry in getattr(pe, "DIRECTORY_ENTRY_IMPORT", []):
+                      dep = entry.dll.decode()
+                      where = "IN BUNDLE" if dep.lower() in meipass_names else "not in bundle"
+                      print(f"    imports {dep}  [{where}]")
+                  pe.close()
+          except Exception as exc:
+              print(f"  pefile inspection failed: {type(exc).__name__}: {exc}")
+          '@ | Set-Content -Path $probe -Encoding utf8
+          $listing = Join-Path $cap 'B-meipass-listing.txt'
+          $report = Join-Path $cap 'D-miniupnpc-diagnosis.txt'
+          python $probe $bundleDir $listing 2>&1 | Tee-Object -FilePath $report
+          exit 0
 
       - name: UPnP verdict
         if: always()
@@ -262,12 +327,13 @@ jobs:
           ISO="$RUNNER_TEMP/iso-fresh"; CAP="$RUNNER_TEMP/capture"
           mkdir -p "$ISO"
           APP="$RUNNER_TEMP/SpaceRouter Proxy.app/Contents/MacOS/SpaceRouter"
-          ( HOME="$ISO" PYTHONUNBUFFERED=1 "$APP" --smoke-test > "$CAP/A-stdout.txt" 2>&1 ; echo "exit=$?" >> "$CAP/A-stdout.txt" ) &
+          ( HOME="$ISO" script -q "$CAP/A-stdout.txt" "$APP" --smoke-test >/dev/null 2>&1 ; echo "exit=$?" >> "$CAP/A-stdout.txt" ) &
           RUNNER_PID=$!
           for i in $(seq 1 40); do
             sleep 1
             if curl -sf --max-time 2 http://127.0.0.1:19876/ -o "$CAP/A-health.json"; then
               echo "health endpoint answered after ${i}s:"; cat "$CAP/A-health.json"; echo
+              sleep 2
               screencapture -x "$CAP/A-desktop.png" 2>&1 || echo "screencapture failed"
               break
             fi
