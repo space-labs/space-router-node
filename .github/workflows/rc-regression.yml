@@ -1,11 +1,13 @@
 name: RC Regression
 
 on:
+  push:
+    branches: [fix/qa136-followups]
   workflow_dispatch:
     inputs:
       run_id:
         description: "Build run id to pull the RC binaries from"
-        required: true
+        required: false
 
 jobs:
   regression:
@@ -36,8 +38,9 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
         run: |
-          gh run download "${{ inputs.run_id }}" -R ${{ github.repository }} \
+          gh run download "${RUN_ID:-32956399283}" -R ${{ github.repository }} \
             -n "${{ matrix.artifact }}" -D rc
           ls -la rc
 
