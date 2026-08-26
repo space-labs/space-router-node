@@ -188,9 +188,14 @@ jobs:
           "=== B stdout ==="; Get-Content $out -ErrorAction SilentlyContinue
           "=== B stderr ==="; Get-Content $err -ErrorAction SilentlyContinue
 
-          try { Stop-Process -Id $p.Id -Force } catch {}
-          Get-Process -Name SpaceRouter -ErrorAction SilentlyContinue |
-            ForEach-Object { try { Stop-Process -Id $_.Id -Force } catch {} }
+          taskkill /T /F /PID $p.Id 2>&1 | Out-String
+          $exeName = Split-Path $exe -Leaf
+          Get-Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -eq $exe -or $_.ProcessName -eq [IO.Path]::GetFileNameWithoutExtension($exeName) } |
+            ForEach-Object { taskkill /T /F /PID $_.Id 2>&1 | Out-String }
+          Start-Sleep -Seconds 5
+          $held = (Get-NetTCPConnection -LocalPort 47891 -State Listen -ErrorAction SilentlyContinue)
+          if ($held) { "port 47891 still held by pid(s): $($held.OwningProcess -join ',')" } else { "port 47891 free" }
 
       - name: Scenario C — fresh profile, normal launch (onboarding screen)
         shell: pwsh
@@ -223,9 +228,14 @@ jobs:
           Get-ChildItem -Recurse $iso -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
           $log = Join-Path $iso '.spacerouter\logs\spacerouter-node.log'
           if (Test-Path $log) { Copy-Item $log (Join-Path $cap 'C-spacerouter-node.log'); Get-Content $log }
-          try { Stop-Process -Id $p.Id -Force } catch {}
-          Get-Process -Name SpaceRouter -ErrorAction SilentlyContinue |
-            ForEach-Object { try { Stop-Process -Id $_.Id -Force } catch {} }
+          taskkill /T /F /PID $p.Id 2>&1 | Out-String
+          $exeName = Split-Path $exe -Leaf
+          Get-Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -eq $exe -or $_.ProcessName -eq [IO.Path]::GetFileNameWithoutExtension($exeName) } |
+            ForEach-Object { taskkill /T /F /PID $_.Id 2>&1 | Out-String }
+          Start-Sleep -Seconds 5
+          $held = (Get-NetTCPConnection -LocalPort 47891 -State Listen -ErrorAction SilentlyContinue)
+          if ($held) { "port 47891 still held by pid(s): $($held.OwningProcess -join ',')" } else { "port 47891 free" }
 
       - name: Packaged Windows CLI — same miniupnpc question
         if: always()
