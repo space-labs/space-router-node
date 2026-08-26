@@ -266,6 +266,15 @@ def load_settings() -> Settings:
     3. Else cold start with ``SR_*`` env vars → save, load.
     4. Else defaults (no file written until something gets configured).
 
+    Whatever that chain resolves is then overlaid with any ``SR_*`` value
+    still live in ``os.environ`` — see
+    :py:func:`app.settings_loader.apply_env_overrides`. That is what makes
+    explicit CLI flags (which ``app.main._apply_cli_args`` exports as
+    ``SR_*``) and operator env vars beat a populated ``settings.json``
+    instead of being silently ignored. The overlay is in-memory only; the
+    callers that write ``settings.json`` back (the network-mode flags, the
+    escrow TOFU sync) deliberately read the un-overlaid values.
+
     The legacy macOS Application-Support migration also runs as part of
     that chain so v1.4 macOS installs are picked up before any read.
 
@@ -273,12 +282,14 @@ def load_settings() -> Settings:
     exist on disk before the call but does now, we log so operators can
     see the cold-start happened.
     """
-    from app.settings_loader import load_provider_settings, settings_path
+    from app.settings_loader import (
+        apply_env_overrides, load_provider_settings, settings_path,
+    )
 
     s_path = settings_path()
     pre_existed = s_path.exists()
 
-    new = load_provider_settings()
+    new = apply_env_overrides(load_provider_settings())
     s = _settings_from_provider_settings(new)
 
     if not pre_existed and s_path.exists():

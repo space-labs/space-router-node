@@ -2851,13 +2851,21 @@ def _persist_network_mode_to_settings(
 def _apply_cli_args(args: argparse.Namespace) -> None:
     """Override environment variables from CLI arguments.
 
-    CLI args take precedence over .env values. We set os.environ so that
-    pydantic-settings picks them up when load_settings() is called.
+    Exporting each flag as its ``SR_*`` equivalent is what gives flags the
+    top tier of the precedence chain: flag > env var > settings.json >
+    default. ``app.settings_loader.apply_env_overrides`` reads these back
+    on every settings load, so a flag now beats a populated settings.json
+    instead of being silently dropped (QA v1.5.2-test.136 Windows CLI
+    item 3). Writing the var here also overwrites an operator's own
+    exported value, which is the flag-beats-env half of the rule.
 
-    Network-mode flags (``--public-url``, ``--public-port``, ``--no-upnp``)
-    are also persisted to settings.json so the operator doesn't have to
-    re-pass them on every restart — matching the GUI's "Tunnel mode"
-    toggle semantics.
+    Everything set here applies to this run only. The sole exception is
+    the network-mode trio (``--public-url``, ``--public-port``,
+    ``--no-upnp``), which is additionally persisted to settings.json so
+    tunnel-mode operators don't re-pass it on every restart — matching the
+    GUI's "Tunnel mode" toggle semantics. Wallet addresses deliberately do
+    NOT persist: ``--staking-address`` on a one-off debug run must not
+    permanently re-key the node. ``--setup`` is the persisting path.
     """
     if args.port is not None:
         os.environ["SR_NODE_PORT"] = str(args.port)
@@ -3446,7 +3454,9 @@ def main() -> None:
     # rather than silently falling through to a default daemon start
     # (Phase A finding #11). The detect-and-auto-launch wizard path below
     # is unaffected; only the explicit flag is hard-stopped.
-    if args.setup and not sys.stdin.isatty():
+    from app.cli_ui import _stdin_is_interactive
+
+    if args.setup and not _stdin_is_interactive():
         print(
             "Error: --setup requires a TTY (interactive shell).\n"
             "  - To configure non-interactively, edit ~/.spacerouter/settings.json directly.\n"

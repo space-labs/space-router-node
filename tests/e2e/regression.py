@@ -152,17 +152,22 @@ def case_bom(b, staking):
 
 
 def case_bare_hex_normalised(b):
+    """BUG-06 accepts bare 40-hex. Wallet flags apply for the run only, so the
+    normalised value shows up in the run, not in settings.json."""
     bare = "6bb7d70bae8d51fc304212b43207f9e80ed680b8"
     home = fresh_home(coordination={"url": COORD}, node={"port": 9099})
-    run_until(b, ["--no-upnp", "--staking-address", bare], home, 25,
-              needle="Staking address:")
+    out = run_until(b, ["--no-upnp", "--staking-address", bare], home, 30,
+                    needle="Staking address:")
+    used = f"Staking address: 0x{bare}" in out
     path = os.path.join(home, ".spacerouter", "settings.json")
     stored = ""
     if os.path.exists(path):
         with open(path) as fh:
             stored = (json.load(fh).get("wallet") or {}).get("staking_address") or ""
-    record("bare 40-hex is accepted and normalised to 0x",
-           stored.lower() == "0x" + bare, f"stored={stored!r}")
+    record("bare 40-hex is accepted and normalised to 0x", used,
+           f"stored={stored!r}", out if not used else "")
+    record("a wallet flag does not silently rewrite settings.json",
+           stored.lower() != "0x" + bare, f"stored={stored!r}")
 
 
 def case_flag_overrides_settings(b):

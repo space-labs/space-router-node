@@ -21,6 +21,8 @@ import os
 import sys
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from app.settings_v2 import Settings
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,69 @@ def settings_path(directory: Path | None = None) -> Path:
 
 def env_path(directory: Path | None = None) -> Path:
     return (directory or _spacerouter_dir()) / "spacerouter.env"
+
+
+_ENV_OVERRIDE_EXCLUDED_FIELDS: frozenset[str] = frozenset({
+    "identity_passphrase_set",
+})
+
+
+def apply_env_overrides(s: Settings) -> Settings:
+    """Overlay ``SR_*`` process-environment values on top of persisted settings.
+
+    Establishes the precedence operators expect: explicit CLI flag >
+    environment variable > ``settings.json`` > schema default. CLI flags
+    arrive here through ``os.environ`` (``app.main._apply_cli_args`` writes
+    them there), so the flag tier falls out of the env tier for free.
+
+    The overlay is **per-run only** — nothing is written back to
+    ``settings.json``, so a one-off ``--staking-address`` cannot silently
+    re-key an operator's node. Persisting a wallet change stays an explicit
+    act: the ``--setup`` wizard, or editing the file.
+
+    Returns *s* untouched when no ``SR_*`` var changes anything, otherwise a
+    fully re-validated copy (the cross-field https rules run again). An
+    override that fails validation is dropped with a warning rather than
+    taking down startup. ``wallet.identity_passphrase_set`` is excluded
+    because it is a derived cache reconciled against the on-disk keystore by
+    :py:func:`_reconcile_passphrase_flag_in_place`; the mere presence of
+    ``SR_IDENTITY_PASSPHRASE`` must not flip it.
+    """
+    env_vars = {k: v for k, v in os.environ.items() if k.startswith("SR_")}
+    if not env_vars:
+        return s
+
+    fields = Settings.env_section_fields(env_vars, report_unknown=False)
+    data = s.model_dump(mode="json")
+    applied: list[str] = []
+    for section_name, values in fields.items():
+        if section_name not in Settings.model_fields or not isinstance(values, dict):
+            continue
+        for field, value in values.items():
+            if field in _ENV_OVERRIDE_EXCLUDED_FIELDS:
+                continue
+            if data[section_name].get(field) == value:
+                continue
+            data[section_name][field] = value
+            applied.append(f"{section_name}.{field}")
+
+    if not applied:
+        return s
+
+    try:
+        merged = Settings.model_validate(data)
+    except ValidationError as e:
+        logger.warning(
+            "Ignoring SR_* environment overrides (%s) — they fail validation: %s",
+            ", ".join(applied), e,
+        )
+        return s
+
+    logger.info(
+        "Applied SR_* overrides for this run only (settings.json unchanged): %s",
+        ", ".join(applied),
+    )
+    return merged
 
 
 def load_provider_settings(directory: Path | None = None) -> Settings:
