@@ -29,13 +29,13 @@ class TestIsReportable:
             "rate_limited", "connection_lost", "registration_rejected",
             "ip_conflict", "wallet_conflict", "ip_classification_unavailable",
             "timestamp_expired", "node_offline", "anonymous_ip",
-            "staking_insufficient", "staking_locked",
         ]
         for code in reportable:
             assert is_reportable(code), f"{code} should be reportable"
 
     def test_non_reportable_codes(self):
         non_reportable = [
+            "staking_insufficient", "staking_locked",
             "invalid_wallet", "missing_wallet", "identity_key_error",
             "identity_key_locked", "tls_cert_error", "port_in_use",
             "port_permission", "bind_error", "version_too_old",

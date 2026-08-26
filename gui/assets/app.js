@@ -1726,11 +1726,13 @@ function initSettings() {
   // Inline format validation on blur. The real on-chain check happens
   // on save (single round-trip there is enough; bouncing the bridge on
   // every focus loss would be wasteful).
+  const STAKING_REQUIRED_MESSAGE =
+    "Staking address is required — Save stays disabled until you enter one.";
   stakingInput.addEventListener("blur", function () {
     const val = stakingInput.value.trim();
     if (!val) {
-      stakingError.textContent = "";
-      stakingInput.classList.remove("invalid");
+      stakingError.textContent = STAKING_REQUIRED_MESSAGE;
+      stakingInput.classList.add("invalid");
       return;
     }
     if (!/^(0x)?[0-9a-fA-F]{40}$/.test(val)) {
@@ -1776,6 +1778,13 @@ function initSettings() {
     const cv = collectionInput.value.trim();
     const stakingOk = okFmt(sv);
     const collectionOk = !cv || okFmt(cv);
+    if (!sv) {
+      stakingError.textContent = STAKING_REQUIRED_MESSAGE;
+      stakingInput.classList.add("invalid");
+    } else if (stakingError.textContent === STAKING_REQUIRED_MESSAGE) {
+      stakingError.textContent = "";
+      stakingInput.classList.remove("invalid");
+    }
     // BUG-01: only enable Save when something actually changed.
     const dirty = snapshotSettings() !== openSnapshot;
     saveBtn.disabled = !(stakingOk && collectionOk && dirty);

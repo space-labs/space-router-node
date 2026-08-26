@@ -32,8 +32,11 @@ def _do_upnp_mapping(
     """Synchronous UPnP mapping — runs in a thread."""
     try:
         import miniupnpc
-    except ImportError:
-        logger.warning("miniupnpc not installed — UPnP unavailable")
+    except ImportError as exc:
+        logger.warning(
+            "UPnP unavailable — miniupnpc could not be imported: %s: %s",
+            type(exc).__name__, exc,
+        )
         return None
 
     u = miniupnpc.UPnP()

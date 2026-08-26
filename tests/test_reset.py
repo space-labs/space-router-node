@@ -529,5 +529,35 @@ class TestDeregisterBestEffortSync:
             "app.identity.load_or_create_identity",
             return_value=("0x" + "ab" * 32, "0x" + "cd" * 20),
         ), patch("app.registration.deregister_node", side_effect=_ok):
-            ok = deregister_best_effort_sync(settings)
+            ok = deregister_best_effort_sync(settings, "11111111-2222-3333-4444-555555555555")
         assert ok is True
+
+    def test_sends_the_node_uuid_not_the_identity_address(self, tmp_path):
+        """The coord resolves /nodes/{id} against a UUID primary key.
+
+        Passing the identity address could never match a row, so reset-time
+        deregister silently failed and the node kept squatting its public IP
+        until the health probe demoted it minutes later.
+        """
+        from app.config import Settings
+        from app.registration import deregister_best_effort_sync
+
+        settings = Settings(
+            COORDINATION_API_URL="http://example.invalid",
+            IDENTITY_KEY_PATH=str(tmp_path / "missing.key"),
+            IDENTITY_PASSPHRASE="",
+        )
+        node_uuid = "11111111-2222-3333-4444-555555555555"
+        seen = []
+
+        async def _capture(client, s, node_id, **kwargs):
+            seen.append(node_id)
+
+        with patch(
+            "app.identity.load_or_create_identity",
+            return_value=("0x" + "ab" * 32, "0x" + "cd" * 20),
+        ), patch("app.registration.deregister_node", side_effect=_capture):
+            deregister_best_effort_sync(settings, node_uuid)
+
+        assert seen == [node_uuid]
+        assert not any(str(x).startswith("0x") for x in seen)

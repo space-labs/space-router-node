@@ -25,6 +25,7 @@ class NodeManager:
         self._last_error: NodeError | None = None
         self._node_context_snapshot: dict | None = None
         self._version_check = None  # VersionCheckResult | None
+        self._retry_cancel = threading.Event()
 
     @property
     def is_running(self) -> bool:
@@ -94,6 +95,8 @@ class NodeManager:
         except Exception:
             logger.debug("GUI pre-flight version check failed", exc_info=True)
 
+        self._retry_cancel.set()
+        self._retry_cancel = threading.Event()
         self._sm.reset()
         self._error_report_available = False
         self._last_error = None
@@ -179,14 +182,15 @@ class NodeManager:
 
     def _schedule_retry(self, delay: float) -> None:
         """Schedule an automatic retry after a transient error."""
-        import time
+        cancel = self._retry_cancel
 
         def _retry_thread() -> None:
-            time.sleep(delay)
+            if cancel.wait(delay):
+                return
+            if cancel is not self._retry_cancel or self.has_live_thread():
+                return
             if self._sm.state == NodeState.ERROR_TRANSIENT:
                 logger.info("Auto-retrying after %.1fs", delay)
-                # Determine which phase to retry
-                retry_phase = self._sm.retry_phase
                 self._loop = None
                 self._stop_event = None
                 self._thread = threading.Thread(
@@ -227,6 +231,7 @@ class NodeManager:
            socket; log a warning if it's still bound (helps diagnose
            "Reset Node failed: address in use" reports).
         """
+        self._retry_cancel.set()
         if not self._thread or not self._thread.is_alive():
             if self._sm.state not in (NodeState.IDLE, NodeState.ERROR_PERMANENT):
                 try:
@@ -268,7 +273,8 @@ class NodeManager:
                         self._thread.name,
                         self._configured_port_for_log(),
                     )
-            self._thread = None
+            if not self._thread.is_alive():
+                self._thread = None
 
         # Best-effort port-release verification. We bind-test the
         # configured port; if it's still bound after a few hundred ms,
@@ -387,12 +393,11 @@ class NodeManager:
             return {"ok": False, "error": str(exc)}
 
     def _force_cancel_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
-        """Cancel all running tasks and stop the event loop."""
+        """Cancel all running tasks so the shutdown path can unwind."""
         if not loop or loop.is_closed():
             return
         try:
             for task in asyncio.all_tasks(loop):
                 loop.call_soon_threadsafe(task.cancel)
-            loop.call_soon_threadsafe(loop.stop)
         except RuntimeError:
             pass

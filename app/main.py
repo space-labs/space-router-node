@@ -739,7 +739,7 @@ async def _phase_bind(ctx: _NodeContext) -> None:
         host=constants.BIND_ADDRESS,
         port=s.NODE_PORT,
         ssl=ctx.ssl_ctx,
-        reuse_address=True,
+        reuse_address=None if sys.platform == "win32" else True,
     )
     ctx.server = server
     logger.info("Home Node listening on port %d", s.NODE_PORT)
@@ -1218,7 +1218,7 @@ async def _rebind_server_mtls(ctx: _NodeContext) -> None:
     handler = functools.partial(handle_client, settings=s)
     ctx.server = await asyncio.start_server(
         handler, host=constants.BIND_ADDRESS, port=s.NODE_PORT, ssl=ctx.ssl_ctx,
-        reuse_address=True,
+        reuse_address=None if sys.platform == "win32" else True,
     )
 
 
