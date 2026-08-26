@@ -124,6 +124,7 @@ class TestEncryptedKeystoreReset:
         with patch("app.main.load_settings") as mock_settings, \
              patch("app.paths.config_dir", return_value=tmp_path), \
              patch("app.main.sys") as mock_sys, \
+             patch("app.main._stdin_is_interactive", return_value=True), \
              patch("getpass.getpass", return_value="hunter2") as mock_getpass, \
              patch(
                  "app.registration.deregister_best_effort_sync",

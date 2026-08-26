@@ -34,6 +34,7 @@ from app.identity import (
 from app.state import NodeState, NodeStateMachine
 from app.version import __version__
 from app.wallet import validate_wallet_address
+from app.cli_ui import _stdin_is_interactive
 
 logger = logging.getLogger(__name__)
 
@@ -531,7 +532,7 @@ def _show_staking_prompt() -> None:
 
     min_amount = _fetch_min_staking_amount()
 
-    if not sys.stdin.isatty():
+    if not _stdin_is_interactive():
         logger.warning(
             "Staking required for rewards: stake at least %s $SPACE at "
             "https://penguinbase.com/dapp/spacestaking",
@@ -592,7 +593,7 @@ def _show_version_check() -> None:
         sys.exit(1)
 
     # Soft update
-    if sys.stdin.isatty():
+    if _stdin_is_interactive():
         console.print(Panel(
             f"[bold white]A new version ({result.latest_version}) is available.\n"
             f"You are running {result.current_version}.[/bold white]\n\n"
@@ -2223,7 +2224,7 @@ async def _run(
             dashboard = None
             dashboard_task = None
             probe_task = None
-            if own_stop_event and sys.stdin.isatty():
+            if own_stop_event and _stdin_is_interactive():
                 try:
                     from app.cli_ui import StatusDashboard
                     dashboard = StatusDashboard()
@@ -2558,7 +2559,7 @@ def _do_reset() -> bool:
     certs_dir = os.path.dirname(os.path.abspath(s.IDENTITY_KEY_PATH)) or "certs"
     settings_file = cfg_dir / "settings.json"
 
-    if sys.stdin.isatty():
+    if _stdin_is_interactive():
         print("WARNING: This will delete your identity key and all configuration.", flush=True)
         confirm = input("Type YES to confirm: ").strip()
         if confirm != "YES":
@@ -2585,7 +2586,7 @@ def _do_reset() -> bool:
     # Prompt interactively when we have a TTY; bail with an actionable
     # error otherwise so scripted operators don't silently break.
     if _identity_keystore_is_encrypted(s) and not os.environ.get("SR_IDENTITY_PASSPHRASE"):
-        if sys.stdin.isatty():
+        if _stdin_is_interactive():
             import getpass
             passphrase = getpass.getpass("Identity keystore passphrase: ")
             os.environ["SR_IDENTITY_PASSPHRASE"] = passphrase
@@ -2901,7 +2902,7 @@ def _prompt_error_report(error, settings_override=None) -> None:  # noqa: ANN001
 
     if not is_reportable(error.code.value):
         return
-    if not sys.stdin.isatty():
+    if not _stdin_is_interactive():
         return
 
     try:
@@ -2956,7 +2957,7 @@ def _run_node(settings_override=None) -> None:  # noqa: ANN001
     try:
         asyncio.run(_run(settings_override=settings_override))
     except KeystorePassphraseRequired:
-        if sys.stdin.isatty():
+        if _stdin_is_interactive():
             try:
                 passphrase = getpass.getpass("Identity key passphrase: ")
             except (EOFError, KeyboardInterrupt):
@@ -3436,7 +3437,7 @@ def main() -> None:
         if not _do_reset():
             sys.exit(0)
         # Fall through to onboarding wizard
-        if sys.stdin.isatty():
+        if _stdin_is_interactive():
             if not _first_run_setup(args):
                 sys.exit(0)
             _show_version_check()
@@ -3454,8 +3455,6 @@ def main() -> None:
     # rather than silently falling through to a default daemon start
     # (Phase A finding #11). The detect-and-auto-launch wizard path below
     # is unaffected; only the explicit flag is hard-stopped.
-    from app.cli_ui import _stdin_is_interactive
-
     if args.setup and not _stdin_is_interactive():
         print(
             "Error: --setup requires a TTY (interactive shell).\n"
@@ -3474,7 +3473,7 @@ def main() -> None:
         or not os.path.isfile(s.IDENTITY_KEY_PATH)
         or (not s.STAKING_ADDRESS and s.COORDINATION_API_URL == _default_coordination_url())
     )
-    if needs_setup and sys.stdin.isatty():
+    if needs_setup and _stdin_is_interactive():
         if not _first_run_setup(args):
             sys.exit(0)
         _show_version_check()
