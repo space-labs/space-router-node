@@ -1,0 +1,48 @@
+name: RC Regression
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Build run id to pull the RC binaries from"
+        required: true
+
+jobs:
+  regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: spacerouter-proxy-cli-v1.5.2-test.138-windows-x64
+            binary: spacerouter-proxy-cli-v1.5.2-test.138-windows-x64.exe
+          - os: macos-14
+            artifact: spacerouter-proxy-cli-v1.5.2-test.138-macos-arm64
+            binary: spacerouter-proxy-cli-v1.5.2-test.138-macos-arm64
+          - os: ubuntu-latest
+            artifact: spacerouter-proxy-cli-v1.5.2-test.138-linux-x64
+            binary: spacerouter-proxy-cli-v1.5.2-test.138-linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install eth-account
+
+      - name: Download the RC binary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "${{ inputs.run_id }}" -R ${{ github.repository }} \
+            -n "${{ matrix.artifact }}" -D rc
+          ls -la rc
+
+      - name: Regression
+        shell: bash
+        run: |
+          chmod +x "rc/${{ matrix.binary }}" 2>/dev/null || true
+          python tests/e2e/regression.py --binary "rc/${{ matrix.binary }}"
