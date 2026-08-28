@@ -10,9 +10,9 @@ on:
         required: false
 
 env:
-  DEFAULT_RUN_ID: "32962545771"
-  WIN_ARTIFACT: "spacerouter-proxy-gui-v1.5.2-test.140-windows-x64"
-  MAC_ARTIFACT: "spacerouter-proxy-gui-v1.5.2-test.140-macos-arm64"
+  DEFAULT_RUN_ID: "33169031886"
+  WIN_ARTIFACT: "spacerouter-proxy-gui-v1.5.2-test.145-windows-x64"
+  MAC_ARTIFACT: "spacerouter-proxy-gui-v1.5.2-test.145-macos-arm64"
   SEED_KEY: "0x4c0883a69102937d6231471b5dbb6204fe512961708279f2e3ac1b0b39cc2f1f"
 
 jobs:
@@ -250,7 +250,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $iso '.spacerouter\certs') | Out-Null
           Set-Content -Path (Join-Path $iso '.spacerouter\certs\node-identity.key') -Value $env:SEED_KEY
           gh run download $env:DEFAULT_RUN_ID -R ${{ github.repository }} `
-            -n 'spacerouter-proxy-cli-v1.5.2-test.140-windows-x64' -D cli-rc
+            -n 'spacerouter-proxy-cli-v1.5.2-test.145-windows-x64' -D cli-rc
           $cli = (Get-ChildItem cli-rc -Filter *.exe -Recurse | Select-Object -First 1).FullName
           "cli: $cli"
           $env:USERPROFILE = $iso
