@@ -7,7 +7,30 @@ import sys
 import threading
 import time
 
-import webview
+
+def _preload_upnp_before_webview() -> None:
+    """Import miniupnpc before the webview backend maps its own DLLs.
+
+    In the frozen Windows onefile build, importing miniupnpc *after* webview
+    fails with ``ImportError: DLL load failed while importing miniupnpc:
+    Invalid access to memory location`` (ERROR_NOACCESS). The same .pyd and its
+    delvewheel side-car import cleanly out of the same bundle in a bare
+    interpreter on the same machine, so the conflict comes from what the
+    webview backend has already loaded into the process. Importing first leaves
+    the module in sys.modules for app.upnp to reuse, and the Windows GUI could
+    not map a port without it.
+    """
+    try:
+        import miniupnpc  # noqa: F401
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "miniupnpc preload failed; UPnP will be unavailable", exc_info=True,
+        )
+
+
+_preload_upnp_before_webview()
+
+import webview  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,

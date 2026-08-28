@@ -31,8 +31,6 @@ _REPORTABLE_CODES = frozenset({
     "timestamp_expired",
     "node_offline",
     "anonymous_ip",
-    "staking_insufficient",
-    "staking_locked",
 })
 
 

@@ -91,6 +91,20 @@ class TestNeedsOnboarding:
 # ---------------------------------------------------------------------------
 
 class TestApplyToEnv:
+    @pytest.fixture(autouse=True)
+    def _restore_sr_env(self):
+        """``apply_to_env`` writes a dozen ``SR_*`` vars; put them all back.
+
+        Per-test cleanup here only popped the handful each test asserted on,
+        so the rest leaked into every later test in the session — which now
+        matters, because ``SR_*`` vars legitimately override settings.json.
+        """
+        before = {k: v for k, v in os.environ.items() if k.startswith("SR_")}
+        yield
+        for key in [k for k in os.environ if k.startswith("SR_")]:
+            del os.environ[key]
+        os.environ.update(before)
+
     def test_cert_paths_set_to_config_dir(self, store, tmp_path):
         # Clear any prior values
         for key in ("SR_TLS_CERT_PATH", "SR_TLS_KEY_PATH",

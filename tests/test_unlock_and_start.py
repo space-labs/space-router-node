@@ -209,6 +209,7 @@ def test_start_node_returns_passphrase_required_when_keystore_encrypted_and_env_
 
     node = MagicMock()
     node.is_running = False
+    node.has_live_thread.return_value = False
 
     from gui.api import Api
     api = Api(config=config, node_manager=node)
@@ -239,6 +240,7 @@ def test_start_node_proceeds_when_keystore_encrypted_but_passphrase_in_env(monke
 
     node = MagicMock()
     node.is_running = False
+    node.has_live_thread.return_value = False
 
     from gui.api import Api
     api = Api(config=config, node_manager=node)
@@ -262,6 +264,7 @@ def test_start_node_proceeds_when_keystore_plaintext(monkeypatch):
 
     node = MagicMock()
     node.is_running = False
+    node.has_live_thread.return_value = False
 
     from gui.api import Api
     api = Api(config=config, node_manager=node)

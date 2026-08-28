@@ -49,6 +49,7 @@ def _make_api_with_mock_node():
     # ``start_node`` consults this; default the MagicMock to "not running"
     # so the start path actually executes.
     node.is_running = False
+    node.has_live_thread.return_value = False
 
     config = MagicMock()
     # apply_to_env / _load_settings_v2 must be quiet defaults — the

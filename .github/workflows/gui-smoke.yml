@@ -1,0 +1,520 @@
+name: GUI Smoke (packaged)
+
+on:
+  push:
+    branches: [fix/qa136-followups]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Build run id to pull the packaged GUI from"
+        required: false
+
+env:
+  DEFAULT_RUN_ID: "33169031886"
+  WIN_ARTIFACT: "spacerouter-proxy-gui-v1.5.2-test.145-windows-x64"
+  MAC_ARTIFACT: "spacerouter-proxy-gui-v1.5.2-test.145-macos-arm64"
+  SEED_KEY: "0x4c0883a69102937d6231471b5dbb6204fe512961708279f2e3ac1b0b39cc2f1f"
+
+jobs:
+  windows-gui:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download the packaged Windows GUI
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          gh run download "${RUN_ID:-$DEFAULT_RUN_ID}" -R ${{ github.repository }} \
+            -n "$WIN_ARTIFACT" -D gui-rc
+          ls -la gui-rc
+
+      - name: Describe the environment
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version | Format-List
+          "session id: $((Get-Process -Id $PID).SessionId)"
+          "UserInteractive: $([Environment]::UserInteractive)"
+          $wv = Get-ChildItem 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients' -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
+            Where-Object { $_.name -like '*WebView2*' }
+          if ($wv) { "WebView2 runtime: $($wv.name) $($wv.pv)" } else { "WebView2 runtime: NOT FOUND under EdgeUpdate\Clients" }
+
+      - name: Prepare isolated profiles
+        shell: pwsh
+        run: |
+          $fresh  = Join-Path $env:RUNNER_TEMP 'iso-fresh'
+          $seeded = Join-Path $env:RUNNER_TEMP 'iso-seeded'
+          $cap    = Join-Path $env:RUNNER_TEMP 'capture'
+          New-Item -ItemType Directory -Force -Path $fresh, $seeded, $cap | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $seeded '.spacerouter\certs') | Out-Null
+          $key = Join-Path $seeded '.spacerouter\certs\node-identity.key'
+          Set-Content -Path $key -Value $env:SEED_KEY
+          "seeded identity key at: $key"
+
+      - name: Scenario A — fresh profile, --smoke-test
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem gui-rc -Filter *.exe -Recurse | Select-Object -First 1).FullName
+          "exe: $exe"
+          $iso = Join-Path $env:RUNNER_TEMP 'iso-fresh'
+          $cap = Join-Path $env:RUNNER_TEMP 'capture'
+          $env:USERPROFILE  = $iso
+          $env:HOME         = $iso
+          $env:APPDATA      = Join-Path $iso 'AppData\Roaming'
+          $env:LOCALAPPDATA = Join-Path $iso 'AppData\Local'
+          $env:PYTHONUNBUFFERED = '1'
+          New-Item -ItemType Directory -Force -Path $env:APPDATA, $env:LOCALAPPDATA | Out-Null
+          $out = Join-Path $cap 'A-stdout.txt'
+          $err = Join-Path $cap 'A-stderr.txt'
+          $p = Start-Process -FilePath $exe -ArgumentList '--smoke-test' -PassThru `
+            -RedirectStandardOutput $out -RedirectStandardError $err
+          "pid: $($p.Id)"
+
+          $health = $null
+          for ($i = 0; $i -lt 40; $i++) {
+            Start-Sleep -Milliseconds 500
+            try {
+              $health = Invoke-RestMethod -Uri 'http://127.0.0.1:19876/' -TimeoutSec 2
+              break
+            } catch { }
+          }
+          if ($health) {
+            "=== A health endpoint (gui.Api.get_status) ==="
+            $health | ConvertTo-Json -Depth 5 | Tee-Object -FilePath (Join-Path $cap 'A-health.json')
+            try {
+              Add-Type -AssemblyName System.Windows.Forms
+              Add-Type -AssemblyName System.Drawing
+              $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+              $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+              $g = [System.Drawing.Graphics]::FromImage($bmp)
+              $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $bmp.Size)
+              $bmp.Save((Join-Path $cap 'A-desktop.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+              "A screenshot saved"
+            } catch { "A screenshot failed: $($_.Exception.Message)" }
+          } else {
+            "A health endpoint never answered on 127.0.0.1:19876"
+          }
+
+          if ($p.WaitForExit(150000)) {
+            "exit code: $($p.ExitCode)"
+          } else {
+            "TIMEOUT — still running after 150s, killing"
+            try { Stop-Process -Id $p.Id -Force } catch {}
+          }
+          "=== A stdout ==="; Get-Content $out -ErrorAction SilentlyContinue
+          "=== A stderr ==="; Get-Content $err -ErrorAction SilentlyContinue
+          "=== A profile tree ==="
+          Get-ChildItem -Recurse $iso -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+          "=== A node log ==="
+          $log = Join-Path $iso '.spacerouter\logs\spacerouter-node.log'
+          if (Test-Path $log) {
+            Copy-Item $log (Join-Path $cap 'A-spacerouter-node.log')
+            Get-Content $log
+          } else { "NO LOG FILE at $log" }
+
+      - name: Scenario B — seeded profile, normal launch
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem gui-rc -Filter *.exe -Recurse | Select-Object -First 1).FullName
+          $iso = Join-Path $env:RUNNER_TEMP 'iso-seeded'
+          $cap = Join-Path $env:RUNNER_TEMP 'capture'
+          $env:USERPROFILE  = $iso
+          $env:HOME         = $iso
+          $env:APPDATA      = Join-Path $iso 'AppData\Roaming'
+          $env:LOCALAPPDATA = Join-Path $iso 'AppData\Local'
+          $env:PYTHONUNBUFFERED = '1'
+          New-Item -ItemType Directory -Force -Path $env:APPDATA, $env:LOCALAPPDATA | Out-Null
+          $out = Join-Path $cap 'B-stdout.txt'
+          $err = Join-Path $cap 'B-stderr.txt'
+          $p = Start-Process -FilePath $exe -PassThru `
+            -RedirectStandardOutput $out -RedirectStandardError $err
+          "pid: $($p.Id)"
+          Start-Sleep -Seconds 45
+
+          "=== B bundle contents (PyInstaller _MEIPASS) ==="
+          $mei = Get-ChildItem $env:TEMP -Filter '_MEI*' -Directory -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($mei) {
+            "MEIPASS: $($mei.FullName)"
+            $bundleDir = Join-Path $env:RUNNER_TEMP 'bundle-upnp'
+            New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
+            Get-ChildItem $mei.FullName -Filter 'miniupnpc*' -ErrorAction SilentlyContinue |
+              ForEach-Object {
+                "bundled: $($_.Name) $($_.Length) bytes"
+                Copy-Item $_.FullName $bundleDir
+              }
+            Get-ChildItem $mei.FullName -Recurse -File -ErrorAction SilentlyContinue |
+              Select-Object -ExpandProperty Name | Sort-Object |
+              Set-Content (Join-Path $cap 'B-meipass-listing.txt')
+            "MEIPASS file count: $((Get-Content (Join-Path $cap 'B-meipass-listing.txt')).Count)"
+          } else { "no _MEI* dir under $env:TEMP" }
+
+          Start-Sleep -Seconds 45
+          "still alive after 90s: $(-not $p.HasExited)"
+          if ($p.HasExited) { "exit code: $($p.ExitCode)" }
+          Get-Process -Name SpaceRouter -ErrorAction SilentlyContinue |
+            Select-Object Id, ProcessName, MainWindowTitle | Format-List
+
+          "=== B screenshot attempt ==="
+          try {
+            Add-Type -AssemblyName System.Windows.Forms
+            Add-Type -AssemblyName System.Drawing
+            $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+            "virtual screen: $($b.Width)x$($b.Height) at $($b.Location)"
+            $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $bmp.Size)
+            $bmp.Save((Join-Path $cap 'B-desktop.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+            "screenshot saved"
+          } catch {
+            "screenshot failed: $($_.Exception.Message)"
+          }
+
+          "=== B profile tree ==="
+          Get-ChildItem -Recurse $iso -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+          "=== B node log ==="
+          $log = Join-Path $iso '.spacerouter\logs\spacerouter-node.log'
+          if (Test-Path $log) {
+            Copy-Item $log (Join-Path $cap 'B-spacerouter-node.log')
+            Get-Content $log
+          } else { "NO LOG FILE at $log" }
+          "=== B stdout ==="; Get-Content $out -ErrorAction SilentlyContinue
+          "=== B stderr ==="; Get-Content $err -ErrorAction SilentlyContinue
+
+          taskkill /T /F /PID $p.Id 2>&1 | Out-String
+          $exeName = Split-Path $exe -Leaf
+          Get-Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -eq $exe -or $_.ProcessName -eq [IO.Path]::GetFileNameWithoutExtension($exeName) } |
+            ForEach-Object { taskkill /T /F /PID $_.Id 2>&1 | Out-String }
+          Start-Sleep -Seconds 5
+          $held = (Get-NetTCPConnection -LocalPort 47891 -State Listen -ErrorAction SilentlyContinue)
+          if ($held) { "port 47891 still held by pid(s): $($held.OwningProcess -join ',')" } else { "port 47891 free" }
+          exit 0
+
+      - name: Scenario C — fresh profile, normal launch (onboarding screen)
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem gui-rc -Filter *.exe -Recurse | Select-Object -First 1).FullName
+          $iso = Join-Path $env:RUNNER_TEMP 'iso-onboard'
+          $cap = Join-Path $env:RUNNER_TEMP 'capture'
+          New-Item -ItemType Directory -Force -Path $iso | Out-Null
+          $env:USERPROFILE  = $iso
+          $env:HOME         = $iso
+          $env:APPDATA      = Join-Path $iso 'AppData\Roaming'
+          $env:LOCALAPPDATA = Join-Path $iso 'AppData\Local'
+          New-Item -ItemType Directory -Force -Path $env:APPDATA, $env:LOCALAPPDATA | Out-Null
+          $p = Start-Process -FilePath $exe -PassThru `
+            -RedirectStandardOutput (Join-Path $cap 'C-stdout.txt') `
+            -RedirectStandardError  (Join-Path $cap 'C-stderr.txt')
+          Start-Sleep -Seconds 30
+          "still alive after 30s: $(-not $p.HasExited)"
+          try {
+            Add-Type -AssemblyName System.Windows.Forms
+            Add-Type -AssemblyName System.Drawing
+            $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+            $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $bmp.Size)
+            $bmp.Save((Join-Path $cap 'C-onboarding.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+            "C screenshot saved"
+          } catch { "C screenshot failed: $($_.Exception.Message)" }
+          "=== C profile tree ==="
+          Get-ChildItem -Recurse $iso -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+          $log = Join-Path $iso '.spacerouter\logs\spacerouter-node.log'
+          if (Test-Path $log) { Copy-Item $log (Join-Path $cap 'C-spacerouter-node.log'); Get-Content $log }
+          taskkill /T /F /PID $p.Id 2>&1 | Out-String
+          $exeName = Split-Path $exe -Leaf
+          Get-Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -eq $exe -or $_.ProcessName -eq [IO.Path]::GetFileNameWithoutExtension($exeName) } |
+            ForEach-Object { taskkill /T /F /PID $_.Id 2>&1 | Out-String }
+          Start-Sleep -Seconds 5
+          $held = (Get-NetTCPConnection -LocalPort 47891 -State Listen -ErrorAction SilentlyContinue)
+          if ($held) { "port 47891 still held by pid(s): $($held.OwningProcess -join ',')" } else { "port 47891 free" }
+          exit 0
+
+      - name: Packaged Windows CLI — same miniupnpc question
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $cap = Join-Path $env:RUNNER_TEMP 'capture'
+          $iso = Join-Path $env:RUNNER_TEMP 'iso-cli'
+          New-Item -ItemType Directory -Force -Path (Join-Path $iso '.spacerouter\certs') | Out-Null
+          Set-Content -Path (Join-Path $iso '.spacerouter\certs\node-identity.key') -Value $env:SEED_KEY
+          gh run download $env:DEFAULT_RUN_ID -R ${{ github.repository }} `
+            -n 'spacerouter-proxy-cli-v1.5.2-test.145-windows-x64' -D cli-rc
+          $cli = (Get-ChildItem cli-rc -Filter *.exe -Recurse | Select-Object -First 1).FullName
+          "cli: $cli"
+          $env:USERPROFILE = $iso
+          $env:HOME        = $iso
+          $p = Start-Process -FilePath $cli -ArgumentList '--log-level', 'INFO' -PassThru `
+            -RedirectStandardOutput (Join-Path $cap 'E-cli-stdout.txt') `
+            -RedirectStandardError  (Join-Path $cap 'E-cli-stderr.txt')
+          if (-not $p.WaitForExit(120000)) { try { Stop-Process -Id $p.Id -Force } catch {} }
+          "=== E cli stdout ==="; Get-Content (Join-Path $cap 'E-cli-stdout.txt') -ErrorAction SilentlyContinue
+          "=== E cli stderr ==="; Get-Content (Join-Path $cap 'E-cli-stderr.txt') -ErrorAction SilentlyContinue
+          exit 0
+
+      - name: miniupnpc diagnosis
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $cap = Join-Path $env:RUNNER_TEMP 'capture'
+          $bundleDir = Join-Path $env:RUNNER_TEMP 'bundle-upnp'
+          python -VV
+          python -m pip install --quiet "miniupnpc>=2.2,<3" pefile
+          $probe = Join-Path $env:RUNNER_TEMP 'probe.py'
+          @'
+          import hashlib, importlib.util, os, pathlib, subprocess, sys, sysconfig
+
+          bundle = pathlib.Path(sys.argv[1])
+          site = pathlib.Path(sysconfig.get_paths()["purelib"])
+
+          def sha(p):
+              return hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+
+          print("=== pip-installed files ===")
+          pip_files = sorted(site.glob("miniupnpc*"))
+          for p in pip_files:
+              if p.is_file():
+                  print(f"  {p.name}  {p.stat().st_size}  sha256:{sha(p)}")
+
+          print("=== files taken out of the frozen bundle ===")
+          bundle_files = sorted(bundle.glob("miniupnpc*"))
+          for p in bundle_files:
+              print(f"  {p.name}  {p.stat().st_size}  sha256:{sha(p)}")
+
+          pip_map = {p.name: sha(p) for p in pip_files if p.is_file()}
+          for p in bundle_files:
+              same = pip_map.get(p.name)
+              verdict = "IDENTICAL to the wheel" if same == sha(p) else f"DIFFERENT (wheel sha {same})"
+              print(f"  {p.name}: {verdict}")
+
+          print("=== import the bundled pair from an isolated dir ===")
+          sys.path.insert(0, str(bundle))
+          try:
+              import miniupnpc
+              print("  bundled pair imports OK:", miniupnpc.__file__)
+              print("  UPnP():", miniupnpc.UPnP())
+          except Exception as exc:
+              print(f"  bundled pair FAILED: {type(exc).__name__}: {exc}")
+
+          print("=== LoadLibrary the vendored dll directly ===")
+          import ctypes
+          for p in bundle_files:
+              if p.suffix.lower() == ".dll":
+                  try:
+                      ctypes.WinDLL(str(p))
+                      print(f"  WinDLL({p.name}) OK")
+                  except Exception as exc:
+                      print(f"  WinDLL({p.name}) FAILED: {type(exc).__name__}: {exc}")
+
+          print("=== PE imports of the bundled files ===")
+          try:
+              import pefile
+              listing = pathlib.Path(sys.argv[2])
+              meipass_names = set()
+              if listing.is_file():
+                  meipass_names = {n.strip().lower() for n in listing.read_text().splitlines() if n.strip()}
+              for p in bundle_files:
+                  pe = pefile.PE(str(p), fast_load=True)
+                  pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
+                  machine = hex(pe.FILE_HEADER.Machine)
+                  print(f"  {p.name} machine={machine}")
+                  chars = pe.OPTIONAL_HEADER.DllCharacteristics
+                  dynamic_base = bool(chars & 0x0040)
+                  nx = bool(chars & 0x0100)
+                  reloc_size = 0
+                  for d in pe.OPTIONAL_HEADER.DATA_DIRECTORY:
+                      if d.name == "IMAGE_DIRECTORY_ENTRY_BASERELOC":
+                          reloc_size = d.Size
+                  print(f"    ImageBase=0x{pe.OPTIONAL_HEADER.ImageBase:x} DllCharacteristics=0x{chars:04x}")
+                  print(f"    DYNAMIC_BASE(ASLR)={dynamic_base} NX_COMPAT={nx} reloc_dir_size={reloc_size}")
+                  if not dynamic_base or reloc_size == 0:
+                      print("    ^ no ASLR / no relocation table: this image cannot be rebased,")
+                      print("      so LoadLibrary fails with ERROR_NOACCESS (998, 'Invalid access to")
+                      print("      memory location') if its preferred base is already occupied.")
+                  for entry in getattr(pe, "DIRECTORY_ENTRY_IMPORT", []):
+                      dep = entry.dll.decode()
+                      where = "IN BUNDLE" if dep.lower() in meipass_names else "not in bundle"
+                      print(f"    imports {dep}  [{where}]")
+                  pe.close()
+          except Exception as exc:
+              print(f"  pefile inspection failed: {type(exc).__name__}: {exc}")
+          '@ | Set-Content -Path $probe -Encoding utf8
+          $listing = Join-Path $cap 'B-meipass-listing.txt'
+          $report = Join-Path $cap 'D-miniupnpc-diagnosis.txt'
+          python $probe $bundleDir $listing 2>&1 | Tee-Object -FilePath $report
+          exit 0
+
+      - name: UPnP verdict
+        if: always()
+        shell: pwsh
+        run: |
+          $cap = Join-Path $env:RUNNER_TEMP 'capture'
+          $hits = Get-ChildItem $cap -Include *.log, *.txt -Recurse -ErrorAction SilentlyContinue |
+            ForEach-Object { Select-String -Path $_.FullName -Pattern 'UPnP|miniupnpc' }
+          if ($hits) {
+            "=== UPnP / miniupnpc lines ==="
+            $hits | ForEach-Object { "$($_.Filename):$($_.LineNumber): $($_.Line)" }
+          } else {
+            "NO UPnP/miniupnpc lines found in any captured log"
+          }
+
+      - name: Upload capture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-smoke-windows
+          path: ${{ runner.temp }}/capture
+          if-no-files-found: warn
+
+  macos-gui:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the packaged macOS GUI
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          gh run download "${RUN_ID:-$DEFAULT_RUN_ID}" -R ${{ github.repository }} \
+            -n "$MAC_ARTIFACT" -D gui-rc
+          ls -la gui-rc
+
+      - name: Mount the dmg and stage the app
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/mnt" "$RUNNER_TEMP/capture"
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/mnt" gui-rc/*.dmg
+          ls -la "$RUNNER_TEMP/mnt"
+          cp -R "$RUNNER_TEMP/mnt/SpaceRouter Proxy.app" "$RUNNER_TEMP/SpaceRouter Proxy.app"
+          hdiutil detach "$RUNNER_TEMP/mnt"
+          xattr -cr "$RUNNER_TEMP/SpaceRouter Proxy.app" || true
+          ls -la "$RUNNER_TEMP/SpaceRouter Proxy.app/Contents/MacOS"
+          codesign -dv --verbose=2 "$RUNNER_TEMP/SpaceRouter Proxy.app" 2>&1 | head -10
+
+      - name: Scenario A — fresh HOME, --smoke-test
+        shell: bash
+        run: |
+          ISO="$RUNNER_TEMP/iso-fresh"; CAP="$RUNNER_TEMP/capture"
+          mkdir -p "$ISO"
+          APP="$RUNNER_TEMP/SpaceRouter Proxy.app/Contents/MacOS/SpaceRouter"
+          ( HOME="$ISO" script -q "$CAP/A-stdout.txt" "$APP" --smoke-test >/dev/null 2>&1 ; echo "exit=$?" >> "$CAP/A-stdout.txt" ) &
+          RUNNER_PID=$!
+          for i in $(seq 1 40); do
+            sleep 1
+            if curl -sf --max-time 2 http://127.0.0.1:19876/ -o "$CAP/A-health.json"; then
+              echo "health endpoint answered after ${i}s:"; cat "$CAP/A-health.json"; echo
+              sleep 2
+              screencapture -x "$CAP/A-desktop.png" 2>&1 || echo "screencapture failed"
+              break
+            fi
+          done
+          for i in $(seq 1 120); do
+            kill -0 $RUNNER_PID 2>/dev/null || break
+            sleep 1
+          done
+          kill -9 $RUNNER_PID 2>/dev/null || true
+          pkill -9 -f "SpaceRouter Proxy.app" 2>/dev/null || true
+          echo "=== A stdout ==="; cat "$CAP/A-stdout.txt" || true
+          echo "=== A HOME tree ==="; find "$ISO" | head -50
+          echo "=== A node log ==="
+          if [ -f "$ISO/.spacerouter/logs/spacerouter-node.log" ]; then
+            cp "$ISO/.spacerouter/logs/spacerouter-node.log" "$CAP/A-spacerouter-node.log"
+            cat "$ISO/.spacerouter/logs/spacerouter-node.log"
+          else
+            echo "NO LOG FILE at $ISO/.spacerouter/logs/spacerouter-node.log"
+          fi
+
+      - name: Scenario B — seeded HOME, normal launch
+        shell: bash
+        run: |
+          ISO="$RUNNER_TEMP/iso-seeded"; CAP="$RUNNER_TEMP/capture"
+          mkdir -p "$ISO/.spacerouter/certs"
+          printf '%s\n' "$SEED_KEY" > "$ISO/.spacerouter/certs/node-identity.key"
+          chmod 600 "$ISO/.spacerouter/certs/node-identity.key"
+          APP="$RUNNER_TEMP/SpaceRouter Proxy.app/Contents/MacOS/SpaceRouter"
+          HOME="$ISO" PYTHONUNBUFFERED=1 "$APP" > "$CAP/B-stdout.txt" 2>&1 &
+          APP_PID=$!
+          sleep 60
+          if kill -0 $APP_PID 2>/dev/null; then echo "still alive after 60s: yes"; else echo "still alive after 60s: NO"; fi
+          screencapture -x "$CAP/B-desktop.png" 2>&1 || echo "screencapture failed"
+          ps -Ao pid,comm | grep -i spacerouter || true
+          kill -TERM $APP_PID 2>/dev/null || true
+          sleep 3
+          kill -9 $APP_PID 2>/dev/null || true
+          pkill -9 -f "SpaceRouter Proxy.app" 2>/dev/null || true
+          echo "=== B stdout ==="; cat "$CAP/B-stdout.txt" || true
+          echo "=== B HOME tree ==="; find "$ISO" | head -50
+          echo "=== B node log ==="
+          if [ -f "$ISO/.spacerouter/logs/spacerouter-node.log" ]; then
+            cp "$ISO/.spacerouter/logs/spacerouter-node.log" "$CAP/B-spacerouter-node.log"
+            cat "$ISO/.spacerouter/logs/spacerouter-node.log"
+          else
+            echo "NO LOG FILE"
+          fi
+
+      - name: Scenario C — fresh HOME, normal launch (onboarding screen)
+        shell: bash
+        run: |
+          ISO="$RUNNER_TEMP/iso-onboard"; CAP="$RUNNER_TEMP/capture"
+          mkdir -p "$ISO"
+          APP="$RUNNER_TEMP/SpaceRouter Proxy.app/Contents/MacOS/SpaceRouter"
+          HOME="$ISO" "$APP" > "$CAP/C-stdout.txt" 2>&1 &
+          APP_PID=$!
+          sleep 30
+          if kill -0 $APP_PID 2>/dev/null; then echo "still alive after 30s: yes"; else echo "still alive after 30s: NO"; fi
+          screencapture -x "$CAP/C-onboarding.png" 2>&1 || echo "screencapture failed"
+          kill -TERM $APP_PID 2>/dev/null || true
+          sleep 3
+          kill -9 $APP_PID 2>/dev/null || true
+          pkill -9 -f "SpaceRouter Proxy.app" 2>/dev/null || true
+          echo "=== C stdout ==="; cat "$CAP/C-stdout.txt" || true
+          echo "=== C HOME tree ==="; find "$ISO" | head -30
+          if [ -f "$ISO/.spacerouter/logs/spacerouter-node.log" ]; then
+            cp "$ISO/.spacerouter/logs/spacerouter-node.log" "$CAP/C-spacerouter-node.log"
+          fi
+
+      - name: Embedded CLI inside the app bundle
+        shell: bash
+        run: |
+          ISO="$RUNNER_TEMP/iso-cli"; CAP="$RUNNER_TEMP/capture"
+          mkdir -p "$ISO/.spacerouter/certs"
+          printf '%s\n' "$SEED_KEY" > "$ISO/.spacerouter/certs/node-identity.key"
+          chmod 600 "$ISO/.spacerouter/certs/node-identity.key"
+          CLI="$RUNNER_TEMP/SpaceRouter Proxy.app/Contents/MacOS/space-router-node"
+          HOME="$ISO" "$CLI" --version || true
+          HOME="$ISO" "$CLI" --log-level INFO > "$CAP/C-cli-stdout.txt" 2>&1 &
+          CLI_PID=$!
+          sleep 40
+          kill -TERM $CLI_PID 2>/dev/null || true
+          sleep 3
+          kill -9 $CLI_PID 2>/dev/null || true
+          echo "=== C stdout ==="; cat "$CAP/C-cli-stdout.txt" || true
+
+      - name: UPnP verdict
+        if: always()
+        shell: bash
+        run: |
+          CAP="$RUNNER_TEMP/capture"
+          if grep -rn "UPnP\|miniupnpc" "$CAP" 2>/dev/null; then :; else echo "NO UPnP/miniupnpc lines found"; fi
+
+      - name: Upload capture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-smoke-macos
+          path: ${{ runner.temp }}/capture
+          if-no-files-found: warn

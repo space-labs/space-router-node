@@ -413,7 +413,23 @@ async def deregister_node(
     logger.info("Deregistered node %s (status → offline)", node_id)
 
 
-def deregister_best_effort_sync(settings: Settings) -> bool:
+async def _resolve_node_ids_for_identity(
+    http_client: httpx.AsyncClient, settings: Settings,
+) -> list[str]:
+    resp = await http_client.get(
+        f"{settings.COORDINATION_API_URL}/nodes",
+        params={"staking_address": _effective_wallet(settings)},
+        timeout=10.0,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    rows = payload.get("nodes", payload) if isinstance(payload, dict) else payload
+    return [row["id"] for row in (rows or []) if row.get("id")]
+
+
+def deregister_best_effort_sync(
+    settings: Settings, node_id: str | None = None,
+) -> bool:
     """Synchronous best-effort deregister — load identity from disk and
     PATCH status to offline.
 
@@ -457,9 +473,30 @@ def deregister_best_effort_sync(settings: Settings) -> bool:
 
     async def _run() -> None:
         async with httpx.AsyncClient() as client:
-            await deregister_node(
-                client, settings, identity_address,
-                identity_key=identity_key,
+            if node_id:
+                await deregister_node(
+                    client, settings, node_id, identity_key=identity_key,
+                )
+                return
+            candidates = await _resolve_node_ids_for_identity(client, settings)
+            if not candidates:
+                raise RuntimeError(
+                    f"no coordination node row for wallet "
+                    f"{_effective_wallet(settings)}",
+                )
+            last_error: Exception | None = None
+            for candidate in candidates:
+                try:
+                    await deregister_node(
+                        client, settings, candidate, identity_key=identity_key,
+                    )
+                    return
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code not in (403, 404):
+                        raise
+                    last_error = exc
+            raise last_error or RuntimeError(
+                f"no node row matched identity {identity_address}",
             )
 
     try:

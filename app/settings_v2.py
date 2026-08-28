@@ -169,6 +169,16 @@ class ReceiptsSection(_Section):
     reaper_interval_seconds: int = 300
 
 
+SECTION_MODELS: dict[str, type[_Section]] = {
+    "node": NodeSection,
+    "wallet": WalletSection,
+    "coordination": CoordinationSection,
+    "escrow": EscrowSection,
+    "claim": ClaimSection,
+    "receipts": ReceiptsSection,
+}
+
+
 def _seed_build_variant() -> str:
     """Read the build-variant seed from the frozen-build helper if present.
 
@@ -350,11 +360,33 @@ class Settings(BaseModel):
 
     @classmethod
     def from_env_mapping(cls, env: dict[str, str]) -> "Settings":
-        """Build a Settings from a dict of ``SR_*`` keys (whatever shape).
+        """Build a Settings from a dict of ``SR_*`` keys (whatever shape)."""
+        fields = cls.env_section_fields(env)
+        kwargs: dict[str, Any] = {}
+        build_variant = fields.pop("build_variant", None)
+        if build_variant is not None:
+            kwargs["build_variant"] = build_variant
+        for name, section_model in SECTION_MODELS.items():
+            if name in fields:
+                kwargs[name] = section_model(**fields[name])
+        return cls(**kwargs)
 
-        Unknown keys are logged at INFO and dropped — clean slate. The mapping
-        table mirrors Section 9 of the v1.5 plan; non-trivial cases are
-        commented inline.
+    @classmethod
+    def env_section_fields(
+        cls, env: dict[str, str], *, report_unknown: bool = True
+    ) -> dict[str, Any]:
+        """Map ``SR_*`` keys onto ``{section_name: {field: value}}``.
+
+        Only keys actually present in *env* appear in the result, which is
+        what lets a caller tell an explicit override apart from a schema
+        default. ``build_variant`` comes back as a top-level string. Values
+        are type-parsed but not schema-validated — validation happens when
+        the caller feeds them to the section models.
+
+        Unknown keys are logged at INFO and dropped — clean slate. The
+        mapping table mirrors Section 9 of the v1.5 plan; non-trivial cases
+        are commented inline. Callers that re-run this on every settings
+        read pass ``report_unknown=False`` to keep the log quiet.
         """
         node: dict[str, Any] = {}
         wallet: dict[str, Any] = {}
@@ -480,34 +512,35 @@ class Settings(BaseModel):
         # "ignoring unknown key X" was alarming enough that real users
         # mistook benign migration leftovers for a config problem
         # (Phase A finding #4).
-        unknown = [k for k in env if k.startswith("SR_") and k not in consumed]
-        for k in unknown:
-            if k in _DEPRECATED_ENV_KEYS:
-                logger.debug("settings: dropping deprecated env key %s (no longer used)", k)
-            else:
-                logger.info(
-                    "settings: ignoring unrecognised env key %s "
-                    "(typo, or moved to settings.json)",
-                    k,
-                )
+        if report_unknown:
+            unknown = [k for k in env if k.startswith("SR_") and k not in consumed]
+            for k in unknown:
+                if k in _DEPRECATED_ENV_KEYS:
+                    logger.debug(
+                        "settings: dropping deprecated env key %s (no longer used)", k
+                    )
+                else:
+                    logger.info(
+                        "settings: ignoring unrecognised env key %s "
+                        "(typo, or moved to settings.json)",
+                        k,
+                    )
 
-        kwargs: dict[str, Any] = {}
+        fields: dict[str, Any] = {}
         if build_variant is not None:
-            kwargs["build_variant"] = build_variant
-        if node:
-            kwargs["node"] = NodeSection(**node)
-        if wallet:
-            kwargs["wallet"] = WalletSection(**wallet)
-        if coordination:
-            kwargs["coordination"] = CoordinationSection(**coordination)
-        if escrow:
-            kwargs["escrow"] = EscrowSection(**escrow)
-        if claim:
-            kwargs["claim"] = ClaimSection(**claim)
-        if receipts:
-            kwargs["receipts"] = ReceiptsSection(**receipts)
+            fields["build_variant"] = build_variant
+        for name, values in (
+            ("node", node),
+            ("wallet", wallet),
+            ("coordination", coordination),
+            ("escrow", escrow),
+            ("claim", claim),
+            ("receipts", receipts),
+        ):
+            if values:
+                fields[name] = values
 
-        return cls(**kwargs)
+        return fields
 
 
 def _parse_bool(v: str) -> bool:

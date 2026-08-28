@@ -116,9 +116,32 @@ def wizard_input(prompt: str, default: str = "", password: bool = False) -> str:
 
 def _stdin_is_interactive() -> bool:
     try:
-        return bool(sys.stdin) and sys.stdin.isatty()
+        if not sys.stdin or not sys.stdin.isatty():
+            return False
     except Exception:
         return False
+    return _has_windows_console() if sys.platform == "win32" else True
+
+
+def _has_windows_console() -> bool:
+    """Whether stdin is a real console rather than a character device.
+
+    Windows ``isatty()`` reports True for NUL, because NUL is a character
+    device. A service, scheduled task or `< NUL` launch therefore looks
+    interactive and drops into the setup wizard. ``GetConsoleMode`` succeeds
+    only for an actual console handle.
+    """
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-10)
+        if handle in (0, -1, None):
+            return False
+        mode = ctypes.c_ulong()
+        return bool(kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+    except Exception:
+        return True
 
 
 def wizard_confirm(prompt: str, default: bool = False) -> bool:

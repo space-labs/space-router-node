@@ -34,6 +34,7 @@ from app.identity import (
 from app.state import NodeState, NodeStateMachine
 from app.version import __version__
 from app.wallet import validate_wallet_address
+from app.cli_ui import _stdin_is_interactive
 
 logger = logging.getLogger(__name__)
 
@@ -531,7 +532,7 @@ def _show_staking_prompt() -> None:
 
     min_amount = _fetch_min_staking_amount()
 
-    if not sys.stdin.isatty():
+    if not _stdin_is_interactive():
         logger.warning(
             "Staking required for rewards: stake at least %s $SPACE at "
             "https://penguinbase.com/dapp/spacestaking",
@@ -592,7 +593,7 @@ def _show_version_check() -> None:
         sys.exit(1)
 
     # Soft update
-    if sys.stdin.isatty():
+    if _stdin_is_interactive():
         console.print(Panel(
             f"[bold white]A new version ({result.latest_version}) is available.\n"
             f"You are running {result.current_version}.[/bold white]\n\n"
@@ -739,7 +740,7 @@ async def _phase_bind(ctx: _NodeContext) -> None:
         host=constants.BIND_ADDRESS,
         port=s.NODE_PORT,
         ssl=ctx.ssl_ctx,
-        reuse_address=True,
+        reuse_address=None if sys.platform == "win32" else True,
     )
     ctx.server = server
     logger.info("Home Node listening on port %d", s.NODE_PORT)
@@ -1218,7 +1219,7 @@ async def _rebind_server_mtls(ctx: _NodeContext) -> None:
     handler = functools.partial(handle_client, settings=s)
     ctx.server = await asyncio.start_server(
         handler, host=constants.BIND_ADDRESS, port=s.NODE_PORT, ssl=ctx.ssl_ctx,
-        reuse_address=True,
+        reuse_address=None if sys.platform == "win32" else True,
     )
 
 
@@ -2223,7 +2224,7 @@ async def _run(
             dashboard = None
             dashboard_task = None
             probe_task = None
-            if own_stop_event and sys.stdin.isatty():
+            if own_stop_event and _stdin_is_interactive():
                 try:
                     from app.cli_ui import StatusDashboard
                     dashboard = StatusDashboard()
@@ -2558,7 +2559,7 @@ def _do_reset() -> bool:
     certs_dir = os.path.dirname(os.path.abspath(s.IDENTITY_KEY_PATH)) or "certs"
     settings_file = cfg_dir / "settings.json"
 
-    if sys.stdin.isatty():
+    if _stdin_is_interactive():
         print("WARNING: This will delete your identity key and all configuration.", flush=True)
         confirm = input("Type YES to confirm: ").strip()
         if confirm != "YES":
@@ -2585,7 +2586,7 @@ def _do_reset() -> bool:
     # Prompt interactively when we have a TTY; bail with an actionable
     # error otherwise so scripted operators don't silently break.
     if _identity_keystore_is_encrypted(s) and not os.environ.get("SR_IDENTITY_PASSPHRASE"):
-        if sys.stdin.isatty():
+        if _stdin_is_interactive():
             import getpass
             passphrase = getpass.getpass("Identity keystore passphrase: ")
             os.environ["SR_IDENTITY_PASSPHRASE"] = passphrase
@@ -2851,13 +2852,21 @@ def _persist_network_mode_to_settings(
 def _apply_cli_args(args: argparse.Namespace) -> None:
     """Override environment variables from CLI arguments.
 
-    CLI args take precedence over .env values. We set os.environ so that
-    pydantic-settings picks them up when load_settings() is called.
+    Exporting each flag as its ``SR_*`` equivalent is what gives flags the
+    top tier of the precedence chain: flag > env var > settings.json >
+    default. ``app.settings_loader.apply_env_overrides`` reads these back
+    on every settings load, so a flag now beats a populated settings.json
+    instead of being silently dropped (QA v1.5.2-test.136 Windows CLI
+    item 3). Writing the var here also overwrites an operator's own
+    exported value, which is the flag-beats-env half of the rule.
 
-    Network-mode flags (``--public-url``, ``--public-port``, ``--no-upnp``)
-    are also persisted to settings.json so the operator doesn't have to
-    re-pass them on every restart — matching the GUI's "Tunnel mode"
-    toggle semantics.
+    Everything set here applies to this run only. The sole exception is
+    the network-mode trio (``--public-url``, ``--public-port``,
+    ``--no-upnp``), which is additionally persisted to settings.json so
+    tunnel-mode operators don't re-pass it on every restart — matching the
+    GUI's "Tunnel mode" toggle semantics. Wallet addresses deliberately do
+    NOT persist: ``--staking-address`` on a one-off debug run must not
+    permanently re-key the node. ``--setup`` is the persisting path.
     """
     if args.port is not None:
         os.environ["SR_NODE_PORT"] = str(args.port)
@@ -2893,7 +2902,7 @@ def _prompt_error_report(error, settings_override=None) -> None:  # noqa: ANN001
 
     if not is_reportable(error.code.value):
         return
-    if not sys.stdin.isatty():
+    if not _stdin_is_interactive():
         return
 
     try:
@@ -2948,7 +2957,7 @@ def _run_node(settings_override=None) -> None:  # noqa: ANN001
     try:
         asyncio.run(_run(settings_override=settings_override))
     except KeystorePassphraseRequired:
-        if sys.stdin.isatty():
+        if _stdin_is_interactive():
             try:
                 passphrase = getpass.getpass("Identity key passphrase: ")
             except (EOFError, KeyboardInterrupt):
@@ -3428,7 +3437,7 @@ def main() -> None:
         if not _do_reset():
             sys.exit(0)
         # Fall through to onboarding wizard
-        if sys.stdin.isatty():
+        if _stdin_is_interactive():
             if not _first_run_setup(args):
                 sys.exit(0)
             _show_version_check()
@@ -3446,7 +3455,7 @@ def main() -> None:
     # rather than silently falling through to a default daemon start
     # (Phase A finding #11). The detect-and-auto-launch wizard path below
     # is unaffected; only the explicit flag is hard-stopped.
-    if args.setup and not sys.stdin.isatty():
+    if args.setup and not _stdin_is_interactive():
         print(
             "Error: --setup requires a TTY (interactive shell).\n"
             "  - To configure non-interactively, edit ~/.spacerouter/settings.json directly.\n"
@@ -3464,7 +3473,7 @@ def main() -> None:
         or not os.path.isfile(s.IDENTITY_KEY_PATH)
         or (not s.STAKING_ADDRESS and s.COORDINATION_API_URL == _default_coordination_url())
     )
-    if needs_setup and sys.stdin.isatty():
+    if needs_setup and _stdin_is_interactive():
         if not _first_run_setup(args):
             sys.exit(0)
         _show_version_check()

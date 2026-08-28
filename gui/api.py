@@ -214,6 +214,16 @@ def _run_async(coro):
         loop.close()
 
 
+def _normalise_wallet_address(value: str) -> "str | None":
+    """Canonical 0x-lowercase form, or None when the value is not an address."""
+    from app.wallet import validate_wallet_address
+
+    try:
+        return validate_wallet_address((value or "").strip())
+    except ValueError:
+        return None
+
+
 def _claim_wallet_address(settings) -> str | None:
     """Best-effort lookup of the identity wallet that broadcasts claimBatch.
 
@@ -402,6 +412,18 @@ class Api:
             _rs.clear_singleton()
         except Exception:  # noqa: BLE001
             pass
+
+        if self._node.has_live_thread():
+            self._node.stop(timeout=10.0)
+            if self._node.has_live_thread():
+                return {
+                    "ok": False,
+                    "error": (
+                        "The previous node session is still shutting down. "
+                        "Quit SpaceRouter from the tray and reopen it."
+                    ),
+                    "error_code": "another_instance_running",
+                }
 
         try:
             self._node.start()
@@ -649,9 +671,10 @@ class Api:
         """
         addr = (address or "").strip()
         if addr:
-            if not re.match(r"^0x[0-9a-fA-F]{40}$", addr):
+            addr = _normalise_wallet_address(addr)
+            if addr is None:
                 return {"ok": False, "error": "Invalid address — expected 0x followed by 40 hex characters"}
-            if addr.lower() == "0x" + "0" * 40:
+            if addr == "0x" + "0" * 40:
                 return {"ok": False, "error": "Zero address cannot receive rewards."}
         try:
             normalised = self._config.save_collection_address(addr)
@@ -728,15 +751,15 @@ class Api:
         # matching the CLI (app/wallet.py validate_wallet_address). Without
         # this the GUI's permissive client regex enabled Start for bare hex
         # but this stricter gate rejected it on submit, so Start did nothing.
-        if not re.match(r"^(0x)?[0-9a-fA-F]{40}$", addr):
+        addr = _normalise_wallet_address(addr)
+        if addr is None:
             return {
                 "ok": False,
                 "status": "invalid",
                 "message": "Invalid address — expected 0x followed by 40 hex characters",
             }
-        addr = "0x" + addr.removeprefix("0x").removeprefix("0X").lower()
         # Zero address never has stake; reject up front.
-        if addr.lower() == "0x" + "0" * 40:
+        if addr == "0x" + "0" * 40:
             return {
                 "ok": False,
                 "status": "invalid",
@@ -1269,7 +1292,9 @@ class Api:
         try:
             from app.config import load_settings
             from app.registration import deregister_best_effort_sync
-            deregister_best_effort_sync(load_settings())
+            deregister_best_effort_sync(
+                load_settings(), self._node.status.node_id,
+            )
         except Exception:
             logger.warning(
                 "Coord deregister failed during fresh restart; continuing",
