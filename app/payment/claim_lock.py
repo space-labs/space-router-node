@@ -235,25 +235,27 @@ def _stamp_holder(handle) -> None:
         pass
 
 
-def _reclaim_stale_lock(lock_path: Path, handle, is_windows: bool):
-    """Ride out a contended lock whose holder is not a live claim.
+def _await_lock_release(lock_path: Path, handle, is_windows: bool):
+    """Retry a contended lock for a short grace, then refuse.
 
-    Returns ``(handle, acquired)``. A live sibling claim is refused
-    immediately — that is the guard the lock exists for. Anything else
-    is retried for a short grace period first: the OS does not always
-    release the lock the instant the holder dies (``msvcrt`` after a
-    Windows ``TerminateProcess``, an orphaned child that inherited the
-    file descriptor from a ``kill -9``'d parent), and a holder killed in
-    the microseconds before it stamped itself needs one beat to be told
-    apart from a genuine sibling. Only once the grace has elapsed with
-    no identifiable owner do we unlink the abandoned inode and take a
-    fresh one — the automated form of the ``rm ~/.spacerouter/claim.lock``
-    workaround.
+    Returns ``(handle, acquired)``. Both primitives in use are released by the
+    OS when the holder dies — POSIX ``flock`` on fd close, Windows
+    ``msvcrt.locking`` on process exit — so a lock that is still contended has
+    a living holder. The grace only covers the window where the OS has not
+    finished releasing it: ``msvcrt`` after a ``TerminateProcess``, or an
+    orphaned child that inherited the descriptor from a killed parent.
+
+    The lock file is never unlinked. Taking a fresh inode while another process
+    still holds the old one lets two claims run at once, which is the single
+    thing this lock exists to prevent, and no stamp inspection can rule that
+    out: an unreadable or unrecognised stamp is not evidence the holder is gone.
+
+    POSIX releases ``flock`` synchronously when the holder dies, so contention
+    there always means a live holder and is refused at once.
     """
+    if not is_windows:
+        return handle, False
     for _ in range(_RECLAIM_ATTEMPTS):
-        pid, image = _stamped_holder(lock_path)
-        if _holder_is_live_claim(pid, image):
-            return handle, False
         time.sleep(_RECLAIM_DELAY_S)
         try:
             handle.close()
@@ -261,32 +263,7 @@ def _reclaim_stale_lock(lock_path: Path, handle, is_windows: bool):
             pass
         handle = _open_lock(lock_path)
         if _try_lock(handle, is_windows):
-            logger.warning(
-                "claim.lock at %s was held by a stale holder (pid=%s) — "
-                "reclaimed once the OS released it.", lock_path, pid,
-            )
             return handle, True
-
-    pid, image = _stamped_holder(lock_path)
-    if _holder_is_live_claim(pid, image):
-        return handle, False
-    try:
-        handle.close()
-    except Exception:
-        pass
-    try:
-        os.unlink(lock_path)
-    except FileNotFoundError:
-        pass
-    except Exception:
-        pass
-    handle = _open_lock(lock_path)
-    if _try_lock(handle, is_windows):
-        logger.warning(
-            "claim.lock at %s was abandoned by pid=%s — reclaiming on a "
-            "fresh lock file.", lock_path, pid,
-        )
-        return handle, True
     return handle, False
 
 
@@ -322,7 +299,7 @@ def acquire_claim_lock(settings) -> Iterator[Path]:
     fd = _open_lock(lock_path)
     try:
         if not _try_lock(fd, is_windows):
-            fd, acquired = _reclaim_stale_lock(lock_path, fd, is_windows)
+            fd, acquired = _await_lock_release(lock_path, fd, is_windows)
             if not acquired:
                 try:
                     fd.close()
