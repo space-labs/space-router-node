@@ -185,6 +185,26 @@ def _run_smoke_tests(window, api: Api) -> None:
     os._exit(exit_code)
 
 
+def _enable_remote_debugging() -> None:
+    """Expose a CDP endpoint when SR_GUI_REMOTE_DEBUGGING_PORT is set.
+
+    The packaged GUI is otherwise undrivable from outside. Setting
+    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS does not work, because pywebview's
+    EdgeChromium backend assigns AdditionalBrowserArguments outright and
+    discards whatever the environment asked for; it does however pass the port
+    through from its own settings. Off unless the variable is set, so an
+    operator build never opens a debugging port.
+    """
+    port = os.environ.get("SR_GUI_REMOTE_DEBUGGING_PORT", "").strip()
+    if not port.isdigit():
+        return
+    try:
+        webview.settings["REMOTE_DEBUGGING_PORT"] = int(port)
+        logger.info("WebView2 remote debugging enabled on port %s", port)
+    except Exception:
+        logger.warning("Could not enable remote debugging on port %s", port, exc_info=True)
+
+
 def main() -> None:
     from app.variant import BUILD_VARIANT
 
@@ -214,6 +234,8 @@ def main() -> None:
         start_health_server(api)
 
     title = "SpaceRouter Proxy [TEST]" if BUILD_VARIANT == "test" else "SpaceRouter Proxy"
+    _enable_remote_debugging()
+
     window = webview.create_window(
         title=title,
         url=_asset_path("index.html"),
